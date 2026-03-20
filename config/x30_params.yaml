@@ -1,0 +1,19 @@
+nav_bridge_node:
+  ros__parameters:
+    # === 运动主机 (103) ===
+    motion_host_ip: "192.168.1.103"
+    motion_host_port: 43893
+    local_recv_port: 43897           # 本地绑定端口, 用于接收103数据
+
+    # === 定时器 ===
+    heartbeat_interval_ms: 200       # 心跳间隔 (≥2Hz, 建议5Hz=200ms)
+    cmd_vel_rate_hz: 50              # 轴指令下发频率 (规格书要求50Hz)
+    cmd_vel_timeout_ms: 5000          # /cmd_vel 控制指令超时时间 (ms)
+
+    # === Frame IDs ===
+    imu_frame_id: "imu_link"
+    odom_frame_id: "odom"
+    base_frame_id: "base_link"
+
+    # === TF ===
+    publish_tf: false                 # 是否发布 odom → base_link TF
