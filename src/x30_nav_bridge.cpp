@@ -635,7 +635,6 @@ void X30NavBridge::ensureControlTakeover() {
     // 立即标记为活跃, 这样 sendHeartbeat 定时器也会参与发送心跳
     if (!was_active) {
         control_active_.store(true);
-        RCLCPP_INFO(this->get_logger(), "🤖 控制接入, 开始自主控制");
     }
 
     // 冷启动时发送更多心跳, 给机器人足够时间注册控制权
@@ -663,9 +662,9 @@ void X30NavBridge::ensureControlTakeover() {
 /// @return true=到达目标状态, false=超时
 bool X30NavBridge::waitForBasicState(const std::vector<BasicState> &targets, int timeout_ms) {
     constexpr int POLL_INTERVAL_MS = 50;  // 轮询间隔
-    constexpr int HB_EVERY = 4;           // 每4次轮询发一次心跳 (~200ms)
-    int elapsed = 0;
-    int poll_count = 0;
+    constexpr int HB_EVERY         = 4;   // 每4次轮询发一次心跳 (~200ms)
+    int elapsed                    = 0;
+    int poll_count                 = 0;
 
     while (elapsed < timeout_ms) {
         // 持续刷新活跃时间
@@ -771,26 +770,57 @@ void X30NavBridge::handleLieDownRequest(
         state = current_basic_state_;
     }
 
-    // 已经趴着了，直接返回成功
+    // 已经趴着了
     if (state == static_cast<uint8_t>(BasicState::LYING_DOWN)) {
         res->success = true;
         res->message = "Robot is already lying down.";
         return;
     }
 
-    if (state == static_cast<uint8_t>(BasicState::GOING_DOWN) ||
-        state == static_cast<uint8_t>(BasicState::SOFT_ESTOP)) {
-        res->success = false;
-        res->message = "Robot is already going down or in estop.";
+    // 正在趴下, 等完成即可
+    if (state == static_cast<uint8_t>(BasicState::GOING_DOWN)) {
+        bool ok      = waitForBasicState({BasicState::LYING_DOWN}, 5000);
+        res->success = ok;
+        res->message = ok ? "Robot has lied down." : "Timeout waiting for lie down.";
         return;
     }
 
-    // 先注册控制权, 再发送指令
+    // 软急停: 发 CMD_STAND_UP_DOWN 直接恢复到趴下
+    if (state == static_cast<uint8_t>(BasicState::SOFT_ESTOP)) {
+        ensureControlTakeover();
+        sendGaitCommand(CMD_STAND_UP_DOWN);
+        RCLCPP_INFO(this->get_logger(), "⏳ 从软急停恢复趴下...");
+        bool ok      = waitForBasicState({BasicState::LYING_DOWN}, 5000);
+        res->success = ok;
+        res->message = ok ? "Robot recovered and lied down." : "Timeout recovering from estop.";
+        if (ok)
+            RCLCPP_INFO(this->get_logger(), "✅ 趴下完成");
+        else
+            RCLCPP_WARN(this->get_logger(), "⚠️ 趴下超时");
+        return;
+    }
+
+    // RL模式 或 踏步运动: 先停止运动 → 力控站立, 再趴下
+    if (state == static_cast<uint8_t>(BasicState::RL_MODE) ||
+        state == static_cast<uint8_t>(BasicState::STEPPING)) {
+        RCLCPP_INFO(this->get_logger(), "⏳ 先停止运动...");
+        ensureControlTakeover();
+        sendGaitCommand(CMD_STAND_UP_DOWN);
+
+        if (!waitForBasicState({BasicState::FORCE_STAND, BasicState::INITIAL_STAND}, 5000)) {
+            res->success = false;
+            res->message = "Timeout stopping motion before lie down.";
+            RCLCPP_WARN(this->get_logger(), "⚠️ 停止运动超时");
+            return;
+        }
+        RCLCPP_INFO(this->get_logger(), "✅ 已停止运动");
+    }
+
+    // 从站立状态(INITIAL_STAND/FORCE_STAND) 趴下
     ensureControlTakeover();
     sendGaitCommand(CMD_STAND_UP_DOWN);
     RCLCPP_INFO(this->get_logger(), "⏳ 等待机器人趴下...");
 
-    // 阻塞等待: 目标状态为 LYING_DOWN
     bool ok = waitForBasicState({BasicState::LYING_DOWN}, 5000);
 
     if (ok) {
@@ -841,9 +871,9 @@ void X30NavBridge::handleForceStandRequest(
 
 bool X30NavBridge::waitForGaitState(const std::vector<GaitState> &targets, int timeout_ms) {
     constexpr int POLL_INTERVAL_MS = 50;
-    constexpr int HB_EVERY = 4;           // 每4次轮询发一次心跳 (~200ms)
-    int elapsed = 0;
-    int poll_count = 0;
+    constexpr int HB_EVERY         = 4;  // 每4次轮询发一次心跳 (~200ms)
+    int elapsed                    = 0;
+    int poll_count                 = 0;
 
     while (elapsed < timeout_ms) {
         last_active_time_.store(std::chrono::steady_clock::now());
@@ -1022,7 +1052,8 @@ void X30NavBridge::handleReadyRequest(
         gait == static_cast<uint8_t>(GaitState::MOUNTAIN)) {
         RCLCPP_INFO(this->get_logger(), "✅ [3/4] 已在RL模式+山地步态, 跳过");
     } else {
-        RCLCPP_INFO(this->get_logger(), "📌 [3/4] 切换山地步态 (state=%d, gait=%d)...", state, gait);
+        RCLCPP_INFO(this->get_logger(), "📌 [3/4] 切换山地步态 (state=%d, gait=%d)...", state,
+                    gait);
         ensureControlTakeover();
         sendGaitCommand(CMD_GAIT_MOUNTAIN);
 
