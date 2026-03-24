@@ -32,7 +32,6 @@ public:
 
     ActionResult stand();
     ActionResult lieDown();
-    ActionResult forceStand();
     ActionResult ready();
 
 private:

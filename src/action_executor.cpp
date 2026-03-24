@@ -136,11 +136,8 @@ bool ActionExecutor::waitForGaitState(const std::vector<GaitState> &targets, int
 ActionResult ActionExecutor::stand() {
     uint8_t state = state_store_.basicState();
 
-    if (state == static_cast<uint8_t>(BasicState::INITIAL_STAND) ||
-        state == static_cast<uint8_t>(BasicState::FORCE_STAND) ||
-        state == static_cast<uint8_t>(BasicState::STEPPING) ||
-        state == static_cast<uint8_t>(BasicState::RL_MODE)) {
-        return {true, "Robot is already standing."};
+    if (state == static_cast<uint8_t>(BasicState::FORCE_STAND)) {
+        return {true, "Robot is already in force stand mode."};
     }
 
     if (state == static_cast<uint8_t>(BasicState::SOFT_ESTOP)) {
@@ -156,29 +153,66 @@ ActionResult ActionExecutor::stand() {
     }
 
     if (state != static_cast<uint8_t>(BasicState::LYING_DOWN) &&
-        state != static_cast<uint8_t>(BasicState::GOING_DOWN)) {
-        return {false, "Robot is not in a state that can stand up (current state=" +
+        state != static_cast<uint8_t>(BasicState::GOING_DOWN) &&
+        state != static_cast<uint8_t>(BasicState::INITIAL_STAND) &&
+        state != static_cast<uint8_t>(BasicState::STEPPING) &&
+        state != static_cast<uint8_t>(BasicState::RL_MODE)) {
+        return {false, "Robot is not in a state that can enter force stand (current state=" +
                            std::to_string(state) + ")."};
     }
 
-    RCLCPP_INFO(logger_, "⏳ 等待机器人起立...");
-    if (!sendCommandDuringTakeoverWindow(CMD_STAND_UP_DOWN,
-                                         {BasicState::STANDING_UP, BasicState::INITIAL_STAND,
-                                          BasicState::FORCE_STAND, BasicState::STEPPING},
-                                         kStandOverallResponseMs, kStandResendIntervalMs, "起立",
-                                         kColdTakeoverWarmupMs)) {
-        RCLCPP_WARN(logger_, "⚠️ 起立指令发出后未观察到早期状态变化");
-        return {false, "No response after stand-up command."};
+    if (state == static_cast<uint8_t>(BasicState::LYING_DOWN) ||
+        state == static_cast<uint8_t>(BasicState::GOING_DOWN)) {
+        RCLCPP_INFO(logger_, "⏳ 等待机器人起立...");
+        if (!sendCommandDuringTakeoverWindow(CMD_STAND_UP_DOWN,
+                                             {BasicState::STANDING_UP, BasicState::INITIAL_STAND,
+                                              BasicState::FORCE_STAND, BasicState::STEPPING},
+                                             kStandOverallResponseMs, kStandResendIntervalMs, "起立",
+                                             kColdTakeoverWarmupMs)) {
+            RCLCPP_WARN(logger_, "⚠️ 起立指令发出后未观察到早期状态变化");
+            return {false, "No response after stand-up command."};
+        }
+
+        if (!waitForBasicState(
+                {BasicState::INITIAL_STAND, BasicState::FORCE_STAND, BasicState::STEPPING}, 6500)) {
+            RCLCPP_WARN(logger_, "⚠️ 起立超时");
+            return {false, "Timeout waiting for robot to stand up."};
+        }
+        RCLCPP_INFO(logger_, "✅ 起立完成");
+        state = state_store_.basicState();
     }
 
-    if (!waitForBasicState(
-            {BasicState::INITIAL_STAND, BasicState::FORCE_STAND, BasicState::STEPPING}, 6500)) {
-        RCLCPP_WARN(logger_, "⚠️ 起立超时");
-        return {false, "Timeout waiting for robot to stand up."};
+    state = state_store_.basicState();
+    if (state == static_cast<uint8_t>(BasicState::RL_MODE) ||
+        state == static_cast<uint8_t>(BasicState::STEPPING)) {
+        RCLCPP_INFO(logger_, "⏳ 先停止运动，回到站立静止态...");
+        if (!sendCommandDuringTakeoverWindow(CMD_STAND_UP_DOWN,
+                                             {BasicState::FORCE_STAND, BasicState::INITIAL_STAND},
+                                             kStopMotionOverallResponseMs,
+                                             kStopMotionResendIntervalMs, "停止运动",
+                                             kWarmTakeoverWarmupMs)) {
+            RCLCPP_WARN(logger_, "⚠️ 从运动状态退回站立超时");
+            return {false, "Timeout stopping motion before entering force stand."};
+        }
+        state = state_store_.basicState();
     }
 
-    RCLCPP_INFO(logger_, "✅ 起立完成");
-    return {true, "Robot has stood up."};
+    if (state == static_cast<uint8_t>(BasicState::INITIAL_STAND)) {
+        RCLCPP_INFO(logger_, "⏳ 切入力控站立...");
+        ensureControlTakeover(kWarmTakeoverWarmupMs, kTakeoverPulseMs);
+        command_sender_(CMD_FORCE_CONTROL);
+        if (!waitForBasicState({BasicState::FORCE_STAND}, 5000)) {
+            RCLCPP_WARN(logger_, "⚠️ 切入力控站立超时");
+            return {false, "Timeout entering force stand mode."};
+        }
+    }
+
+    if (state_store_.basicState() != static_cast<uint8_t>(BasicState::FORCE_STAND)) {
+        return {false, "Robot failed to reach force stand state."};
+    }
+
+    RCLCPP_INFO(logger_, "✅ 已进入力控站立状态");
+    return {true, "Robot is now in force stand mode."};
 }
 
 ActionResult ActionExecutor::lieDown() {
@@ -233,26 +267,6 @@ ActionResult ActionExecutor::lieDown() {
         RCLCPP_WARN(logger_, "⚠️ 趴下超时");
     }
     return {ok, ok ? "Robot has lied down." : "Timeout waiting for robot to lie down."};
-}
-
-ActionResult ActionExecutor::forceStand() {
-    uint8_t state = state_store_.basicState();
-
-    if (state == static_cast<uint8_t>(BasicState::FORCE_STAND)) {
-        return {true, "Robot is already in force stand mode."};
-    }
-
-    RCLCPP_INFO(logger_, "⏳ 等待机器人进入力控站立...");
-    ensureControlTakeover(kWarmTakeoverWarmupMs, kTakeoverPulseMs);
-    command_sender_(CMD_FORCE_CONTROL);
-    bool ok = waitForBasicState({BasicState::FORCE_STAND}, 5000);
-    if (ok) {
-        RCLCPP_INFO(logger_, "✅ 力控站立完成");
-    } else {
-        RCLCPP_WARN(logger_, "⚠️ 力控站立超时");
-    }
-    return {ok, ok ? "Robot is now in force stand mode."
-                   : "Timeout waiting for force stand mode."};
 }
 
 ActionResult ActionExecutor::ready() {

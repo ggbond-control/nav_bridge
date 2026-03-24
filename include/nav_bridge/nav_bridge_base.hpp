@@ -77,16 +77,13 @@ protected:
     // ===================== ROS2 服务接口 =====================
     // -- 服务端 --
     rclcpp::Service<std_srvs::srv::Trigger>::SharedPtr stand_srv_;
-    rclcpp::Service<std_srvs::srv::Trigger>::SharedPtr lie_down_srv_;
-    rclcpp::Service<std_srvs::srv::Trigger>::SharedPtr force_stand_srv_;
+    rclcpp::Service<std_srvs::srv::Trigger>::SharedPtr lie_srv_;
     rclcpp::Service<std_srvs::srv::Trigger>::SharedPtr ready_srv_;
 
     virtual void handleStandRequest(const std::shared_ptr<std_srvs::srv::Trigger::Request> req,
                                     std::shared_ptr<std_srvs::srv::Trigger::Response> res)      = 0;
-    virtual void handleLieDownRequest(const std::shared_ptr<std_srvs::srv::Trigger::Request> req,
-                                      std::shared_ptr<std_srvs::srv::Trigger::Response> res)    = 0;
-    virtual void handleForceStandRequest(const std::shared_ptr<std_srvs::srv::Trigger::Request> req,
-                                         std::shared_ptr<std_srvs::srv::Trigger::Response> res) = 0;
+    virtual void handleLieRequest(const std::shared_ptr<std_srvs::srv::Trigger::Request> req,
+                                  std::shared_ptr<std_srvs::srv::Trigger::Response> res)      = 0;
     virtual void handleReadyRequest(const std::shared_ptr<std_srvs::srv::Trigger::Request> req,
                                     std::shared_ptr<std_srvs::srv::Trigger::Response> res)      = 0;
 

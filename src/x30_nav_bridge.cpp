@@ -91,10 +91,8 @@ bool X30NavBridge::initialize() {
     using namespace std::placeholders;
     stand_srv_ = this->create_service<std_srvs::srv::Trigger>(
         "~/stand", std::bind(&X30NavBridge::handleStandRequest, this, _1, _2));
-    lie_down_srv_ = this->create_service<std_srvs::srv::Trigger>(
-        "~/lie_down", std::bind(&X30NavBridge::handleLieDownRequest, this, _1, _2));
-    force_stand_srv_ = this->create_service<std_srvs::srv::Trigger>(
-        "~/force_stand", std::bind(&X30NavBridge::handleForceStandRequest, this, _1, _2));
+    lie_srv_ = this->create_service<std_srvs::srv::Trigger>(
+        "~/lie", std::bind(&X30NavBridge::handleLieRequest, this, _1, _2));
     ready_srv_ = this->create_service<std_srvs::srv::Trigger>(
         "~/ready", std::bind(&X30NavBridge::handleReadyRequest, this, _1, _2));
 
@@ -597,18 +595,10 @@ void X30NavBridge::handleStandRequest(
     res->message = result.message;
 }
 
-void X30NavBridge::handleLieDownRequest(
+void X30NavBridge::handleLieRequest(
     const std::shared_ptr<std_srvs::srv::Trigger::Request> /*req*/,
     std::shared_ptr<std_srvs::srv::Trigger::Response> res) {
     auto result  = action_executor_->lieDown();
-    res->success = result.success;
-    res->message = result.message;
-}
-
-void X30NavBridge::handleForceStandRequest(
-    const std::shared_ptr<std_srvs::srv::Trigger::Request> /*req*/,
-    std::shared_ptr<std_srvs::srv::Trigger::Response> res) {
-    auto result  = action_executor_->forceStand();
     res->success = result.success;
     res->message = result.message;
 }

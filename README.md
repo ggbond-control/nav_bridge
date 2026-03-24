@@ -34,7 +34,7 @@
    - 给动作服务和 `/cmd_vel` 提供统一的控制保活机制
 
 5. **动作执行层：`ActionExecutor`**
-   - 封装 `stand`、`lie_down`、`force_stand`、`ready`
+   - 封装 `stand`、`lie`、`ready`
    - 负责冷启动接管预热、必要时的重复发令、状态等待和超时判定
    - 是当前所有动作业务逻辑的核心
 
@@ -98,7 +98,7 @@ X30 并不是“发一条动作指令就一定立刻执行”的设备。对于�
 
 ### 2.3 持续接管窗口
 
-当前代码中，`ready` 的起立步骤和 `lie_down` 中的关键阶段不再简单依赖“一次发令 + 一次等待”。
+当前代码中，`ready` 的起立步骤以及 `lie` 中的关键阶段不再简单依赖“一次发令 + 一次等待”。
 
 对于容易受首次接管影响的动作，系统会进入一个**持续接管窗口**：
 
@@ -133,27 +133,18 @@ X30 并不是“发一条动作指令就一定立刻执行”的设备。对于�
 
 ### 3.2 `~/stand`
 
-将机器人从趴下状态拉起到站立相关状态。
+将机器人收敛到**静止、可控、力控站立态**。
 
 当前逻辑会：
 
-- 若已经站立，直接返回成功
+- 若已经处于 `FORCE_STAND`，直接返回成功
 - 若处于软急停，先恢复到趴下
-- 然后执行起立流程
-- 等待进入 `INITIAL_STAND / FORCE_STAND / STEPPING`
+- 若处于趴下或正在趴下，先执行起立流程
+- 若处于 `RL_MODE / STEPPING`，先退回静止站立
+- 若处于 `INITIAL_STAND`，再补一次力控模式切换
+- 最终目标状态是 `FORCE_STAND`
 
-### 3.3 `~/force_stand`
-
-将机器人切换到力控站立状态。
-
-当前逻辑会：
-
-- 若已在 `FORCE_STAND`，直接返回
-- 否则做一次热接管
-- 发送 `CMD_FORCE_CONTROL`
-- 等待进入 `FORCE_STAND`
-
-### 3.4 `~/lie_down`
+### 3.3 `~/lie`
 
 让机器人安全回到趴下状态。
 
@@ -165,7 +156,7 @@ X30 并不是“发一条动作指令就一定立刻执行”的设备。对于�
 - 若处于 `RL_MODE / STEPPING`，先执行“停止运动”阶段回到 `FORCE_STAND / INITIAL_STAND`
 - 然后再执行最终趴下阶段
 
-`lie_down` 当前也复用了持续接管窗口，以提高冷启动或控制刚释放后再次服务调用的稳定性。
+`lie` 当前也复用了持续接管窗口，以提高冷启动或控制刚释放后再次服务调用的稳定性。
 
 ## 4. `/cmd_vel` 速度控制
 
@@ -246,14 +237,13 @@ X30 并不是“发一条动作指令就一定立刻执行”的设备。对于�
 ### 6.3 提供的服务
 
 - `~/stand` (`std_srvs/srv/Trigger`)
-- `~/lie_down` (`std_srvs/srv/Trigger`)
-- `~/force_stand` (`std_srvs/srv/Trigger`)
+- `~/lie` (`std_srvs/srv/Trigger`)
 - `~/ready` (`std_srvs/srv/Trigger`)
 
 说明：
 
-- 旧版本里存在的 `motion` 服务链路已移除
-- 当前业务上不再暴露独立的“开始运动/停止运动”服务接口
+- 当前业务上只保留三个目标态服务：`lie / stand / ready`
+- 旧版本里存在的 `motion` 与 `force_stand` 对外服务链路已移除
 - `ready` 进入山地步态后，机器人会根据底层状态机进入 `RL_MODE`
 
 ## 7. 配置参数
@@ -330,11 +320,11 @@ stateDiagram-v2
     [*] --> LYING_DOWN
 
     LYING_DOWN --> INITIAL_STAND: ~/stand 或 ~/ready
-    INITIAL_STAND --> FORCE_STAND: ~/force_stand 或 ~/ready
+    INITIAL_STAND --> FORCE_STAND: ~/stand 或 ~/ready
     FORCE_STAND --> RL_MODE: ~/ready + 山地步态
 
-    RL_MODE --> FORCE_STAND: ~/lie_down 的停止运动阶段
-    FORCE_STAND --> GOING_DOWN: ~/lie_down
+    RL_MODE --> FORCE_STAND: ~/lie 的停止运动阶段
+    FORCE_STAND --> GOING_DOWN: ~/lie
     GOING_DOWN --> LYING_DOWN: 趴下完成
 
     SOFT_ESTOP --> LYING_DOWN: 恢复阶段
@@ -344,7 +334,7 @@ stateDiagram-v2
 
 `SOFT_ESTOP/LYING_DOWN -> INITIAL_STAND -> FORCE_STAND -> RL_MODE + MOUNTAIN`
 
-如果按 `lie_down` 的完整顺序理解，可以简化为：
+如果按 `lie` 的完整顺序理解，可以简化为：
 
 `RL_MODE/STEPPING -> FORCE_STAND -> GOING_DOWN -> LYING_DOWN`
 
@@ -354,7 +344,8 @@ stateDiagram-v2
 
 - 第一次上电或节点刚启动后，优先先执行一次 `~/ready`
 - 如果刚释放控制权又立刻调用动作服务，允许系统先完成接管预热，不要连续高频猛点服务
-- `~/lie_down` 在 `RL_MODE` 下会先经历“停止运动”阶段，再进入真正趴下阶段，这属于正常流程
+- `~/stand` 的目标不是“仅仅站起来”，而是最终进入 `FORCE_STAND`
+- `~/lie` 在 `RL_MODE` 下会先经历“停止运动”阶段，再进入真正趴下阶段，这属于正常流程
 - `/cmd_vel` 长时间静默后再次接管时，系统会自动重新建立控制会话
 - 若日志中看到“保持接管并继续重发命令”，说明系统正在处理冷启动接管较慢的情况，不一定代表逻辑故障
 
@@ -364,7 +355,7 @@ stateDiagram-v2
 2. 调用一次 `~/ready`
 3. 在 `RL_MODE + MOUNTAIN` 下发送少量 `/cmd_vel`
 4. 停止 `/cmd_vel`，确认控制会话自动释放
-5. 调用 `~/lie_down`
+5. 调用 `~/lie`
 
 如果现场需要分析问题，最值得重点观察的日志关键词包括：
 
@@ -390,9 +381,8 @@ stateDiagram-v2
 
 | 服务名 | 类型 | 作用 |
 | --- | --- | --- |
-| `~/stand` | `std_srvs/srv/Trigger` | 从趴下拉起到站立相关状态 |
-| `~/lie_down` | `std_srvs/srv/Trigger` | 安全退回趴下状态 |
-| `~/force_stand` | `std_srvs/srv/Trigger` | 切入力控站立 |
+| `~/stand` | `std_srvs/srv/Trigger` | 收敛到静止力控站立态 |
+| `~/lie` | `std_srvs/srv/Trigger` | 安全退回趴下状态 |
 | `~/ready` | `std_srvs/srv/Trigger` | 一键进入 `RL_MODE + MOUNTAIN` |
 
 ### 14.2 订阅话题
