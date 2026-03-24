@@ -1,144 +1,427 @@
-# Nav Bridge — ROS2 ↔ X30 机器狗 UDP 导航桥接节点
+# Nav Bridge — ROS2 ↔ 绝影 X30 UDP 导航桥接节点
 
-`nav_bridge` 是一个基于 C++ 编写的 ROS2 节点，充当**导航算法（如 Nav2、SLAM）与机器狗底层之间的桥梁**。它负责将 ROS2 的标准 `/cmd_vel` 速度指令以及服务调用，转换为机器狗底层识别的 UDP 协议报文（遵循 X30 UDP 规格书 V1.0.5），同时将机器狗高频上报的 IMU、足式里程计及状态数据转换为标准 ROS2 话题输出。
+`nav_bridge` 是一个基于 C++ 的 ROS2 节点，用来把上层导航系统的标准接口桥接到绝影 X30 的 UDP 控制协议上。
 
-## 1. 架构概览
+它主要完成两件事：
 
-项目采用了清晰的**三层解耦架构**，以保证通信的实时性和代码的可移植性：
-1. **纯网络层 (`UdpTransport`)**：最底层的纯 Linux Socket 封装，使用 `poll` 机制实现了带超时的非阻塞 UDP 收发。完全剥离 ROS 依赖环境，具备极强复用性。
-2. **抽象网关层 (`NavBridgeBase`)**：负责声明所有 ROS2 相关的事务（订阅 `/cmd_vel`、创建动作控制服务、发布 `/odom` 和 `/imu` 话题等），并定义了一套标准的 C++ 虚函数作业契约，供子类对接协议。
-3. **协议实现层 (`X30NavBridge` + `x30_protocol`)**：核心适配实现。继承基类虚函数，负责深层次的内嵌状态机博弈维护，并将基类的行为调用翻译、重组成遵循 12 字节表头/ 256 字节定长的 UDP 紧凑报文。
+1. 把 ROS2 的 `/cmd_vel` 与动作服务转换成 X30 底层可识别的 UDP 控制报文
+2. 把机器人底层回传的高频状态、IMU、电池和足式里程计转换为标准 ROS2 话题
+
+当前实现基于 `docs/udp_manual.txt` 中的 X30 UDP 接口规格，并针对实际控制接管时序做了额外的业务封装。
+
+## 1. 当前架构
+
+本项目现在不是一个“大类包办所有事情”的实现，而是按职责拆成了几层：
+
+1. **网络层：`UdpTransport`**
+   - 纯 Linux UDP socket 封装
+   - 负责打开端口、发送报文、带超时接收
+   - 不依赖 ROS2
+
+2. **协议层：`x30_protocol.hpp`**
+   - 定义 X30 指令码、状态枚举、结构体和速度映射工具
+   - 包含 `CommandHead`、`RcsData`、`MotionStateData`、`ControllerSensorData`、`BatterySensorData`
+   - 包含各步态的速度上限表
+
+3. **状态仓库：`RobotStateStore`**
+   - 统一保存当前连接状态、基本状态、步态状态
+   - 提供基于 `condition_variable` 的状态等待能力
+   - 替代旧版本里 scattered 的原子变量和轮询等待
+
+4. **控制会话层：`ControlSessionManager`**
+   - 统一管理控制接管、心跳、连接确认查询、超时释放
+   - 区分冷启动会话与热会话
+   - 给动作服务和 `/cmd_vel` 提供统一的控制保活机制
+
+5. **动作执行层：`ActionExecutor`**
+   - 封装 `stand`、`lie_down`、`force_stand`、`ready`
+   - 负责冷启动接管预热、必要时的重复发令、状态等待和超时判定
+   - 是当前所有动作业务逻辑的核心
+
+6. **ROS 装配层：`X30NavBridge`**
+   - 创建 ROS2 订阅、发布器、服务
+   - 启动接收线程和控制定时器
+   - 将底层状态转换为 ROS2 消息
+   - 自己不再承担大段动作状态机逻辑
 
 ```mermaid
 graph TD;
-    A[ROS2 Nav/SLAM/Joy] -->|/cmd_vel /services| B(nav_bridge_node)
-    B -->|topics /tf| A
+    A[ROS2 Nav / SLAM / Control] -->|/cmd_vel / services| B[X30NavBridge]
+    B -->|topics / tf| A
+
     subgraph nav_bridge
-        C[NavBridgeBase] -->|继承| D[X30NavBridge]
-        E[UdpTransport]
-        D -->|协议解析| E
+        B --> C[ActionExecutor]
+        B --> D[ControlSessionManager]
+        B --> E[RobotStateStore]
+        B --> F[UdpTransport]
+        G[x30_protocol]
+        C --> D
+        C --> E
+        B --> G
     end
-    B -->|UDP 指令 43893| F[X30 运动主机]
-    F -->|UDP 状态 200Hz| B
+
+    F -->|UDP 43893| H[X30 运动主机]
+    H -->|状态上报| F
 ```
 
-## 2. 核心状态机与控制逻辑 (核心竞争力)
+## 2. 核心控制逻辑
 
-本节点不仅仅做透传，还在内部实现了一套健壮的控制接管与状态确认逻辑，以应对机器狗执行各种动作时的安全性和连续性要求。
+### 2.1 控制接管
 
-### 2.1 控制权接管 (`ensureControlTakeover`)
+X30 并不是“发一条动作指令就一定立刻执行”的设备。对于长时间静默后第一次发指令的场景，必须先建立稳定的控制会话。
 
-由于机器狗底层控制具有抢占优先级特性，节点如果在长时间静默后想让机器狗执行指令，必须**首先下发足量的心跳报文来夺取控制权**，才能确保后续指令立刻被执行。
+当前实现中的控制接管逻辑如下：
 
-1. **发送心跳与请求连接**：在冷启动（刚发起控制接管操作）时，节点会以 50ms 为间隔循环连续发送 50 次（共计 2.5 秒）的 `CMD_HEARTBEAT` (0x21040001) 心跳包，并附带一次 `CMD_QUERY_103` (0x21020001) 连接确认请求。这个长时间的预热是为了给底层程序预留充足的切换和注册接管源的时间。
-2. **热保活确认**：如果系统自身记录表明当前控制权已经是活跃态（例如正在接受下方的平滑 /cmd_vel 控制），则只会快速补发 3 次（150ms）心跳用于热接管。
-3. **内联心跳下发**：只有经过上述足够数量心跳建立的心跳池积攒，节点才正式下发动作和步态指令。由于动作服务多采用阻塞查询，为了防止此时由于 ROS2 Executor 单线程被阻塞导致控制权掉线，程序内部在阻塞查询基本状态转变的同时也会通过内联机制强行发包保活。
+- 控制会话由 `ControlSessionManager` 管理
+- 会话活跃期间，统一控制定时器会持续发送：
+  - `CMD_HEARTBEAT` (`0x21040001`)
+  - 首次接管时附带 `CMD_QUERY_103` (`0x21020001`)
+- `/cmd_vel` 和动作服务共享同一个控制会话
+- 当一段时间没有控制活动后，会自动：
+  - 发送零速度轴指令
+  - 停止心跳
+  - 释放控制权
 
-### 2.2 状态监测与阻塞等待 (`waitForBasicState` / `waitForGaitState`)
+### 2.2 冷启动与热启动
 
-绝影的很多状态切换需要数秒的时间（如趴下→起立需要数秒）。为了给上层提供可靠的服务，节点实现了**阻塞轮询机制**：
-- 当用户调用服务（如起立、趴下、切换步态等）时，节点先夺取控制权，下发命令。
-- 进入 `while` 循环，每 50ms 轮询一次 `current_basic_state_` 或 `current_gait_state_` 是否达到期望值。
-- 在阻塞轮询的同时，每 200ms 内联发送一次心跳，保持控制权不断。
-- 达到期望状态或者超时（如 5s/8s），向用户返回结果。
+为了提高第一次动作指令的成功率，当前系统区分了两种接管场景：
 
-### 2.3 Ready 一键就绪序列 (`/nav_bridge/ready`)
+- **冷启动接管**
+  - 用于节点启动后第一次动作请求，或者控制会话长时间释放后的首次动作
+  - 预热时间更长
+  - 更适合 `ready` 的第一次起立
 
-上层导航往往需要机器人处于可移动状态才能开始发 `/cmd_vel`。节点通过一个 `ready` 服务，将机器狗从任意状态（哪怕是软急停、摔倒、趴下）自动拉起到完全准备好在山地环境进行导航的状态：
+- **热会话接管**
+  - 用于已经接管过机器人的后续动作
+  - 预热时间更短
+  - 用于力控切换、山地步态切换、趴下等流程
 
-1. **异常恢复 [0/4]**：检查是否在软急停 (`SOFT_ESTOP`)，若是，下发起立/趴下指令让其先恢复为趴下 (`LYING_DOWN`)。
-2. **起立 [1/4]**：状态在趴下时，发送 `CMD_STAND_UP_DOWN`，并阻塞等待状态流转达 `INITIAL_STAND`。
-3. **力控模式 [2/4]**：到达初始站立后，发送 `CMD_FORCE_CONTROL`，阻塞等待至 `FORCE_STAND`。
-4. **山地步态与RL运动 [3/4]**：到达力控站立后，直接发送山地步态指令 `CMD_GAIT_MOUNTAIN`。机器人会自动流转到 `RL_MODE`（因为山地类的 RL 步态有其自己的运动态，不需要单独再发 CMD_MOTION）。最终确保系统落在 `RL_MODE` + `MOUNTAIN`，方可返回成功并开始接受全局速度指令。
+### 2.3 持续接管窗口
 
-### 2.4 安全趴下逻辑 (`/nav_bridge/lie_down`)
+当前代码中，`ready` 的起立步骤和 `lie_down` 中的关键阶段不再简单依赖“一次发令 + 一次等待”。
 
-节点针对当前的杂乱状态（可能是前进中、可能是软急停）适配了各自安全的趴下方案：
-- 若已在 `LYING_DOWN` 或 `GOING_DOWN`，直接返回或等待。
-- 若处于 `SOFT_ESTOP`，发送趴下指令并等待直接恢复。
-- 若处于运动中 (`STEPPING` 或 `RL_MODE`)，**必须先停止运动**，节点先发送趴下指令令其退回力控站立 (`FORCE_STAND`)。
-- 当处于站立状态 (`INITIAL_STAND` 或 `FORCE_STAND`) 时，再次发送指令最终让其趴下 (`LYING_DOWN`)。
+对于容易受首次接管影响的动作，系统会进入一个**持续接管窗口**：
 
-## 3. 速度下发流转 (/cmd_vel)
+- 先做接管预热
+- 发送一次控制命令
+- 在一个总超时窗口内持续保活
+- 若长时间仍无目标状态变化，则按固定间隔重发命令
+- 直到出现目标状态或整体超时
 
-对于运动的平滑控制，数据流如下：
+这个机制是当前提高 `ready` 首次成功率的关键。
 
-1. **接收目标速度**：`cmdVelCallback()` 缓存用户期望的 `vx`, `vy`, `vyaw`，并记录 `last_cmd_vel_time_`。
-2. **超时机制**：如果在 `cmd_vel_timeout_ms_` (默认 500ms) 内未收到新的 `/cmd_vel`，速度自动归零，触发避险停车并释放控制权。
-3. **主控 Timer**：`sendCmdVelTick()` 以设定的频率 (默认 50Hz) 运行：
-   - 如果系统有效（`vx/vy/vyaw` 非0，或处于制动期），将夺取并维持控制权（接续心跳）。
-   - **步态速度约束表**：查询内部通过高频线程更新保存的 `current_gait_state_`，并去结构体表中查找机器狗在当前步态下的理论最大线角速度限值。
-   - **线性映射与滤死区**：`velocityToAxisValue()` 将目标速度按比例映射到 `[-32767, 32767]` 之间的摇杆轴指令。在这层映射转换中不仅做了阈值限幅，还额外处理了底层控制协议固有的死区过滤特性（所有小于 655 的摇杆数据强行归一截断为0，从而规避机器狗怠速漂移）。
-   - 最后将三个向上的轴指令拆包并发送对应的前缀命令码： `CMD_VEL_FORWARD`, `CMD_VEL_LATERAL`, `CMD_VEL_YAW` UDP 包，完成**基于上层平滑速度曲线的“底层伪遥控器脉冲”驱动下发**。
+## 3. 主要服务语义
 
-## 4. 上传数据解析 (UDP -> ROS2)
+### 3.1 `~/ready`
 
-由于 UDP 底层的高频刷写特性，节点在后台启动了一个独立的守护线程 `receiveLoop()`。该线程在底层 `std::thread` 中被阻塞挂起循环，通过 `poll` 提供 50ms 超时监测机制，无情地接收并提取 103 主机吐出的所有 200Hz 高频状态包：由于接发双端在不同线程进行交互处理，系统内部运用了 `std::mutex` 以及 `std::atomic` 对全局标志位进行强行锁住，以此保证所有动作确认博弈的安全判定。
+`ready` 是当前最核心的业务服务，用于把机器人从静态或异常态拉到可导航工作态。
 
-- **`0x1008 RcsData` (200Hz)**：解析基础运行状态，主要用于监控底层反馈的各类错误特征位（电量低、电机及驱动器报错、IMU解算等安全错误），一旦异常通过系统层 `ROS_WARN/ERROR` 外抛预警。
-- **`0x1009 MotionStateData` (200Hz)**：
-  - 更新内部状态池：主要是更新 `current_basic_state_`，`current_gait_state_` 这对极其核心的高频态变量，专供 `/nav_bridge/ready` 等动作服务端的主轮询服务进行比对。
-  - 发布到 ROS 话题：提供底层可视化的 `/robot_basic_state`, `/robot_gait_state`。
-  - **解算并重构 Odom 数据结构**：原生获取的内部机器狗足底里程计存在结构定义以及坐标朝向差异；程序通过内部矩阵拆封，将底层原生位姿 (`x, y, yaw`) 与原生速度 (`vx, vy, vyaw`) 严格按照 ROS 规定的右手笛卡尔系重排转化，随后作为标准的 `nav_msgs/Odometry` 推送给订阅方；内部同样内嵌了向外推流 `odom -> base_link` tf静态/动态树的可选配置机制。
-- **`0x100A ControllerSensorData` (200Hz)**：高频提取原始 `ImuSensorData`，进行角度到弧度的转换与底层缺失的四元数封装重建算位，并发布为标准的 `sensor_msgs/Imu` 数据流。
-- **`0x21050F0A BatterySensorData` (0.5Hz)**：解析并低频发布电池剩余电量信息。
+当前流程如下：
 
-## 5. ROS2 接口详述
+1. 如果在 `SOFT_ESTOP`，先恢复到 `LYING_DOWN`
+2. 若在 `LYING_DOWN / GOING_DOWN`，执行起立
+3. 若起立后处于 `INITIAL_STAND`，切入力控站立
+4. 切换山地步态 `CMD_GAIT_MOUNTAIN`
+5. 等待进入 `RL_MODE + MOUNTAIN`
 
-### 订阅的话题 (Subscribers)
-* `/cmd_vel` (`geometry_msgs/Twist`): 控制机器狗平移和转向的统一速度接口。
+成功后，机器人应当处于：
 
-### 发布的话题 (Publishers)
-* `/imu/data` (`sensor_msgs/Imu`): 200Hz 高频底层 IMU 数据。
-* `/leg_odom` (`nav_msgs/Odometry`): 200Hz 机器狗自身足底计算产生的内部里程计，可用作导航输入。
-* `/robot_basic_state` (`std_msgs/Int32`): 实时上报当前的机器人基本状态（站立、趴下、软急停等）。
-* `/robot_gait_state` (`std_msgs/Int32`): 实时上报机器狗当前步态（行走、山地、楼梯等）。
-* `/battery/level` (`std_msgs/UInt8`): 电量百分比。
+- 基本状态：`RL_MODE`
+- 步态状态：`MOUNTAIN`
 
-### 提供的服务 (Services)
-这些服务底层被赋予了 `夺取控制权 -> 发指令 -> 阻塞验证状态并发送心跳 -> 重试重抛` 的闭环机制。
-* `/nav_bridge/ready` (`std_srvs/Trigger`): 终极命令！将机器狗从任意状态自动恢复，直至调整至最高战备状态（RL模式+山地步态），即可开始接收速度。
-* `/nav_bridge/stand_up_down` (`std_srvs/Trigger`): 简单触发起立与趴下的状态翻转。
-* `/nav_bridge/force_stand` (`std_srvs/Trigger`): 令机器狗进入力控站立状态（松软站姿）。
-* `/nav_bridge/lie_down` (`std_srvs/Trigger`): 绝对安全的退拽命令。从任意态安全优雅地回到平趴原始状态。
-* `/nav_bridge/start_motion` (`std_srvs/Trigger`): 让**普通步态** (如常规行走) 进入 `STEPPING` 原地踏步运动状态。
-* `/nav_bridge/stop_motion` (`std_srvs/Trigger`): 在 `STEPPING` 状态下停止运动退回力控站立。
-* `/nav_bridge/mountain_gait` (`std_srvs/Trigger`): 快速指定切换为山地步态（RL_MODE）。
-* `/nav_bridge/switch_gait` (`std_srvs/SetBool`): 已弃用或保留部分在 越障/行走 基础步态之间切换的需求。
+此时可以接受 `/cmd_vel` 导航速度输入。
 
-## 6. 编译及运行
+### 3.2 `~/stand`
+
+将机器人从趴下状态拉起到站立相关状态。
+
+当前逻辑会：
+
+- 若已经站立，直接返回成功
+- 若处于软急停，先恢复到趴下
+- 然后执行起立流程
+- 等待进入 `INITIAL_STAND / FORCE_STAND / STEPPING`
+
+### 3.3 `~/force_stand`
+
+将机器人切换到力控站立状态。
+
+当前逻辑会：
+
+- 若已在 `FORCE_STAND`，直接返回
+- 否则做一次热接管
+- 发送 `CMD_FORCE_CONTROL`
+- 等待进入 `FORCE_STAND`
+
+### 3.4 `~/lie_down`
+
+让机器人安全回到趴下状态。
+
+当前策略比旧版本更保守，按业务场景分段处理：
+
+- 若已经趴下，直接成功
+- 若正在趴下，只等待最终进入 `LYING_DOWN`
+- 若处于软急停，先恢复趴下
+- 若处于 `RL_MODE / STEPPING`，先执行“停止运动”阶段回到 `FORCE_STAND / INITIAL_STAND`
+- 然后再执行最终趴下阶段
+
+`lie_down` 当前也复用了持续接管窗口，以提高冷启动或控制刚释放后再次服务调用的稳定性。
+
+## 4. `/cmd_vel` 速度控制
+
+`/cmd_vel` 并不会直接在回调里发 UDP，而是走统一控制定时器。
+
+数据流如下：
+
+1. `cmdVelCallback()` 缓存最新的 `vx / vy / vyaw`
+2. `onControlInputUpdated()` 通知 `ControlSessionManager` 有新的控制活动
+3. 统一控制定时器按固定频率运行
+4. 若控制会话活跃：
+   - 发送心跳和连接确认查询
+   - 将速度映射为轴值
+   - 发送三条轴控制指令
+5. 若控制超时：
+   - 发送零速度
+   - 停止心跳
+   - 释放控制权
+
+### 4.1 速度映射
+
+当前速度映射基于 `x30_protocol.hpp` 中的步态速度上限表：
+
+- 前进速度：依据当前步态的 `max_forward / max_backward`
+- 侧移速度：依据 `max_lateral`
+- 角速度：依据 `max_yaw`
+
+之后通过 `velocityToAxisValue()` 映射到 `[-32767, 32767]`。
+
+额外处理：
+
+- 速度超限时自动限幅
+- 小于底层死区阈值时强制归零
+- 侧移和偏航会根据 ROS 坐标系与 X30 遥杆定义差异进行符号变换
+
+## 5. 上行数据解析
+
+当前节点在后台启动一个接收线程 `receiveLoop()`，持续从运动主机接收状态上报。
+
+主要处理以下报文：
+
+- **`0x1008 RcsData`**
+  - 机器人运行状态
+  - 用于日志打印和错误告警
+  - 首次收到时打印机器人名称、控制模式、累计里程与运行时间
+
+- **`0x1009 MotionStateData`**
+  - 当前最关键的状态反馈
+  - 更新 `RobotStateStore`
+  - 更新内部 `RobotState`
+  - 发布 `/robot_basic_state` 与 `/robot_gait_state`
+  - 发布 `/leg_odom`
+  - 可选发布 `odom -> base_link` TF
+
+- **`0x100A ControllerSensorData`**
+  - 解析 IMU 欧拉角、角速度、加速度
+  - 转换为标准 `sensor_msgs/Imu`
+  - 发布 `/imu/data`
+
+- **`0x21050F0A BatterySensorData`**
+  - 发布电池电量百分比 `/battery/level`
+
+## 6. 当前 ROS2 接口
+
+### 6.1 订阅的话题
+
+- `/cmd_vel` (`geometry_msgs/msg/Twist`)
+  - 标准速度控制接口
+
+### 6.2 发布的话题
+
+- `/imu/data` (`sensor_msgs/msg/Imu`)
+- `/leg_odom` (`nav_msgs/msg/Odometry`)
+- `/robot_basic_state` (`std_msgs/msg/Int32`)
+- `/robot_gait_state` (`std_msgs/msg/Int32`)
+- `/battery/level` (`std_msgs/msg/UInt8`)
+
+### 6.3 提供的服务
+
+- `~/stand` (`std_srvs/srv/Trigger`)
+- `~/lie_down` (`std_srvs/srv/Trigger`)
+- `~/force_stand` (`std_srvs/srv/Trigger`)
+- `~/ready` (`std_srvs/srv/Trigger`)
+
+说明：
+
+- 旧版本里存在的 `motion` 服务链路已移除
+- 当前业务上不再暴露独立的“开始运动/停止运动”服务接口
+- `ready` 进入山地步态后，机器人会根据底层状态机进入 `RL_MODE`
+
+## 7. 配置参数
+
+默认参数位于 `config/x30_params.yaml`。
+
+主要参数包括：
+
+- `motion_host_ip`
+- `motion_host_port`
+- `local_recv_port`
+- `heartbeat_interval_ms`
+- `cmd_vel_rate_hz`
+- `cmd_vel_timeout_ms`
+- `imu_frame_id`
+- `odom_frame_id`
+- `base_frame_id`
+- `publish_tf`
+
+## 8. 编译与运行
 
 ```bash
-# 进入工作空间进行编译
 colcon build --packages-select nav_bridge --cmake-args -DCMAKE_BUILD_TYPE=Release -Wno-dev -DCMAKE_EXPORT_COMPILE_COMMANDS=1 --symlink-install
 
-# 环境变量激活
 source install/setup.bash
 
-# 通过 launch 脚本启动（加载内置 config/x30_params.yaml 配置）
 ros2 launch nav_bridge nav_bridge.launch.py
 ```
 
-## 7. 文件逻辑及组织结构
+## 9. 目录结构
 
-```
+```text
 nav_bridge/
 ├── CMakeLists.txt
 ├── package.xml
-├── README.md                      # 即本文档，项目及细节说明
+├── README.md
 ├── config/
-│   └── x30_params.yaml            # 参数配置（UDP 端口、心跳频率、tf使能等）
+│   └── x30_params.yaml
 ├── docs/
-│   └── udp_manual.txt             # 绝影 X30 官方通信手册存档
+│   └── udp_manual.txt
 ├── launch/
-│   └── nav_bridge.launch.py       # ROS2 引导启动脚本
+│   └── nav_bridge.launch.py
 ├── include/nav_bridge/
-│   ├── nav_bridge_base.hpp        # 抽象基类（定义标准 ROS 话题/发布/订阅/服务结构模型）
-│   ├── udp_transport.hpp          # Linux BSD 面向 UDP Socket 标准封装（带基于 select / poll 的非阻塞与超时管理）
-│   ├── x30_protocol.hpp           # 宏大且完整的 X30 协议头文件（常量映射、各传感器和状态机联编结构体、最大线角速度表等）
-│   └── x30_nav_bridge.hpp         # 定义 `X30NavBridge` 派生子类（涉及业务逻辑字段，包括 nav_mode 原子锁跟踪）
+│   ├── action_executor.hpp
+│   ├── control_session_manager.hpp
+│   ├── nav_bridge_base.hpp
+│   ├── robot_state_store.hpp
+│   ├── udp_transport.hpp
+│   ├── x30_nav_bridge.hpp
+│   └── x30_protocol.hpp
 └── src/
-    ├── nav_bridge_node.cpp        # 节点注册点 `main()`, 构造节点参数器并调用 `X30NavBridge`
-    ├── udp_transport.cpp          # UDP 传输收发代码实现
-    └── x30_nav_bridge.cpp         # ※ 核心业务逻辑实现 (心跳及控制权轮询+状态机阻塞流转确认+服务逻辑+Twist到控制指令UDP报文打包的转换映射等)
+    ├── action_executor.cpp
+    ├── nav_bridge_node.cpp
+    ├── udp_transport.cpp
+    └── x30_nav_bridge.cpp
 ```
+
+## 10. 当前实现特点
+
+相较于项目早期版本，当前实现的几个显著特点是：
+
+- 状态等待已改为事件驱动，而不是显式轮询 sleep
+- 心跳与速度发送统一到同一个控制时基
+- 动作状态机从节点类中拆出，集中到 `ActionExecutor`
+- 冷启动接管、热会话接管和服务动作逻辑已显式建模
+- `README` 以当前代码为准，不再描述已经删除或废弃的旧行为
+
+## 11. 服务状态流转
+
+下面这张图描述的是当前最常用的几个服务在业务层面的主要状态流转。
+
+```mermaid
+stateDiagram-v2
+    [*] --> LYING_DOWN
+
+    LYING_DOWN --> INITIAL_STAND: ~/stand 或 ~/ready
+    INITIAL_STAND --> FORCE_STAND: ~/force_stand 或 ~/ready
+    FORCE_STAND --> RL_MODE: ~/ready + 山地步态
+
+    RL_MODE --> FORCE_STAND: ~/lie_down 的停止运动阶段
+    FORCE_STAND --> GOING_DOWN: ~/lie_down
+    GOING_DOWN --> LYING_DOWN: 趴下完成
+
+    SOFT_ESTOP --> LYING_DOWN: 恢复阶段
+```
+
+如果按 `ready` 的完整顺序理解，可以简化为：
+
+`SOFT_ESTOP/LYING_DOWN -> INITIAL_STAND -> FORCE_STAND -> RL_MODE + MOUNTAIN`
+
+如果按 `lie_down` 的完整顺序理解，可以简化为：
+
+`RL_MODE/STEPPING -> FORCE_STAND -> GOING_DOWN -> LYING_DOWN`
+
+## 12. 实机调试建议
+
+当前实现已经能在实机上工作，但从控制时序角度，仍然建议按下面的方式调试和使用：
+
+- 第一次上电或节点刚启动后，优先先执行一次 `~/ready`
+- 如果刚释放控制权又立刻调用动作服务，允许系统先完成接管预热，不要连续高频猛点服务
+- `~/lie_down` 在 `RL_MODE` 下会先经历“停止运动”阶段，再进入真正趴下阶段，这属于正常流程
+- `/cmd_vel` 长时间静默后再次接管时，系统会自动重新建立控制会话
+- 若日志中看到“保持接管并继续重发命令”，说明系统正在处理冷启动接管较慢的情况，不一定代表逻辑故障
+
+建议的最小回归顺序：
+
+1. 启动节点，确认已收到状态包
+2. 调用一次 `~/ready`
+3. 在 `RL_MODE + MOUNTAIN` 下发送少量 `/cmd_vel`
+4. 停止 `/cmd_vel`，确认控制会话自动释放
+5. 调用 `~/lie_down`
+
+如果现场需要分析问题，最值得重点观察的日志关键词包括：
+
+- `心跳已启动, 并已发送连接确认查询`
+- `控制会话激活`
+- `保持接管并继续重发命令`
+- `基本状态: ... -> ...`
+- `步态: ... -> ...`
+
+## 13. 已知实现边界
+
+当前版本有一些明确的工程边界，文档里也一并说明：
+
+- 当前只桥接运动主机 `192.168.1.103:43893`，`percept_udp_` 仍未接入业务流程
+- 控制接管依然是工程策略，不是依赖底层显式 ack
+- 冷启动首次接管的时序比热会话更敏感，因此动作执行器中保留了分阶段保活与重发机制
+- 机器人名称字段当前常见为空字符串，这不影响主控制链路
+- 接收线程可能看到一部分未处理指令码，只要核心状态包正常即可先不视为故障
+
+## 14. 速查表
+
+### 14.1 服务
+
+| 服务名 | 类型 | 作用 |
+| --- | --- | --- |
+| `~/stand` | `std_srvs/srv/Trigger` | 从趴下拉起到站立相关状态 |
+| `~/lie_down` | `std_srvs/srv/Trigger` | 安全退回趴下状态 |
+| `~/force_stand` | `std_srvs/srv/Trigger` | 切入力控站立 |
+| `~/ready` | `std_srvs/srv/Trigger` | 一键进入 `RL_MODE + MOUNTAIN` |
+
+### 14.2 订阅话题
+
+| 话题名 | 类型 | 说明 |
+| --- | --- | --- |
+| `/cmd_vel` | `geometry_msgs/msg/Twist` | 线速度与角速度控制输入 |
+
+### 14.3 发布话题
+
+| 话题名 | 类型 | 说明 |
+| --- | --- | --- |
+| `/imu/data` | `sensor_msgs/msg/Imu` | IMU 数据 |
+| `/leg_odom` | `nav_msgs/msg/Odometry` | 足式里程计 |
+| `/robot_basic_state` | `std_msgs/msg/Int32` | 基本状态码 |
+| `/robot_gait_state` | `std_msgs/msg/Int32` | 步态状态码 |
+| `/battery/level` | `std_msgs/msg/UInt8` | 电池百分比 |
+
+### 14.4 关键参数
+
+| 参数名 | 默认值 | 说明 |
+| --- | --- | --- |
+| `motion_host_ip` | `192.168.1.103` | 运动主机 IP |
+| `motion_host_port` | `43893` | 运动主机端口 |
+| `local_recv_port` | `43897` | 本地 UDP 绑定端口 |
+| `heartbeat_interval_ms` | `200` | 心跳发送周期 |
+| `cmd_vel_rate_hz` | `50` | 速度轴指令发送频率 |
+| `cmd_vel_timeout_ms` | `5000` | `/cmd_vel` 控制超时 |
+| `imu_frame_id` | `imu_link` | IMU frame |
+| `odom_frame_id` | `odom` | 里程计 frame |
+| `base_frame_id` | `base_link` | 机器人本体 frame |
+| `publish_tf` | `false` | 是否发布 `odom -> base_link` TF |
