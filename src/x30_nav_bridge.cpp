@@ -42,6 +42,8 @@ X30NavBridge::X30NavBridge(const rclcpp::NodeOptions &options)
     odom_frame_id_         = this->get_parameter("odom_frame_id").as_string();
     base_frame_id_         = this->get_parameter("base_frame_id").as_string();
     publish_tf_            = this->get_parameter("publish_tf").as_bool();
+
+    control_session_.configure(heartbeat_interval_ms_, cmd_vel_timeout_ms_);
 }
 
 X30NavBridge::~X30NavBridge() {
@@ -95,20 +97,19 @@ bool X30NavBridge::initialize() {
         "~/force_stand", std::bind(&X30NavBridge::handleForceStandRequest, this, _1, _2));
     ready_srv_ = this->create_service<std_srvs::srv::Trigger>(
         "~/ready", std::bind(&X30NavBridge::handleReadyRequest, this, _1, _2));
-    motion_srv_ = this->create_service<std_srvs::srv::Trigger>(
-        "~/motion", std::bind(&X30NavBridge::handleMotionRequest, this, _1, _2));
 
-    // 3. 启动心跳定时器
-    heartbeat_timer_ = this->create_wall_timer(std::chrono::milliseconds(heartbeat_interval_ms_),
-                                               [this]() { this->sendHeartbeat(); });
+    action_executor_ = std::make_unique<ActionExecutor>(
+        this->get_logger(), state_store_, control_session_,
+        [this](const ControlActions &actions) { this->applyControlActions(actions); },
+        [this](uint32_t code) { this->sendGaitCommand(code); });
 
-    // 4. 启动轴指令定频发送定时器
+    // 3. 启动统一控制定时器 (速度发送 + 心跳 + 超时检测)
+    running_ = true;
     int cmd_period_ms = 1000 / cmd_vel_rate_hz_;
     cmd_vel_timer_    = this->create_wall_timer(std::chrono::milliseconds(cmd_period_ms),
                                                 [this]() { this->sendCmdVelTick(); });
 
-    // 5. 启动接收线程
-    running_     = true;
+    // 4. 启动接收线程
     recv_thread_ = std::thread(&X30NavBridge::receiveLoop, this);
 
     RCLCPP_INFO(this->get_logger(), "=== Nav Bridge 初始化完成, 等待机器狗连接... ===");
@@ -135,6 +136,8 @@ void X30NavBridge::shutdown() {
         motion_udp_.send(&zero_cmd, sizeof(zero_cmd));
     }
 
+    control_session_.stop();
+
     motion_udp_.close();
     percept_udp_.close();
 
@@ -146,10 +149,8 @@ void X30NavBridge::shutdown() {
 // ============================================================================
 
 void X30NavBridge::sendVelocityCommand(double vx, double vy, double vyaw) {
-    std::lock_guard<std::mutex> lock(state_mutex_);
-
     // 根据当前步态获取速度上限
-    auto limits = getGaitSpeedLimit(current_gait_state_);
+    auto limits = getGaitSpeedLimit(state_store_.gaitState());
 
     // 映射到轴指令值
     // 注意: vx 对应 CMD_VEL_FORWARD (左摇杆Y), 正值前移
@@ -178,82 +179,54 @@ void X30NavBridge::sendGaitCommand(uint32_t gait_cmd_code) {
 }
 
 // ============================================================================
-// 下行: 心跳
+// 定频发送轴指令
 // ============================================================================
 
-void X30NavBridge::sendHeartbeat() {
-    bool is_active = control_active_.load();
-
-    // 1. 如果没有任何控制输入（速度或服务指令），则停止发送心跳，将控制权还给物理遥控器
-    if (!is_active) {
-        // 首次心跳标志位复位，以便下一次接管时重新确认
-        heartbeat_confirmed_ = false;
-    } else {
-        // 有控制输入时，维持心跳，接管控制权
-        auto cmd = makeSimpleCommand(CMD_HEARTBEAT, 0);
-        motion_udp_.send(&cmd, sizeof(cmd));
-
-        // 首次心跳后发送查询指令确认连接
-        if (!heartbeat_confirmed_) {
-            auto query = makeSimpleCommand(CMD_QUERY_103, 0);
-            motion_udp_.send(&query, sizeof(query));
-            heartbeat_confirmed_ = true;
-            RCLCPP_INFO(this->get_logger(), "心跳已启动, 已发送连接确认查询");
-        }
+void X30NavBridge::applyControlActions(const ControlActions &actions) {
+    if (actions.send_heartbeat) {
+        auto hb = makeSimpleCommand(CMD_HEARTBEAT, 0);
+        motion_udp_.send(&hb, sizeof(hb));
     }
 
-    // ===== 断连检测 =====
-    auto now           = std::chrono::steady_clock::now();
-    auto last          = last_recv_time_.load();
-    bool was_connected = connected_.load();
+    if (actions.send_query) {
+        auto query = makeSimpleCommand(CMD_QUERY_103, 0);
+        motion_udp_.send(&query, sizeof(query));
+        RCLCPP_INFO(this->get_logger(), "心跳已启动, 并已发送连接确认查询(0x21020001)");
+    }
 
-    if (was_connected) {
-        // 超过 2 秒没有收到任何数据 → 判定断连
-        auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(now - last).count();
+    if (actions.send_zero_velocity) {
+        sendVelocityCommand(0.0, 0.0, 0.0);
+    }
+}
+
+void X30NavBridge::sendCmdVelTick() {
+    auto now       = std::chrono::steady_clock::now();
+    auto last_recv = state_store_.lastReceiveTime();
+    if (state_store_.connected()) {
+        auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(now - last_recv).count();
         if (elapsed > 2000) {
-            connected_.store(false);
+            state_store_.markDisconnected();
             robot_state_.store(RobotState::DISCONNECTED);
             RCLCPP_WARN(this->get_logger(), "⚠️ 机器狗连接丢失! (%.1f秒无数据)", elapsed / 1000.0);
         }
     }
-}
 
-// ============================================================================
-// 定频发送轴指令
-// ============================================================================
-
-void X30NavBridge::sendCmdVelTick() {
-    // 检查控制是否活跃 (通过 last_active_time_ 统一判断)
-    auto now        = std::chrono::steady_clock::now();
-    auto last_act   = last_active_time_.load();
-    auto elapsed_ms = std::chrono::duration_cast<std::chrono::milliseconds>(now - last_act).count();
-
-    bool was_active = control_active_.load();
-    bool is_active  = false;
-
-    if (last_act != std::chrono::steady_clock::time_point::min()) {
-        is_active = (elapsed_ms >= 0 && elapsed_ms < cmd_vel_timeout_ms_);
-    }
-
-    if (was_active && !is_active) {
-        // 从活跃→非活跃: 发送一次归零, 然后停止发送, 交还遥控器控制
-        sendVelocityCommand(0.0, 0.0, 0.0);
-        control_active_.store(false);
-        RCLCPP_INFO(this->get_logger(), "🎮 控制超时, 停止发送指令, 遥控器恢复控制");
+    ControlActions actions = control_session_.tick(now);
+    applyControlActions(actions);
+    if (actions.session_stopped) {
+        RCLCPP_INFO(this->get_logger(), "🎮 控制超时, 停止心跳, 遥控器恢复控制");
         return;
     }
 
-    if (!is_active) {
-        // 非活跃状态: 不发送任何控制指令, 让遥控器正常工作
+    if (!actions.active) {
         return;
     }
 
-    if (!was_active && is_active) {
-        control_active_.store(true);
-        RCLCPP_INFO(this->get_logger(), "🤖 控制接入, 开始自主控制");
+    if (actions.session_started) {
+        RCLCPP_INFO(this->get_logger(), "🤖 控制会话激活, 执行控制权获取...");
+        RCLCPP_INFO(this->get_logger(), "🤖 控制权获取完成, 开始自主控制");
     }
 
-    // 活跃状态: 持续发送速度指令 (包括零速也要持续发, 否则机器狗超时停止)
     double vx   = target_vx_.load();
     double vy   = target_vy_.load();
     double vyaw = target_vyaw_.load();
@@ -285,9 +258,9 @@ void X30NavBridge::receiveLoop() {
         total_recv_count++;
 
         // 更新最后接收时间 & 连接状态
-        last_recv_time_.store(std::chrono::steady_clock::now());
-        if (!connected_.load()) {
-            connected_.store(true);
+        bool was_connected = state_store_.connected();
+        state_store_.markPacketReceived(std::chrono::steady_clock::now());
+        if (!was_connected) {
             RCLCPP_INFO(this->get_logger(), "✅ 已连接到机器狗 (首包 code=0x%04X, 大小=%d bytes)",
                         msg.head.code, received);
         }
@@ -373,8 +346,7 @@ void X30NavBridge::processIncomingData() {
 
 void X30NavBridge::handleRcsData(const RcsData &data) {
     // 首次收到 RcsData 时打印机器人名称
-    if (!rcs_received_) {
-        rcs_received_ = true;
+    if (state_store_.markRcsReceived()) {
         RCLCPP_INFO(this->get_logger(), "🐕 机器人名称: %.*s", 15, data.robot_name);
         RCLCPP_INFO(this->get_logger(), "   控制模式: %s, 累计里程: %.1f m, 累计运行: %ld s",
                     data.rcs_state_list.is_nav_mode ? "非手动" : "手动", data.total_mileage / 100.0,
@@ -458,23 +430,15 @@ static const char *gaitStateToStr(uint8_t state) {
 void X30NavBridge::handleMotionState(const MotionStateData &data) {
     rclcpp::Time now = this->now();
 
-    // 更新内部状态
-    uint8_t prev_basic, prev_gait;
-    {
-        std::lock_guard<std::mutex> lock(state_mutex_);
-        prev_basic           = current_basic_state_;
-        prev_gait            = current_gait_state_;
-        current_basic_state_ = data.basic_state;
-        current_gait_state_  = data.gait_state;
-    }
+    MotionStateTransition transition = state_store_.updateMotionState(data.basic_state, data.gait_state);
 
     // 状态变化时打印日志
-    if (data.basic_state != prev_basic) {
-        RCLCPP_INFO(this->get_logger(), "🔄 基本状态: %s → %s", basicStateToStr(prev_basic),
+    if (data.basic_state != transition.previous_basic_state) {
+        RCLCPP_INFO(this->get_logger(), "🔄 基本状态: %s → %s", basicStateToStr(transition.previous_basic_state),
                     basicStateToStr(data.basic_state));
     }
-    if (data.gait_state != prev_gait) {
-        RCLCPP_INFO(this->get_logger(), "🔄 步态: %s → %s", gaitStateToStr(prev_gait),
+    if (data.gait_state != transition.previous_gait_state) {
+        RCLCPP_INFO(this->get_logger(), "🔄 步态: %s → %s", gaitStateToStr(transition.previous_gait_state),
                     gaitStateToStr(data.gait_state));
     }
 
@@ -625,462 +589,45 @@ void X30NavBridge::handleBattery(const BatterySensorData &data) {
 // 服务: 动作控制 (阻塞等待状态反馈)
 // ============================================================================
 
-/// 确保在发送步态指令前已经注册了控制权
-/// 冷启动时发送更多心跳以确保机器人注册成功
-void X30NavBridge::ensureControlTakeover() {
-    last_active_time_.store(std::chrono::steady_clock::now());
-
-    bool was_active = control_active_.load();
-
-    // 立即标记为活跃, 这样 sendHeartbeat 定时器也会参与发送心跳
-    if (!was_active) {
-        control_active_.store(true);
-    }
-
-    // 冷启动时发送更多心跳, 给机器人足够时间注册控制权
-    int count = was_active ? 3 : 50;  // 冷启动2500ms, 热启动150ms
-
-    for (int i = 0; i < count; ++i) {
-        auto hb = makeSimpleCommand(CMD_HEARTBEAT, 0);
-        motion_udp_.send(&hb, sizeof(hb));
-
-        if (!heartbeat_confirmed_) {
-            auto query = makeSimpleCommand(CMD_QUERY_103, 0);
-            motion_udp_.send(&query, sizeof(query));
-            heartbeat_confirmed_ = true;
-            RCLCPP_INFO(this->get_logger(), "心跳已启动, 已发送连接确认查询");
-        }
-
-        std::this_thread::sleep_for(std::chrono::milliseconds(50));
-        last_active_time_.store(std::chrono::steady_clock::now());
-    }
-}
-
-/// 等待机器人基本状态到达目标状态之一
-/// @param targets    目标状态集合 (任一匹配即返回成功)
-/// @param timeout_ms 最大等待时间
-/// @return true=到达目标状态, false=超时
-bool X30NavBridge::waitForBasicState(const std::vector<BasicState> &targets, int timeout_ms) {
-    constexpr int POLL_INTERVAL_MS = 50;  // 轮询间隔
-    constexpr int HB_EVERY         = 4;   // 每4次轮询发一次心跳 (~200ms)
-    int elapsed                    = 0;
-    int poll_count                 = 0;
-
-    while (elapsed < timeout_ms) {
-        // 持续刷新活跃时间
-        last_active_time_.store(std::chrono::steady_clock::now());
-
-        // 内联发送心跳 (服务回调阻塞了执行器, 定时器不会触发)
-        if (poll_count % HB_EVERY == 0) {
-            auto hb = makeSimpleCommand(CMD_HEARTBEAT, 0);
-            motion_udp_.send(&hb, sizeof(hb));
-        }
-
-        uint8_t state;
-        {
-            std::lock_guard<std::mutex> lock(state_mutex_);
-            state = current_basic_state_;
-        }
-
-        for (const auto &t : targets) {
-            if (state == static_cast<uint8_t>(t)) {
-                return true;
-            }
-        }
-
-        std::this_thread::sleep_for(std::chrono::milliseconds(POLL_INTERVAL_MS));
-        elapsed += POLL_INTERVAL_MS;
-        poll_count++;
-    }
-    return false;
-}
-
 void X30NavBridge::handleStandRequest(
     const std::shared_ptr<std_srvs::srv::Trigger::Request> /*req*/,
     std::shared_ptr<std_srvs::srv::Trigger::Response> res) {
-    uint8_t state;
-    {
-        std::lock_guard<std::mutex> lock(state_mutex_);
-        state = current_basic_state_;
-    }
-
-    // 已经站着了，直接返回成功
-    if (state == static_cast<uint8_t>(BasicState::INITIAL_STAND) ||
-        state == static_cast<uint8_t>(BasicState::FORCE_STAND) ||
-        state == static_cast<uint8_t>(BasicState::STEPPING) ||
-        state == static_cast<uint8_t>(BasicState::RL_MODE)) {
-        res->success = true;
-        res->message = "Robot is already standing.";
-        return;
-    }
-
-    // 处理软急停: 先发 CMD_STAND_UP_DOWN 转到 LYING_DOWN
-    if (state == static_cast<uint8_t>(BasicState::SOFT_ESTOP)) {
-        RCLCPP_INFO(this->get_logger(), "⚠️ 机器人在软急停状态, 先恢复到贴下...");
-        ensureControlTakeover();
-        sendGaitCommand(CMD_STAND_UP_DOWN);
-
-        if (!waitForBasicState({BasicState::LYING_DOWN}, 5000)) {
-            res->success = false;
-            res->message = "Timeout recovering from soft estop to lying down.";
-            RCLCPP_WARN(this->get_logger(), "⚠️ 从软急停恢复贴下超时");
-            return;
-        }
-        RCLCPP_INFO(this->get_logger(), "✅ 已恢复到贴下状态");
-        // 更新状态继续执行下面的起立流程
-        state = static_cast<uint8_t>(BasicState::LYING_DOWN);
-    }
-
-    if (state != static_cast<uint8_t>(BasicState::LYING_DOWN) &&
-        state != static_cast<uint8_t>(BasicState::GOING_DOWN)) {
-        res->success = false;
-        res->message =
-            "Robot is not in a state that can stand up (current state=" + std::to_string(state) +
-            ").";
-        return;
-    }
-
-    // 先注册控制权, 再发送指令
-    ensureControlTakeover();
-    sendGaitCommand(CMD_STAND_UP_DOWN);
-    RCLCPP_INFO(this->get_logger(), "⏳ 等待机器人起立...");
-
-    // 阻塞等待: 贴下 → 正在起立 → 初始站立
-    bool ok = waitForBasicState(
-        {BasicState::INITIAL_STAND, BasicState::FORCE_STAND, BasicState::STEPPING},
-        8000);  // 起立可能较慢，给8秒
-
-    if (ok) {
-        res->success = true;
-        res->message = "Robot has stood up.";
-        RCLCPP_INFO(this->get_logger(), "✅ 起立完成");
-    } else {
-        res->success = false;
-        res->message = "Timeout waiting for robot to stand up.";
-        RCLCPP_WARN(this->get_logger(), "⚠️ 起立超时");
-    }
+    auto result  = action_executor_->stand();
+    res->success = result.success;
+    res->message = result.message;
 }
 
 void X30NavBridge::handleLieDownRequest(
     const std::shared_ptr<std_srvs::srv::Trigger::Request> /*req*/,
     std::shared_ptr<std_srvs::srv::Trigger::Response> res) {
-    uint8_t state;
-    {
-        std::lock_guard<std::mutex> lock(state_mutex_);
-        state = current_basic_state_;
-    }
-
-    // 已经趴着了
-    if (state == static_cast<uint8_t>(BasicState::LYING_DOWN)) {
-        res->success = true;
-        res->message = "Robot is already lying down.";
-        return;
-    }
-
-    // 正在趴下, 等完成即可
-    if (state == static_cast<uint8_t>(BasicState::GOING_DOWN)) {
-        bool ok      = waitForBasicState({BasicState::LYING_DOWN}, 5000);
-        res->success = ok;
-        res->message = ok ? "Robot has lied down." : "Timeout waiting for lie down.";
-        return;
-    }
-
-    // 软急停: 发 CMD_STAND_UP_DOWN 直接恢复到趴下
-    if (state == static_cast<uint8_t>(BasicState::SOFT_ESTOP)) {
-        ensureControlTakeover();
-        sendGaitCommand(CMD_STAND_UP_DOWN);
-        RCLCPP_INFO(this->get_logger(), "⏳ 从软急停恢复趴下...");
-        bool ok      = waitForBasicState({BasicState::LYING_DOWN}, 5000);
-        res->success = ok;
-        res->message = ok ? "Robot recovered and lied down." : "Timeout recovering from estop.";
-        if (ok)
-            RCLCPP_INFO(this->get_logger(), "✅ 趴下完成");
-        else
-            RCLCPP_WARN(this->get_logger(), "⚠️ 趴下超时");
-        return;
-    }
-
-    // RL模式 或 踏步运动: 先停止运动 → 力控站立, 再趴下
-    if (state == static_cast<uint8_t>(BasicState::RL_MODE) ||
-        state == static_cast<uint8_t>(BasicState::STEPPING)) {
-        RCLCPP_INFO(this->get_logger(), "⏳ 先停止运动...");
-        ensureControlTakeover();
-        sendGaitCommand(CMD_STAND_UP_DOWN);
-
-        if (!waitForBasicState({BasicState::FORCE_STAND, BasicState::INITIAL_STAND}, 5000)) {
-            res->success = false;
-            res->message = "Timeout stopping motion before lie down.";
-            RCLCPP_WARN(this->get_logger(), "⚠️ 停止运动超时");
-            return;
-        }
-        RCLCPP_INFO(this->get_logger(), "✅ 已停止运动");
-    }
-
-    // 从站立状态(INITIAL_STAND/FORCE_STAND) 趴下
-    ensureControlTakeover();
-    sendGaitCommand(CMD_STAND_UP_DOWN);
-    RCLCPP_INFO(this->get_logger(), "⏳ 等待机器人趴下...");
-
-    bool ok = waitForBasicState({BasicState::LYING_DOWN}, 5000);
-
-    if (ok) {
-        res->success = true;
-        res->message = "Robot has lied down.";
-        RCLCPP_INFO(this->get_logger(), "✅ 趴下完成");
-    } else {
-        res->success = false;
-        res->message = "Timeout waiting for robot to lie down.";
-        RCLCPP_WARN(this->get_logger(), "⚠️ 趴下超时");
-    }
+    auto result  = action_executor_->lieDown();
+    res->success = result.success;
+    res->message = result.message;
 }
 
 void X30NavBridge::handleForceStandRequest(
     const std::shared_ptr<std_srvs::srv::Trigger::Request> /*req*/,
     std::shared_ptr<std_srvs::srv::Trigger::Response> res) {
-    uint8_t state;
-    {
-        std::lock_guard<std::mutex> lock(state_mutex_);
-        state = current_basic_state_;
-    }
-
-    // 已经在力控站立了，直接返回成功
-    if (state == static_cast<uint8_t>(BasicState::FORCE_STAND)) {
-        res->success = true;
-        res->message = "Robot is already in force stand mode.";
-        return;
-    }
-
-    // 先注册控制权, 再发送指令
-    ensureControlTakeover();
-    sendGaitCommand(CMD_FORCE_CONTROL);
-    RCLCPP_INFO(this->get_logger(), "⏳ 等待机器人进入力控站立...");
-
-    // 阻塞等待: 目标状态为 FORCE_STAND
-    bool ok = waitForBasicState({BasicState::FORCE_STAND}, 5000);
-
-    if (ok) {
-        res->success = true;
-        res->message = "Robot is now in force stand mode.";
-        RCLCPP_INFO(this->get_logger(), "✅ 力控站立完成");
-    } else {
-        res->success = false;
-        res->message = "Timeout waiting for force stand mode.";
-        RCLCPP_WARN(this->get_logger(), "⚠️ 力控站立超时");
-    }
-}
-
-bool X30NavBridge::waitForGaitState(const std::vector<GaitState> &targets, int timeout_ms) {
-    constexpr int POLL_INTERVAL_MS = 50;
-    constexpr int HB_EVERY         = 4;  // 每4次轮询发一次心跳 (~200ms)
-    int elapsed                    = 0;
-    int poll_count                 = 0;
-
-    while (elapsed < timeout_ms) {
-        last_active_time_.store(std::chrono::steady_clock::now());
-
-        // 内联发送心跳 (服务回调阻塞了执行器, 定时器不会触发)
-        if (poll_count % HB_EVERY == 0) {
-            auto hb = makeSimpleCommand(CMD_HEARTBEAT, 0);
-            motion_udp_.send(&hb, sizeof(hb));
-        }
-
-        uint8_t gait;
-        {
-            std::lock_guard<std::mutex> lock(state_mutex_);
-            gait = current_gait_state_;
-        }
-
-        for (const auto &t : targets) {
-            if (gait == static_cast<uint8_t>(t)) {
-                return true;
-            }
-        }
-
-        std::this_thread::sleep_for(std::chrono::milliseconds(POLL_INTERVAL_MS));
-        elapsed += POLL_INTERVAL_MS;
-        poll_count++;
-    }
-    return false;
-}
-
-void X30NavBridge::handleMotionRequest(
-    const std::shared_ptr<std_srvs::srv::Trigger::Request> /*req*/,
-    std::shared_ptr<std_srvs::srv::Trigger::Response> res) {
-    uint8_t state;
-    {
-        std::lock_guard<std::mutex> lock(state_mutex_);
-        state = current_basic_state_;
-    }
-
-    // 已经在踏步状态了
-    if (state == static_cast<uint8_t>(BasicState::STEPPING)) {
-        res->success = true;
-        res->message = "Robot is already in motion (stepping).";
-        return;
-    }
-
-    // 需要在力控站立、初始站立或RL状态才能开始运动
-    if (state != static_cast<uint8_t>(BasicState::FORCE_STAND) &&
-        state != static_cast<uint8_t>(BasicState::INITIAL_STAND) &&
-        state != static_cast<uint8_t>(BasicState::RL_MODE)) {
-        res->success = false;
-        res->message =
-            "Robot must be standing to start motion (current state=" + std::to_string(state) + ").";
-        return;
-    }
-
-    ensureControlTakeover();
-    sendGaitCommand(CMD_MOTION);
-    RCLCPP_INFO(this->get_logger(), "⏳ 等待机器人开始运动...");
-
-    bool ok = waitForBasicState({BasicState::STEPPING}, 5000);
-
-    if (ok) {
-        res->success = true;
-        res->message = "Robot is now in motion.";
-        RCLCPP_INFO(this->get_logger(), "✅ 运动已启动");
-    } else {
-        res->success = false;
-        res->message = "Timeout waiting for motion to start.";
-        RCLCPP_WARN(this->get_logger(), "⚠️ 运动启动超时");
-    }
+    auto result  = action_executor_->forceStand();
+    res->success = result.success;
+    res->message = result.message;
 }
 
 void X30NavBridge::handleReadyRequest(
     const std::shared_ptr<std_srvs::srv::Trigger::Request> /*req*/,
     std::shared_ptr<std_srvs::srv::Trigger::Response> res) {
-    RCLCPP_INFO(this->get_logger(), "🚀 收到 ready 指令, 开始执行启动序列...");
-
-    uint8_t state;
-    uint8_t gait;
-    {
-        std::lock_guard<std::mutex> lock(state_mutex_);
-        state = current_basic_state_;
-    }
-
-    // ===== 第0步: 软急停恢复 =====
-    // 状态图: 软急停/摔倒 → [起立/贴下] → 贴下状态
-    if (state == static_cast<uint8_t>(BasicState::SOFT_ESTOP)) {
-        RCLCPP_INFO(this->get_logger(), "📌 [0/5] 机器人在软急停状态, 先恢复到贴下...");
-        ensureControlTakeover();
-        sendGaitCommand(CMD_STAND_UP_DOWN);
-
-        if (!waitForBasicState({BasicState::LYING_DOWN}, 5000)) {
-            res->success = false;
-            res->message = "Ready failed: timeout recovering from soft estop.";
-            RCLCPP_ERROR(this->get_logger(), "❌ Ready 失败: 从软急停恢复超时");
-            return;
-        }
-        RCLCPP_INFO(this->get_logger(), "✅ [0/5] 已恢复到贴下状态");
-
-        // 刷新状态
-        std::lock_guard<std::mutex> lock(state_mutex_);
-        state = current_basic_state_;
-    }
-
-    // ===== 第1步: 起立 =====
-    // 状态图: 贴下 → [起立/贴下] → 正在起立 → 初始站立
-    if (state == static_cast<uint8_t>(BasicState::LYING_DOWN) ||
-        state == static_cast<uint8_t>(BasicState::GOING_DOWN)) {
-        RCLCPP_INFO(this->get_logger(), "📌 [1/5] 起立...");
-        ensureControlTakeover();
-        sendGaitCommand(CMD_STAND_UP_DOWN);
-
-        if (!waitForBasicState(
-                {BasicState::INITIAL_STAND, BasicState::FORCE_STAND, BasicState::STEPPING}, 8000)) {
-            res->success = false;
-            res->message = "Ready failed: timeout at step 1 (stand up).";
-            RCLCPP_ERROR(this->get_logger(), "❌ Ready 失败: 起立超时");
-            return;
-        }
-        RCLCPP_INFO(this->get_logger(), "✅ [1/5] 起立完成");
-    } else if (state == static_cast<uint8_t>(BasicState::INITIAL_STAND) ||
-               state == static_cast<uint8_t>(BasicState::FORCE_STAND) ||
-               state == static_cast<uint8_t>(BasicState::STEPPING) ||
-               state == static_cast<uint8_t>(BasicState::RL_MODE)) {
-        RCLCPP_INFO(this->get_logger(), "✅ [1/5] 已站立, 跳过");
-    } else {
-        res->success = false;
-        res->message = "Ready failed: unexpected state=" + std::to_string(state);
-        RCLCPP_ERROR(this->get_logger(), "❌ Ready 失败: 无法识别的状态=%d", state);
-        return;
-    }
-
-    // 刷新状态
-    {
-        std::lock_guard<std::mutex> lock(state_mutex_);
-        state = current_basic_state_;
-    }
-
-    // ===== 第2步: 力控站立 =====
-    // 状态图: 初始站立 → [力控模式] → 力控站立
-    if (state == static_cast<uint8_t>(BasicState::INITIAL_STAND)) {
-        RCLCPP_INFO(this->get_logger(), "📌 [2/5] 切入力控站立...");
-        ensureControlTakeover();
-        sendGaitCommand(CMD_FORCE_CONTROL);
-
-        if (!waitForBasicState({BasicState::FORCE_STAND}, 5000)) {
-            res->success = false;
-            res->message = "Ready failed: timeout at step 2 (force stand).";
-            RCLCPP_ERROR(this->get_logger(), "❌ Ready 失败: 力控站立超时");
-            return;
-        }
-        RCLCPP_INFO(this->get_logger(), "✅ [2/5] 力控站立完成");
-    } else if (state == static_cast<uint8_t>(BasicState::FORCE_STAND) ||
-               state == static_cast<uint8_t>(BasicState::RL_MODE) ||
-               state == static_cast<uint8_t>(BasicState::STEPPING)) {
-        RCLCPP_INFO(this->get_logger(), "✅ [2/5] 已在力控/运动, 跳过");
-    } else {
-        res->success = false;
-        res->message =
-            "Ready failed: unexpected state for force stand (state=" + std::to_string(state) + ").";
-        RCLCPP_ERROR(this->get_logger(), "❌ Ready 失败: 无法切入力控(state=%d)", state);
-        return;
-    }
-
-    // ===== 第3步: 切换山地步态 → 进入 RL模式 =====
-    // 遥控器实际流程: 力控站立 → [山地步态指令] → RL模式 (gait=MOUNTAIN)
-    // RL模式 就是山地步态下的运动状态, 不需要额外的 CMD_MOTION!
-    {
-        std::lock_guard<std::mutex> lock(state_mutex_);
-        state = current_basic_state_;
-        gait  = current_gait_state_;
-    }
-
-    // 已经在 RL模式+山地步态, 跳过
-    if (state == static_cast<uint8_t>(BasicState::RL_MODE) &&
-        gait == static_cast<uint8_t>(GaitState::MOUNTAIN)) {
-        RCLCPP_INFO(this->get_logger(), "✅ [3/4] 已在RL模式+山地步态, 跳过");
-    } else {
-        RCLCPP_INFO(this->get_logger(), "📌 [3/4] 切换山地步态 (state=%d, gait=%d)...", state,
-                    gait);
-        ensureControlTakeover();
-        sendGaitCommand(CMD_GAIT_MOUNTAIN);
-
-        // 等待步态变为 MOUNTAIN
-        if (!waitForGaitState({GaitState::MOUNTAIN}, 5000)) {
-            res->success = false;
-            res->message = "Ready failed: timeout at step 3 (mountain gait).";
-            RCLCPP_ERROR(this->get_logger(), "❌ Ready 失败: 山地步态切换超时");
-            return;
-        }
-
-        // 等待基本状态进入 RL_MODE
-        if (!waitForBasicState({BasicState::RL_MODE}, 3000)) {
-            RCLCPP_WARN(this->get_logger(), "⚠️ 步态已切换但未进入RL模式, 可能仍可操作");
-        }
-
-        RCLCPP_INFO(this->get_logger(), "✅ [3/4] 山地步态+RL模式 就绪");
-    }
-
-    res->success = true;
-    res->message = "Robot is ready: standing, force control, mountain gait (RL mode).";
-    RCLCPP_INFO(this->get_logger(), "🎉 Ready 序列完成! 机器人已就绪 (RL模式)");
+    auto result  = action_executor_->ready();
+    res->success = result.success;
+    res->message = result.message;
 }
 
 // ============================================================================
 // 基类回调
 // ============================================================================
+
+void X30NavBridge::onControlInputUpdated() {
+    control_session_.noteActivity(std::chrono::steady_clock::now());
+}
 
 void NavBridgeBase::cmdVelCallback(const geometry_msgs::msg::Twist::SharedPtr msg) {
     target_vx_.store(msg->linear.x);
@@ -1089,6 +636,7 @@ void NavBridgeBase::cmdVelCallback(const geometry_msgs::msg::Twist::SharedPtr ms
 
     // 更新最后一次收到有效指令的时间
     last_active_time_.store(std::chrono::steady_clock::now());
+    onControlInputUpdated();
 }
 
 NavBridgeBase::NavBridgeBase(const std::string &node_name, const rclcpp::NodeOptions &options)

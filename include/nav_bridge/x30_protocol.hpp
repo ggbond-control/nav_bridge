@@ -5,6 +5,7 @@
 
 #include <cstdint>
 #include <cstring>
+#include <cmath>
 
 // 协议结构体使用匿名struct/union以匹配官方C接口定义
 
@@ -355,7 +356,13 @@ inline int32_t velocityToAxisValue(float velocity, float max_vel) {
     float ratio = velocity / max_vel;
     if (ratio > 1.0f) ratio = 1.0f;
     if (ratio < -1.0f) ratio = -1.0f;
-    return static_cast<int32_t>(ratio * AXIS_VALUE_MAX);
+    
+    int32_t raw_val = static_cast<int32_t>(ratio * AXIS_VALUE_MAX);
+    // 绝影底层通信摇杆死区过滤，避免小数值带来的怠速漂移
+    if (std::abs(raw_val) < AXIS_DEAD_ZONE) {
+        return 0;
+    }
+    return raw_val;
 }
 
 }  // namespace x30_protocol

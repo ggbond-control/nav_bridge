@@ -57,9 +57,6 @@ protected:
     /// 发送步态切换指令
     virtual void sendGaitCommand(uint32_t gait_cmd_code) = 0;
 
-    /// 发送心跳以维持连接
-    virtual void sendHeartbeat() = 0;
-
     // ===================== 上行接口 (机器人 → ROS2) =====================
 
     /// 处理接收到的数据, 解析并发布为ROS2话题
@@ -83,7 +80,6 @@ protected:
     rclcpp::Service<std_srvs::srv::Trigger>::SharedPtr lie_down_srv_;
     rclcpp::Service<std_srvs::srv::Trigger>::SharedPtr force_stand_srv_;
     rclcpp::Service<std_srvs::srv::Trigger>::SharedPtr ready_srv_;
-    rclcpp::Service<std_srvs::srv::Trigger>::SharedPtr motion_srv_;
 
     virtual void handleStandRequest(const std::shared_ptr<std_srvs::srv::Trigger::Request> req,
                                     std::shared_ptr<std_srvs::srv::Trigger::Response> res)      = 0;
@@ -93,14 +89,11 @@ protected:
                                          std::shared_ptr<std_srvs::srv::Trigger::Response> res) = 0;
     virtual void handleReadyRequest(const std::shared_ptr<std_srvs::srv::Trigger::Request> req,
                                     std::shared_ptr<std_srvs::srv::Trigger::Response> res)      = 0;
-    virtual void handleMotionRequest(const std::shared_ptr<std_srvs::srv::Trigger::Request> req,
-                                     std::shared_ptr<std_srvs::srv::Trigger::Response> res)     = 0;
 
     // ===================== TF =====================
     std::unique_ptr<tf2_ros::TransformBroadcaster> tf_broadcaster_;
 
     // ===================== 定时器 =====================
-    rclcpp::TimerBase::SharedPtr heartbeat_timer_;
     rclcpp::TimerBase::SharedPtr receive_timer_;
     rclcpp::TimerBase::SharedPtr cmd_vel_timer_;  ///< 轴指令定频发送
 
@@ -109,6 +102,7 @@ protected:
 
     // ===================== cmd_vel 回调 =====================
     void cmdVelCallback(const geometry_msgs::msg::Twist::SharedPtr msg);
+    virtual void onControlInputUpdated() {}
 
     // 缓存最新的速度指令
     std::atomic<double> target_vx_{0.0};
@@ -118,7 +112,6 @@ protected:
     // 控制活跃状态跟踪 (超时后停止发送轴指令及心跳, 交还遥控器)
     std::atomic<std::chrono::steady_clock::time_point> last_active_time_{
         std::chrono::steady_clock::time_point::min()};  // 初始为最小值 = 从未收到
-    std::atomic<bool> control_active_{false};
 
     // ===================== 参数 =====================
     std::string imu_frame_id_{"imu_link"};

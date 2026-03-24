@@ -23,6 +23,7 @@ find_package(tf2_geometry_msgs REQUIRED)
 # Nav bridge node executable
 add_executable(nav_bridge_node
   src/nav_bridge_node.cpp
+  src/action_executor.cpp
   src/udp_transport.cpp
   src/x30_nav_bridge.cpp
 )
