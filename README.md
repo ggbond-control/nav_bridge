@@ -28,10 +28,10 @@
    - 提供基于 `condition_variable` 的状态等待能力
    - 替代旧版本里 scattered 的原子变量和轮询等待
 
-4. **控制会话层：`ControlSessionManager`**
-   - 统一管理控制接管、心跳、连接确认查询、超时释放
-   - 区分冷启动会话与热会话
-   - 给动作服务和 `/cmd_vel` 提供统一的控制保活机制
+4. **控制权层：`X30NavBridge` 内部 heartbeat ownership**
+   - 控制权由节点内部显式持有
+   - heartbeat 与 query 由统一控制定时器直接管理
+   - 只会在 `~/release_control` 时显式释放，不再按 `/cmd_vel` 超时自动停心跳
 
 5. **动作执行层：`ActionExecutor`**
    - 封装 `stand`、`lie`、`ready`
@@ -51,11 +51,10 @@ graph TD;
 
     subgraph nav_bridge
         B --> C[ActionExecutor]
-        B --> D[ControlSessionManager]
+        B --> D[Heartbeat / Ownership]
         B --> E[RobotStateStore]
         B --> F[UdpTransport]
         G[x30_protocol]
-        C --> D
         C --> E
         B --> G
     end
@@ -72,35 +71,27 @@ X30 并不是“发一条动作指令就一定立刻执行”的设备。对于�
 
 当前实现中的控制接管逻辑如下：
 
-- 控制会话由 `ControlSessionManager` 管理
-- 会话活跃期间，统一控制定时器会持续发送：
+- 控制权由 `X30NavBridge` 内部显式持有
+- 持有控制权期间，统一控制定时器会持续发送：
   - `CMD_HEARTBEAT` (`0x21040001`)
   - 首次接管时附带 `CMD_QUERY_103` (`0x21020001`)
-- `/cmd_vel` 和动作服务共享同一个控制会话
-- 当一段时间没有控制活动后，会自动：
-  - 发送零速度轴指令
-  - 停止心跳
-  - 释放控制权
+- `/cmd_vel` 和动作服务共享同一份 ownership
+- `/cmd_vel` 超时后只会归零速度，不会自动释放控制权
+- 只有调用 `~/release_control` 才会停止心跳并释放控制权
 
-### 2.2 冷启动与热启动
+### 2.2 统一接管预热
 
-为了提高第一次动作指令的成功率，当前系统区分了两种接管场景：
+当前实现不再区分“冷启动接管”和“热会话接管”两套策略，而是统一采用一个较短的控制预热窗口：
 
-- **冷启动接管**
-  - 用于节点启动后第一次动作请求，或者控制会话长时间释放后的首次动作
-  - 预热时间更长
-  - 更适合 `ready` 的第一次起立
-
-- **热会话接管**
-  - 用于已经接管过机器人的后续动作
-  - 预热时间更短
-  - 用于力控切换、山地步态切换、趴下等流程
+- 动作服务发关键指令前，会先做一次 heartbeat/query 预热
+- 预热结束后再发送对应控制命令
+- 这样可以在不引入复杂冷热状态机的情况下，保持服务调用的稳定性
 
 ### 2.3 持续接管窗口
 
 当前代码中，`ready` 的起立步骤以及 `lie` 中的关键阶段不再简单依赖“一次发令 + 一次等待”。
 
-对于容易受首次接管影响的动作，系统会进入一个**持续接管窗口**：
+对于 `CMD_STAND_UP_DOWN`、`CMD_MOTION` 这类 toggle 型命令，系统会进入一个**持续接管窗口**：
 
 - 先做接管预热
 - 发送一次控制命令
@@ -108,7 +99,7 @@ X30 并不是“发一条动作指令就一定立刻执行”的设备。对于�
 - 若长时间仍无目标状态变化，则按固定间隔重发命令
 - 直到出现目标状态或整体超时
 
-这个机制是当前提高 `ready` 首次成功率的关键。
+这个机制的作用不是抽象所有命令，而是针对容易受时序影响的 toggle 型阶段做保守重试。
 
 ## 3. 主要服务语义
 
@@ -140,7 +131,8 @@ X30 并不是“发一条动作指令就一定立刻执行”的设备。对于�
 - 若已经处于 `FORCE_STAND`，直接返回成功
 - 若处于软急停，先恢复到趴下
 - 若处于趴下或正在趴下，先执行起立流程
-- 若处于 `RL_MODE / STEPPING`，先退回静止站立
+- 若处于 `RL_MODE`，先发送 `CMD_GAIT_WALK`，等待步态进入 `WALK`，再等待基本状态进入 `STEPPING`
+- 若处于 `STEPPING`，再发送 `CMD_MOTION` 停止运动
 - 若处于 `INITIAL_STAND`，再补一次力控模式切换
 - 最终目标状态是 `FORCE_STAND`
 
@@ -153,10 +145,11 @@ X30 并不是“发一条动作指令就一定立刻执行”的设备。对于�
 - 若已经趴下，直接成功
 - 若正在趴下，只等待最终进入 `LYING_DOWN`
 - 若处于软急停，先恢复趴下
-- 若处于 `RL_MODE / STEPPING`，先执行“停止运动”阶段回到 `FORCE_STAND / INITIAL_STAND`
-- 然后再执行最终趴下阶段
+- 若处于 `RL_MODE / STEPPING`，先发送一次 `CMD_STAND_UP_DOWN` 把机器人从运动态拉回“趴下链”
+- 如果已经进入 `GOING_DOWN / LYING_DOWN`，则直接等待最终趴下
+- 如果只是回到 `FORCE_STAND / INITIAL_STAND`，再补一次 `CMD_STAND_UP_DOWN` 进入最终趴下阶段
 
-`lie` 当前也复用了持续接管窗口，以提高冷启动或控制刚释放后再次服务调用的稳定性。
+`lie` 当前也复用了持续接管窗口，以提高首次接管或刚释放控制权后再次服务调用的稳定性。
 
 ## 4. `/cmd_vel` 速度控制
 
@@ -165,15 +158,14 @@ X30 并不是“发一条动作指令就一定立刻执行”的设备。对于�
 数据流如下：
 
 1. `cmdVelCallback()` 缓存最新的 `vx / vy / vyaw`
-2. `onControlInputUpdated()` 通知 `ControlSessionManager` 有新的控制活动
+2. `onControlInputUpdated()` 记录新的速度输入时间
 3. 统一控制定时器按固定频率运行
-4. 若控制会话活跃：
+4. 若当前持有控制权：
    - 发送心跳和连接确认查询
-   - 将速度映射为轴值
-   - 发送三条轴控制指令
-5. 若控制超时：
-   - 发送零速度
-   - 停止心跳
+   - 若 `/cmd_vel` 仍在保鲜时间内，则将速度映射为轴值并发送三条轴控制指令
+   - 若 `/cmd_vel` 已超时，则持续发送零速度
+5. 只有收到 `~/release_control`：
+   - 才停止心跳
    - 释放控制权
 
 ### 4.1 速度映射
@@ -239,10 +231,12 @@ X30 并不是“发一条动作指令就一定立刻执行”的设备。对于�
 - `~/stand` (`std_srvs/srv/Trigger`)
 - `~/lie` (`std_srvs/srv/Trigger`)
 - `~/ready` (`std_srvs/srv/Trigger`)
+- `~/release_control` (`std_srvs/srv/Trigger`)
 
 说明：
 
 - 当前业务上只保留三个目标态服务：`lie / stand / ready`
+- `~/release_control` 用于显式停止 heartbeat 并交还控制权
 - 旧版本里存在的 `motion` 与 `force_stand` 对外服务链路已移除
 - `ready` 进入山地步态后，机器人会根据底层状态机进入 `RL_MODE`
 
@@ -258,6 +252,7 @@ X30 并不是“发一条动作指令就一定立刻执行”的设备。对于�
 - `heartbeat_interval_ms`
 - `cmd_vel_rate_hz`
 - `cmd_vel_timeout_ms`
+- `startup_acquire_control`
 - `imu_frame_id`
 - `odom_frame_id`
 - `base_frame_id`
@@ -288,7 +283,6 @@ nav_bridge/
 │   └── nav_bridge.launch.py
 ├── include/nav_bridge/
 │   ├── action_executor.hpp
-│   ├── control_session_manager.hpp
 │   ├── nav_bridge_base.hpp
 │   ├── robot_state_store.hpp
 │   ├── udp_transport.hpp
@@ -307,8 +301,9 @@ nav_bridge/
 
 - 状态等待已改为事件驱动，而不是显式轮询 sleep
 - 心跳与速度发送统一到同一个控制时基
+- heartbeat ownership 已并回 `X30NavBridge`，不再通过独立 session manager 管理
 - 动作状态机从节点类中拆出，集中到 `ActionExecutor`
-- 冷启动接管、热会话接管和服务动作逻辑已显式建模
+- 控制预热与动作逻辑已收敛，不再保留冷热接管两套显式状态
 - `README` 以当前代码为准，不再描述已经删除或废弃的旧行为
 
 ## 11. 服务状态流转
@@ -323,7 +318,9 @@ stateDiagram-v2
     INITIAL_STAND --> FORCE_STAND: ~/stand 或 ~/ready
     FORCE_STAND --> RL_MODE: ~/ready + 山地步态
 
-    RL_MODE --> FORCE_STAND: ~/lie 的停止运动阶段
+    RL_MODE --> STEPPING: ~/stand 先切 WALK
+    STEPPING --> FORCE_STAND: ~/stand 再停 motion
+    RL_MODE --> GOING_DOWN: ~/lie 可直接进入趴下链
     FORCE_STAND --> GOING_DOWN: ~/lie
     GOING_DOWN --> LYING_DOWN: 趴下完成
 
@@ -336,31 +333,36 @@ stateDiagram-v2
 
 如果按 `lie` 的完整顺序理解，可以简化为：
 
-`RL_MODE/STEPPING -> FORCE_STAND -> GOING_DOWN -> LYING_DOWN`
+`RL_MODE/STEPPING -> (退出运动态) -> GOING_DOWN/LYING_DOWN`
 
 ## 12. 实机调试建议
 
 当前实现已经能在实机上工作，但从控制时序角度，仍然建议按下面的方式调试和使用：
 
-- 第一次上电或节点刚启动后，优先先执行一次 `~/ready`
+- 第一次上电或节点刚启动后，如果启用了 `startup_acquire_control`，节点会立即持有控制权
 - 如果刚释放控制权又立刻调用动作服务，允许系统先完成接管预热，不要连续高频猛点服务
 - `~/stand` 的目标不是“仅仅站起来”，而是最终进入 `FORCE_STAND`
-- `~/lie` 在 `RL_MODE` 下会先经历“停止运动”阶段，再进入真正趴下阶段，这属于正常流程
-- `/cmd_vel` 长时间静默后再次接管时，系统会自动重新建立控制会话
-- 若日志中看到“保持接管并继续重发命令”，说明系统正在处理冷启动接管较慢的情况，不一定代表逻辑故障
+- `~/stand` 从 `RL_MODE` 收敛时，会先切 `WALK`，等待进入 `STEPPING`，再停止 motion
+- `~/lie` 在 `RL_MODE` 下不简单复用 `stand` 的停止运动逻辑，而是优先进入“趴下链”
+- 如果启动时已接管控制权，`/cmd_vel` 长时间静默只会归零速度，不会自动释放控制权
+- 若日志中看到“保持接管并继续重发命令”，说明系统正在处理 toggle 型命令阶段的保守重试，不一定代表逻辑故障
 
 建议的最小回归顺序：
 
 1. 启动节点，确认已收到状态包
 2. 调用一次 `~/ready`
 3. 在 `RL_MODE + MOUNTAIN` 下发送少量 `/cmd_vel`
-4. 停止 `/cmd_vel`，确认控制会话自动释放
-5. 调用 `~/lie`
+4. 停止 `/cmd_vel`，确认速度归零但控制权仍保持
+5. 调用一次 `~/stand`，确认 `RL -> WALK -> STEPPING -> FORCE_STAND` 路径正确
+6. 调用 `~/lie`
+7. 调用 `~/release_control`，确认 heartbeat 停止并交还控制权
 
 如果现场需要分析问题，最值得重点观察的日志关键词包括：
 
 - `心跳已启动, 并已发送连接确认查询`
 - `控制会话激活`
+- `收到 release_control 请求`
+- `控制权已释放，心跳已停止`
 - `保持接管并继续重发命令`
 - `基本状态: ... -> ...`
 - `步态: ... -> ...`
@@ -371,7 +373,7 @@ stateDiagram-v2
 
 - 当前只桥接运动主机 `192.168.1.103:43893`，`percept_udp_` 仍未接入业务流程
 - 控制接管依然是工程策略，不是依赖底层显式 ack
-- 冷启动首次接管的时序比热会话更敏感，因此动作执行器中保留了分阶段保活与重发机制
+- 动作执行器对 `CMD_STAND_UP_DOWN`、`CMD_MOTION` 这类 toggle 型命令仍保留了分阶段保活与重发机制
 - 机器人名称字段当前常见为空字符串，这不影响主控制链路
 - 接收线程可能看到一部分未处理指令码，只要核心状态包正常即可先不视为故障
 
@@ -384,6 +386,7 @@ stateDiagram-v2
 | `~/stand` | `std_srvs/srv/Trigger` | 收敛到静止力控站立态 |
 | `~/lie` | `std_srvs/srv/Trigger` | 安全退回趴下状态 |
 | `~/ready` | `std_srvs/srv/Trigger` | 一键进入 `RL_MODE + MOUNTAIN` |
+| `~/release_control` | `std_srvs/srv/Trigger` | 显式停止 heartbeat 并释放控制权 |
 
 ### 14.2 订阅话题
 
@@ -408,9 +411,10 @@ stateDiagram-v2
 | `motion_host_ip` | `192.168.1.103` | 运动主机 IP |
 | `motion_host_port` | `43893` | 运动主机端口 |
 | `local_recv_port` | `43897` | 本地 UDP 绑定端口 |
-| `heartbeat_interval_ms` | `200` | 心跳发送周期 |
+| `heartbeat_interval_ms` | `200` | 持有控制权期间的心跳发送周期 |
 | `cmd_vel_rate_hz` | `50` | 速度轴指令发送频率 |
-| `cmd_vel_timeout_ms` | `5000` | `/cmd_vel` 控制超时 |
+| `cmd_vel_timeout_ms` | `5000` | `/cmd_vel` 速度输入保鲜时间，超时后自动发零速度 |
+| `startup_acquire_control` | `true` | 节点启动后是否立即接管并持续保持 heartbeat |
 | `imu_frame_id` | `imu_link` | IMU frame |
 | `odom_frame_id` | `odom` | 里程计 frame |
 | `base_frame_id` | `base_link` | 机器人本体 frame |

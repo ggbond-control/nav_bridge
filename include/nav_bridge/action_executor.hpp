@@ -10,7 +10,6 @@
 
 #include <rclcpp/rclcpp.hpp>
 
-#include "nav_bridge/control_session_manager.hpp"
 #include "nav_bridge/robot_state_store.hpp"
 #include "nav_bridge/x30_protocol.hpp"
 
@@ -23,12 +22,11 @@ struct ActionResult {
 
 class ActionExecutor {
 public:
-    using ControlApplier = std::function<void(const ControlActions &)>;
+    using ControlWarmup = std::function<void(int, int)>;
     using CommandSender  = std::function<void(uint32_t)>;
 
     ActionExecutor(rclcpp::Logger logger, RobotStateStore &state_store,
-                   ControlSessionManager &control_session, ControlApplier control_applier,
-                   CommandSender command_sender);
+                   ControlWarmup control_warmup, CommandSender command_sender);
 
     ActionResult stand();
     ActionResult lieDown();
@@ -49,8 +47,7 @@ private:
 
     rclcpp::Logger logger_;
     RobotStateStore &state_store_;
-    ControlSessionManager &control_session_;
-    ControlApplier control_applier_;
+    ControlWarmup control_warmup_;
     CommandSender command_sender_;
 };
 

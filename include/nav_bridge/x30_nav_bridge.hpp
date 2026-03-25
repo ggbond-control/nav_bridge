@@ -13,7 +13,6 @@
 
 #include "nav_bridge/action_executor.hpp"
 #include "nav_bridge/nav_bridge_base.hpp"
-#include "nav_bridge/control_session_manager.hpp"
 #include "nav_bridge/robot_state_store.hpp"
 #include "nav_bridge/udp_transport.hpp"
 #include "nav_bridge/x30_protocol.hpp"
@@ -45,6 +44,15 @@ protected:
         std::shared_ptr<std_srvs::srv::Trigger::Response> res) override;
 
 private:
+    struct ControlPulse {
+        bool session_started{false};
+        bool session_stopped{false};
+        bool send_heartbeat{false};
+        bool send_query{false};
+        bool send_zero_velocity{false};
+        bool active{false};
+    };
+
     // ===================== UDP 通信 =====================
     UdpTransport motion_udp_;   ///< 与103运动主机通信
     UdpTransport percept_udp_;  ///< 与105感知主机通信 (可选)
@@ -54,7 +62,12 @@ private:
     void receiveLoop();
 
     // ===================== 数据解析 & 发布 =====================
-    void applyControlActions(const ControlActions &actions);
+    void applyControlActions(const ControlPulse &actions);
+    void acquireControl();
+    bool releaseControlOwnership();
+    void warmupControl(int warmup_ms, int pulse_ms);
+    bool isControlInputFresh(std::chrono::steady_clock::time_point now) const;
+    ControlPulse evaluateControlPulse(std::chrono::steady_clock::time_point now, bool force_heartbeat);
     void handleRcsData(const x30_protocol::RcsData &data);
     void handleMotionState(const x30_protocol::MotionStateData &data);
     void handleControllerSensor(const x30_protocol::ControllerSensorData &data);
@@ -70,10 +83,18 @@ private:
     int heartbeat_interval_ms_;
     int cmd_vel_rate_hz_;
     int cmd_vel_timeout_ms_;
+    bool startup_acquire_control_;
+
+    // ===================== 控制权 & 心跳 =====================
+    mutable std::mutex control_mutex_;
+    bool control_latched_{false};
+    bool control_session_started_{false};
+    bool control_query_sent_{false};
+    std::chrono::steady_clock::time_point last_heartbeat_sent_{
+        std::chrono::steady_clock::time_point::min()};
 
     // ===================== 业务模块 =====================
     RobotStateStore state_store_;
-    ControlSessionManager control_session_;
     std::unique_ptr<ActionExecutor> action_executor_;
 };
 

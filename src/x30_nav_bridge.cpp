@@ -25,7 +25,8 @@ X30NavBridge::X30NavBridge(const rclcpp::NodeOptions &options)
     this->declare_parameter("local_recv_port", 43897);
     this->declare_parameter("heartbeat_interval_ms", HEARTBEAT_INTERVAL_MS);
     this->declare_parameter("cmd_vel_rate_hz", CMD_VEL_RATE_HZ);
-    this->declare_parameter("cmd_vel_timeout_ms", 500);
+    this->declare_parameter("cmd_vel_timeout_ms", 5000);
+    this->declare_parameter("startup_acquire_control", true);
     this->declare_parameter("imu_frame_id", std::string("imu_link"));
     this->declare_parameter("odom_frame_id", std::string("odom"));
     this->declare_parameter("base_frame_id", std::string("base_link"));
@@ -38,12 +39,12 @@ X30NavBridge::X30NavBridge(const rclcpp::NodeOptions &options)
     heartbeat_interval_ms_ = this->get_parameter("heartbeat_interval_ms").as_int();
     cmd_vel_rate_hz_       = this->get_parameter("cmd_vel_rate_hz").as_int();
     cmd_vel_timeout_ms_    = this->get_parameter("cmd_vel_timeout_ms").as_int();
+    startup_acquire_control_ = this->get_parameter("startup_acquire_control").as_bool();
     imu_frame_id_          = this->get_parameter("imu_frame_id").as_string();
     odom_frame_id_         = this->get_parameter("odom_frame_id").as_string();
     base_frame_id_         = this->get_parameter("base_frame_id").as_string();
     publish_tf_            = this->get_parameter("publish_tf").as_bool();
 
-    control_session_.configure(heartbeat_interval_ms_, cmd_vel_timeout_ms_);
 }
 
 X30NavBridge::~X30NavBridge() {
@@ -99,11 +100,16 @@ bool X30NavBridge::initialize() {
         "~/release_control", std::bind(&X30NavBridge::handleReleaseControlRequest, this, _1, _2));
 
     action_executor_ = std::make_unique<ActionExecutor>(
-        this->get_logger(), state_store_, control_session_,
-        [this](const ControlActions &actions) { this->applyControlActions(actions); },
+        this->get_logger(), state_store_,
+        [this](int warmup_ms, int pulse_ms) { this->warmupControl(warmup_ms, pulse_ms); },
         [this](uint32_t code) { this->sendGaitCommand(code); });
 
-    control_session_.acquire();
+    if (startup_acquire_control_) {
+        acquireControl();
+        RCLCPP_INFO(this->get_logger(), "启动时已自动接管控制权，heartbeat 将持续保持");
+    } else {
+        RCLCPP_INFO(this->get_logger(), "启动时不自动接管控制权，等待上层显式接管");
+    }
 
     // 3. 启动统一控制定时器 (速度发送 + 心跳 + 超时检测)
     running_ = true;
@@ -137,8 +143,6 @@ void X30NavBridge::shutdown() {
         zero_cmd = makeSimpleCommand(CMD_VEL_YAW, 0);
         motion_udp_.send(&zero_cmd, sizeof(zero_cmd));
     }
-
-    control_session_.stop();
 
     motion_udp_.close();
     percept_udp_.close();
@@ -184,7 +188,7 @@ void X30NavBridge::sendGaitCommand(uint32_t gait_cmd_code) {
 // 定频发送轴指令
 // ============================================================================
 
-void X30NavBridge::applyControlActions(const ControlActions &actions) {
+void X30NavBridge::applyControlActions(const ControlPulse &actions) {
     if (actions.send_heartbeat) {
         auto hb = makeSimpleCommand(CMD_HEARTBEAT, 0);
         motion_udp_.send(&hb, sizeof(hb));
@@ -201,6 +205,76 @@ void X30NavBridge::applyControlActions(const ControlActions &actions) {
     }
 }
 
+void X30NavBridge::acquireControl() {
+    std::lock_guard<std::mutex> lock(control_mutex_);
+    control_latched_ = true;
+}
+
+bool X30NavBridge::releaseControlOwnership() {
+    std::lock_guard<std::mutex> lock(control_mutex_);
+    bool had_control          = control_latched_ || control_session_started_;
+    control_latched_          = false;
+    control_session_started_  = false;
+    control_query_sent_       = false;
+    last_heartbeat_sent_      = std::chrono::steady_clock::time_point::min();
+    return had_control;
+}
+
+void X30NavBridge::warmupControl(int warmup_ms, int pulse_ms) {
+    acquireControl();
+    auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(warmup_ms);
+    while (true) {
+        auto now = std::chrono::steady_clock::now();
+        applyControlActions(evaluateControlPulse(now, true));
+        if (now >= deadline) {
+            break;
+        }
+        auto remaining =
+            std::chrono::duration_cast<std::chrono::milliseconds>(deadline - now).count();
+        int sleep_ms = std::min<int>(pulse_ms, static_cast<int>(remaining));
+        if (sleep_ms > 0) {
+            std::this_thread::sleep_for(std::chrono::milliseconds(sleep_ms));
+        }
+    }
+}
+
+bool X30NavBridge::isControlInputFresh(std::chrono::steady_clock::time_point now) const {
+    auto last_input = last_active_time_.load();
+    return last_input != std::chrono::steady_clock::time_point::min() &&
+           now - last_input < std::chrono::milliseconds(cmd_vel_timeout_ms_);
+}
+
+X30NavBridge::ControlPulse X30NavBridge::evaluateControlPulse(
+    std::chrono::steady_clock::time_point now, bool force_heartbeat) {
+    std::lock_guard<std::mutex> lock(control_mutex_);
+    ControlPulse actions;
+
+    if (!control_latched_) {
+        return actions;
+    }
+
+    if (!control_session_started_) {
+        control_session_started_ = true;
+        actions.session_started  = true;
+        force_heartbeat          = true;
+    }
+
+    if (force_heartbeat ||
+        last_heartbeat_sent_ == std::chrono::steady_clock::time_point::min() ||
+        now - last_heartbeat_sent_ >= std::chrono::milliseconds(heartbeat_interval_ms_)) {
+        last_heartbeat_sent_   = now;
+        actions.send_heartbeat = true;
+    }
+
+    if (!control_query_sent_) {
+        control_query_sent_  = true;
+        actions.send_query   = true;
+    }
+
+    actions.active = true;
+    return actions;
+}
+
 void X30NavBridge::sendCmdVelTick() {
     auto now       = std::chrono::steady_clock::now();
     auto last_recv = state_store_.lastReceiveTime();
@@ -213,13 +287,8 @@ void X30NavBridge::sendCmdVelTick() {
         }
     }
 
-    ControlActions actions = control_session_.tick(now);
+    ControlPulse actions = evaluateControlPulse(now, false);
     applyControlActions(actions);
-    if (actions.session_stopped) {
-        RCLCPP_INFO(this->get_logger(), "🎮 控制已释放, 停止心跳, 遥控器恢复控制");
-        return;
-    }
-
     if (!actions.active) {
         return;
     }
@@ -232,7 +301,7 @@ void X30NavBridge::sendCmdVelTick() {
     double vx   = 0.0;
     double vy   = 0.0;
     double vyaw = 0.0;
-    if (control_session_.isControlInputFresh(now)) {
+    if (isControlInputFresh(now)) {
         vx   = target_vx_.load();
         vy   = target_vy_.load();
         vyaw = target_vyaw_.load();
@@ -624,9 +693,9 @@ void X30NavBridge::handleReleaseControlRequest(
     const std::shared_ptr<std_srvs::srv::Trigger::Request> /*req*/,
     std::shared_ptr<std_srvs::srv::Trigger::Response> res) {
     RCLCPP_INFO(this->get_logger(), "🛑 收到 release_control 请求，准备释放控制权");
-    auto actions = control_session_.release();
-    applyControlActions(actions);
-    if (actions.session_stopped) {
+    bool released = releaseControlOwnership();
+    sendVelocityCommand(0.0, 0.0, 0.0);
+    if (released) {
         RCLCPP_INFO(this->get_logger(), "🛑 控制权已释放，心跳已停止");
         res->success = true;
         res->message = "Control released and heartbeat stopped.";
@@ -642,8 +711,7 @@ void X30NavBridge::handleReleaseControlRequest(
 // ============================================================================
 
 void X30NavBridge::onControlInputUpdated() {
-    control_session_.acquire();
-    control_session_.noteActivity(std::chrono::steady_clock::now());
+    acquireControl();
 }
 
 void NavBridgeBase::cmdVelCallback(const geometry_msgs::msg::Twist::SharedPtr msg) {

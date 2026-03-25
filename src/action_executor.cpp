@@ -12,49 +12,35 @@ using namespace x30_protocol;
 
 namespace {
 
-constexpr int kColdTakeoverWarmupMs        = 2000;
-constexpr int kWarmTakeoverWarmupMs        = 400;
-constexpr int kTakeoverPulseMs             = 100;
-constexpr int kRecoverEarlyResponseMs      = 5000;
-constexpr int kStandOverallResponseMs      = 16000;
-constexpr int kStandResendIntervalMs       = 4000;
-constexpr int kLieDownOverallResponseMs    = 12000;
-constexpr int kLieDownResendIntervalMs     = 4000;
-constexpr int kStopMotionOverallResponseMs = 12000;
-constexpr int kStopMotionResendIntervalMs  = 4000;
-constexpr int kMaxCommandAttempts          = 2;
+constexpr int kControlWarmupMs          = 400;
+constexpr int kControlWarmupPulseMs     = 100;
+constexpr int kSingleCommandTimeoutMs   = 5000;
+constexpr int kGaitSwitchTimeoutMs      = 5000;
+constexpr int kSteppingEntryTimeoutMs   = 4000;
+constexpr int kStandTransitionMs        = 16000;
+constexpr int kStandResendIntervalMs    = 4000;
+constexpr int kStopMotionTimeoutMs      = 12000;
+constexpr int kStopMotionResendMs       = 4000;
+constexpr int kLieTransitionTimeoutMs   = 6000;
+constexpr int kLieFinalWaitMs           = 7000;
+constexpr int kMaxCommandAttempts       = 2;
 
 }  // namespace
 
 ActionExecutor::ActionExecutor(rclcpp::Logger logger, RobotStateStore &state_store,
-                               ControlSessionManager &control_session,
-                               ControlApplier control_applier, CommandSender command_sender)
+                               ControlWarmup control_warmup, CommandSender command_sender)
     : logger_(logger),
       state_store_(state_store),
-      control_session_(control_session),
-      control_applier_(std::move(control_applier)),
+      control_warmup_(std::move(control_warmup)),
       command_sender_(std::move(command_sender)) {}
 
 void ActionExecutor::ensureControlTakeover() {
-    int warmup_ms = control_session_.hasHadActiveSession() ? kWarmTakeoverWarmupMs : kColdTakeoverWarmupMs;
-    ensureControlTakeover(warmup_ms, kTakeoverPulseMs);
+    ensureControlTakeover(kControlWarmupMs, kControlWarmupPulseMs);
 }
 
 void ActionExecutor::ensureControlTakeover(int warmup_ms, int pulse_ms) {
-    auto warmup_deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(warmup_ms);
-    while (true) {
-        auto now = std::chrono::steady_clock::now();
-        control_applier_(control_session_.ensureSession(now));
-        if (now >= warmup_deadline) {
-            break;
-        }
-
-        auto remaining =
-            std::chrono::duration_cast<std::chrono::milliseconds>(warmup_deadline - now).count();
-        int sleep_ms = std::min<int>(pulse_ms, static_cast<int>(remaining));
-        if (sleep_ms > 0) {
-            std::this_thread::sleep_for(std::chrono::milliseconds(sleep_ms));
-        }
+    if (control_warmup_) {
+        control_warmup_(warmup_ms, pulse_ms);
     }
 }
 
@@ -63,7 +49,7 @@ bool ActionExecutor::sendSingleCommandAndWait(uint32_t command,
                                               int timeout_ms, const char *phase_name,
                                               int warmup_ms) {
     for (int attempt = 1; attempt <= kMaxCommandAttempts; ++attempt) {
-        ensureControlTakeover(warmup_ms, kTakeoverPulseMs);
+        ensureControlTakeover(warmup_ms, kControlWarmupPulseMs);
         command_sender_(command);
 
         if (waitForBasicState(targets, timeout_ms)) {
@@ -87,7 +73,7 @@ bool ActionExecutor::sendToggleCommandWithRetries(uint32_t command,
     auto deadline = std::chrono::steady_clock::now() +
                     std::chrono::milliseconds(overall_timeout_ms);
 
-    ensureControlTakeover(initial_warmup_ms, kTakeoverPulseMs);
+    ensureControlTakeover(initial_warmup_ms, kControlWarmupPulseMs);
 
     int attempt = 0;
     while (std::chrono::steady_clock::now() < deadline) {
@@ -110,7 +96,7 @@ bool ActionExecutor::sendToggleCommandWithRetries(uint32_t command,
             RCLCPP_WARN(logger_,
                         "⚠️ %s 在第 %d 次尝试后仍无响应，保持接管并继续重发命令",
                         phase_name, attempt);
-            ensureControlTakeover(kWarmTakeoverWarmupMs, kTakeoverPulseMs);
+            ensureControlTakeover(kControlWarmupMs, kControlWarmupPulseMs);
         }
     }
 
@@ -118,19 +104,11 @@ bool ActionExecutor::sendToggleCommandWithRetries(uint32_t command,
 }
 
 bool ActionExecutor::waitForBasicState(const std::vector<BasicState> &targets, int timeout_ms) {
-    auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(timeout_ms);
-    control_session_.holdUntil(deadline);
-    bool matched = state_store_.waitForBasicState(targets, timeout_ms);
-    control_session_.clearHoldAtOrBefore(deadline);
-    return matched;
+    return state_store_.waitForBasicState(targets, timeout_ms);
 }
 
 bool ActionExecutor::waitForGaitState(const std::vector<GaitState> &targets, int timeout_ms) {
-    auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(timeout_ms);
-    control_session_.holdUntil(deadline);
-    bool matched = state_store_.waitForGaitState(targets, timeout_ms);
-    control_session_.clearHoldAtOrBefore(deadline);
-    return matched;
+    return state_store_.waitForGaitState(targets, timeout_ms);
 }
 
 ActionResult ActionExecutor::stand() {
@@ -143,8 +121,8 @@ ActionResult ActionExecutor::stand() {
     if (state == static_cast<uint8_t>(BasicState::SOFT_ESTOP)) {
         RCLCPP_INFO(logger_, "⚠️ 机器人在软急停状态, 先恢复到贴下...");
         if (!sendSingleCommandAndWait(CMD_STAND_UP_DOWN, {BasicState::LYING_DOWN},
-                                      kRecoverEarlyResponseMs, "软急停恢复",
-                                      kColdTakeoverWarmupMs)) {
+                                      kSingleCommandTimeoutMs, "软急停恢复",
+                                      kControlWarmupMs)) {
             RCLCPP_WARN(logger_, "⚠️ 从软急停恢复贴下超时");
             return {false, "Timeout recovering from soft estop to lying down."};
         }
@@ -167,8 +145,8 @@ ActionResult ActionExecutor::stand() {
         if (!sendToggleCommandWithRetries(CMD_STAND_UP_DOWN,
                                           {BasicState::STANDING_UP, BasicState::INITIAL_STAND,
                                            BasicState::FORCE_STAND, BasicState::STEPPING},
-                                          kStandOverallResponseMs, kStandResendIntervalMs, "起立",
-                                          kColdTakeoverWarmupMs)) {
+                                          kStandTransitionMs, kStandResendIntervalMs, "起立",
+                                          kControlWarmupMs)) {
             RCLCPP_WARN(logger_, "⚠️ 起立指令发出后未观察到早期状态变化");
             return {false, "No response after stand-up command."};
         }
@@ -183,14 +161,29 @@ ActionResult ActionExecutor::stand() {
     }
 
     state = state_store_.basicState();
+    if (state == static_cast<uint8_t>(BasicState::RL_MODE)) {
+        RCLCPP_INFO(logger_, "⏳ 先切换回行走步态...");
+        ensureControlTakeover(kControlWarmupMs, kControlWarmupPulseMs);
+        command_sender_(CMD_GAIT_WALK);
+        if (!waitForGaitState({GaitState::WALK}, kGaitSwitchTimeoutMs)) {
+            RCLCPP_WARN(logger_, "⚠️ 从RL模式切回行走步态超时");
+            return {false, "Timeout switching gait back to walk before stand."};
+        }
+        if (!waitForBasicState({BasicState::STEPPING}, kSteppingEntryTimeoutMs)) {
+            RCLCPP_WARN(logger_, "⚠️ 行走步态已切换，但未观察到踏步状态");
+            return {false, "Timeout waiting for stepping state after switching to walk."};
+        }
+        state = state_store_.basicState();
+    }
+
     if (state == static_cast<uint8_t>(BasicState::RL_MODE) ||
         state == static_cast<uint8_t>(BasicState::STEPPING)) {
         RCLCPP_INFO(logger_, "⏳ 先停止运动，回到站立静止态...");
         if (!sendToggleCommandWithRetries(CMD_MOTION,
                                           {BasicState::FORCE_STAND, BasicState::INITIAL_STAND},
-                                          kStopMotionOverallResponseMs,
-                                          kStopMotionResendIntervalMs, "停止运动",
-                                          kWarmTakeoverWarmupMs)) {
+                                          kStopMotionTimeoutMs,
+                                          kStopMotionResendMs, "停止运动",
+                                          kControlWarmupMs)) {
             RCLCPP_WARN(logger_, "⚠️ 从运动状态退回站立超时");
             return {false, "Timeout stopping motion before entering force stand."};
         }
@@ -199,7 +192,7 @@ ActionResult ActionExecutor::stand() {
 
     if (state == static_cast<uint8_t>(BasicState::INITIAL_STAND)) {
         RCLCPP_INFO(logger_, "⏳ 切入力控站立...");
-        ensureControlTakeover(kWarmTakeoverWarmupMs, kTakeoverPulseMs);
+        ensureControlTakeover(kControlWarmupMs, kControlWarmupPulseMs);
         command_sender_(CMD_FORCE_CONTROL);
         if (!waitForBasicState({BasicState::FORCE_STAND}, 5000)) {
             RCLCPP_WARN(logger_, "⚠️ 切入力控站立超时");
@@ -230,8 +223,8 @@ ActionResult ActionExecutor::lieDown() {
     if (state == static_cast<uint8_t>(BasicState::SOFT_ESTOP)) {
         RCLCPP_INFO(logger_, "⏳ 从软急停恢复趴下...");
         bool ok = sendSingleCommandAndWait(CMD_STAND_UP_DOWN, {BasicState::LYING_DOWN},
-                                           5000, "软急停恢复趴下",
-                                           kWarmTakeoverWarmupMs);
+                                           kSingleCommandTimeoutMs, "软急停恢复趴下",
+                                           kControlWarmupMs);
         if (ok) {
             RCLCPP_INFO(logger_, "✅ 趴下完成");
         } else {
@@ -246,8 +239,8 @@ ActionResult ActionExecutor::lieDown() {
         if (!sendSingleCommandAndWait(CMD_STAND_UP_DOWN,
                                       {BasicState::FORCE_STAND, BasicState::INITIAL_STAND,
                                        BasicState::GOING_DOWN, BasicState::LYING_DOWN},
-                                      6000, "退出运动态准备趴下",
-                                      kWarmTakeoverWarmupMs)) {
+                                      kLieTransitionTimeoutMs, "退出运动态准备趴下",
+                                      kControlWarmupMs)) {
             RCLCPP_WARN(logger_, "⚠️ 无法从运动态退出到趴下链");
             return {false, "Timeout exiting motion state before lie down."};
         }
@@ -258,7 +251,7 @@ ActionResult ActionExecutor::lieDown() {
             return {true, "Robot has lied down."};
         }
         if (state == static_cast<uint8_t>(BasicState::GOING_DOWN)) {
-            bool ok = waitForBasicState({BasicState::LYING_DOWN}, 7000);
+            bool ok = waitForBasicState({BasicState::LYING_DOWN}, kLieFinalWaitMs);
             if (ok) {
                 RCLCPP_INFO(logger_, "✅ 趴下完成");
             } else {
@@ -274,9 +267,9 @@ ActionResult ActionExecutor::lieDown() {
     bool ok = sendSingleCommandAndWait(CMD_STAND_UP_DOWN,
                                        {BasicState::STEPPING, BasicState::GOING_DOWN,
                                         BasicState::LYING_DOWN},
-                                       6000, "趴下",
-                                       kWarmTakeoverWarmupMs) &&
-              waitForBasicState({BasicState::LYING_DOWN}, 7000);
+                                       kLieTransitionTimeoutMs, "趴下",
+                                       kControlWarmupMs) &&
+              waitForBasicState({BasicState::LYING_DOWN}, kLieFinalWaitMs);
     if (ok) {
         RCLCPP_INFO(logger_, "✅ 趴下完成");
     } else {
@@ -294,8 +287,8 @@ ActionResult ActionExecutor::ready() {
     if (state == static_cast<uint8_t>(BasicState::SOFT_ESTOP)) {
         RCLCPP_INFO(logger_, "📌 [0/5] 机器人在软急停状态, 先恢复到贴下...");
         if (!sendSingleCommandAndWait(CMD_STAND_UP_DOWN, {BasicState::LYING_DOWN},
-                                      kRecoverEarlyResponseMs, "ready: 软急停恢复",
-                                      kColdTakeoverWarmupMs)) {
+                                      kSingleCommandTimeoutMs, "ready: 软急停恢复",
+                                      kControlWarmupMs)) {
             RCLCPP_ERROR(logger_, "❌ Ready 失败: 从软急停恢复超时");
             return {false, "Ready failed: timeout recovering from soft estop."};
         }
@@ -309,8 +302,8 @@ ActionResult ActionExecutor::ready() {
         if (!sendToggleCommandWithRetries(CMD_STAND_UP_DOWN,
                                           {BasicState::STANDING_UP, BasicState::INITIAL_STAND,
                                            BasicState::FORCE_STAND, BasicState::STEPPING},
-                                          kStandOverallResponseMs, kStandResendIntervalMs,
-                                          "ready: 起立", kColdTakeoverWarmupMs)) {
+                                          kStandTransitionMs, kStandResendIntervalMs,
+                                          "ready: 起立", kControlWarmupMs)) {
             RCLCPP_ERROR(logger_, "❌ Ready 失败: 起立指令无早期响应");
             return {false, "Ready failed: no response at step 1 (stand up)."};
         }
@@ -334,7 +327,7 @@ ActionResult ActionExecutor::ready() {
     state = state_store_.basicState();
     if (state == static_cast<uint8_t>(BasicState::INITIAL_STAND)) {
         RCLCPP_INFO(logger_, "📌 [2/5] 切入力控站立...");
-        ensureControlTakeover(kWarmTakeoverWarmupMs, kTakeoverPulseMs);
+        ensureControlTakeover(kControlWarmupMs, kControlWarmupPulseMs);
         command_sender_(CMD_FORCE_CONTROL);
 
         if (!waitForBasicState({BasicState::FORCE_STAND}, 5000)) {
@@ -359,7 +352,7 @@ ActionResult ActionExecutor::ready() {
         RCLCPP_INFO(logger_, "✅ [3/4] 已在RL模式+山地步态, 跳过");
     } else {
         RCLCPP_INFO(logger_, "📌 [3/4] 切换山地步态 (state=%d, gait=%d)...", state, gait);
-        ensureControlTakeover(kWarmTakeoverWarmupMs, kTakeoverPulseMs);
+        ensureControlTakeover(kControlWarmupMs, kControlWarmupPulseMs);
         command_sender_(CMD_GAIT_MOUNTAIN);
 
         if (!waitForGaitState({GaitState::MOUNTAIN}, 4000)) {
