@@ -1,7 +1,7 @@
 #pragma once
 
 /// @file action_executor.hpp
-/// @brief 动作执行器，封装站立/趴下/ready/运动等业务流程
+/// @brief 动作执行器，封装站立/趴下/ready 等业务流程
 
 #include <functional>
 #include <memory>
@@ -37,13 +37,13 @@ public:
 private:
     void ensureControlTakeover();
     void ensureControlTakeover(int warmup_ms, int pulse_ms);
-    bool sendCommandDuringTakeoverWindow(uint32_t command,
-                                         const std::vector<x30_protocol::BasicState> &targets,
-                                         int overall_timeout_ms, int resend_interval_ms,
-                                         const char *phase_name, int initial_warmup_ms);
-    bool sendCommandUntilBasicState(uint32_t command,
-                                    const std::vector<x30_protocol::BasicState> &targets,
-                                    int timeout_ms, const char *phase_name, int warmup_ms);
+    bool sendToggleCommandWithRetries(uint32_t command,
+                                      const std::vector<x30_protocol::BasicState> &targets,
+                                      int overall_timeout_ms, int resend_interval_ms,
+                                      const char *phase_name, int initial_warmup_ms);
+    bool sendSingleCommandAndWait(uint32_t command,
+                                  const std::vector<x30_protocol::BasicState> &targets,
+                                  int timeout_ms, const char *phase_name, int warmup_ms);
     bool waitForBasicState(const std::vector<x30_protocol::BasicState> &targets, int timeout_ms);
     bool waitForGaitState(const std::vector<x30_protocol::GaitState> &targets, int timeout_ms);
 

@@ -30,9 +30,14 @@ public:
         session_timeout_ms_    = session_timeout_ms;
     }
 
+    void acquire() {
+        std::lock_guard<std::mutex> lock(mutex_);
+        latched_ = true;
+    }
+
     void noteActivity(std::chrono::steady_clock::time_point now) {
         std::lock_guard<std::mutex> lock(mutex_);
-        last_activity_time_ = now;
+        last_control_input_time_ = now;
     }
 
     void holdUntil(std::chrono::steady_clock::time_point deadline) {
@@ -51,7 +56,7 @@ public:
 
     ControlActions ensureSession(std::chrono::steady_clock::time_point now) {
         std::lock_guard<std::mutex> lock(mutex_);
-        last_activity_time_ = now;
+        latched_ = true;
         return evaluateLocked(now, true);
     }
 
@@ -60,13 +65,32 @@ public:
         return evaluateLocked(now, false);
     }
 
-    void stop() {
+    ControlActions release() {
         std::lock_guard<std::mutex> lock(mutex_);
+        ControlActions actions;
+        if (!active_ && !latched_) {
+            return actions;
+        }
+
+        latched_               = false;
         active_              = false;
         query_sent_          = false;
         last_heartbeat_sent_ = std::chrono::steady_clock::time_point::min();
         hold_until_          = std::chrono::steady_clock::time_point::min();
-        had_active_session_  = false;
+        actions.session_stopped = true;
+        actions.send_zero_velocity = true;
+        return actions;
+    }
+
+    void stop() {
+        std::lock_guard<std::mutex> lock(mutex_);
+        latched_               = false;
+        active_                = false;
+        query_sent_            = false;
+        last_heartbeat_sent_   = std::chrono::steady_clock::time_point::min();
+        hold_until_            = std::chrono::steady_clock::time_point::min();
+        had_active_session_    = false;
+        last_control_input_time_ = std::chrono::steady_clock::time_point::min();
     }
 
     bool hasHadActiveSession() const {
@@ -74,16 +98,19 @@ public:
         return had_active_session_;
     }
 
+    bool isControlInputFresh(std::chrono::steady_clock::time_point now) const {
+        std::lock_guard<std::mutex> lock(mutex_);
+        return last_control_input_time_ != std::chrono::steady_clock::time_point::min() &&
+               now - last_control_input_time_ < std::chrono::milliseconds(session_timeout_ms_);
+    }
+
 private:
     ControlActions evaluateLocked(std::chrono::steady_clock::time_point now, bool force_heartbeat) {
         ControlActions actions;
 
-        bool activity_alive = last_activity_time_ != std::chrono::steady_clock::time_point::min() &&
-                              now - last_activity_time_ <
-                                  std::chrono::milliseconds(session_timeout_ms_);
         bool hold_alive =
             hold_until_ != std::chrono::steady_clock::time_point::min() && now < hold_until_;
-        bool should_be_active = activity_alive || hold_alive;
+        bool should_be_active = latched_ || hold_alive;
 
         if (active_ && !should_be_active) {
             active_                  = false;
@@ -125,12 +152,13 @@ private:
     mutable std::mutex mutex_;
     int heartbeat_interval_ms_{200};
     int session_timeout_ms_{5000};
+    bool latched_{false};
     bool active_{false};
     bool had_active_session_{false};
     bool query_sent_{false};
     std::chrono::steady_clock::time_point last_heartbeat_sent_{
         std::chrono::steady_clock::time_point::min()};
-    std::chrono::steady_clock::time_point last_activity_time_{
+    std::chrono::steady_clock::time_point last_control_input_time_{
         std::chrono::steady_clock::time_point::min()};
     std::chrono::steady_clock::time_point hold_until_{
         std::chrono::steady_clock::time_point::min()};

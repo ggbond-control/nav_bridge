@@ -58,10 +58,10 @@ void ActionExecutor::ensureControlTakeover(int warmup_ms, int pulse_ms) {
     }
 }
 
-bool ActionExecutor::sendCommandUntilBasicState(uint32_t command,
-                                                const std::vector<BasicState> &targets,
-                                                int timeout_ms, const char *phase_name,
-                                                int warmup_ms) {
+bool ActionExecutor::sendSingleCommandAndWait(uint32_t command,
+                                              const std::vector<BasicState> &targets,
+                                              int timeout_ms, const char *phase_name,
+                                              int warmup_ms) {
     for (int attempt = 1; attempt <= kMaxCommandAttempts; ++attempt) {
         ensureControlTakeover(warmup_ms, kTakeoverPulseMs);
         command_sender_(command);
@@ -78,12 +78,12 @@ bool ActionExecutor::sendCommandUntilBasicState(uint32_t command,
     return false;
 }
 
-bool ActionExecutor::sendCommandDuringTakeoverWindow(uint32_t command,
-                                                     const std::vector<BasicState> &targets,
-                                                     int overall_timeout_ms,
-                                                     int resend_interval_ms,
-                                                     const char *phase_name,
-                                                     int initial_warmup_ms) {
+bool ActionExecutor::sendToggleCommandWithRetries(uint32_t command,
+                                                  const std::vector<BasicState> &targets,
+                                                  int overall_timeout_ms,
+                                                  int resend_interval_ms,
+                                                  const char *phase_name,
+                                                  int initial_warmup_ms) {
     auto deadline = std::chrono::steady_clock::now() +
                     std::chrono::milliseconds(overall_timeout_ms);
 
@@ -142,9 +142,9 @@ ActionResult ActionExecutor::stand() {
 
     if (state == static_cast<uint8_t>(BasicState::SOFT_ESTOP)) {
         RCLCPP_INFO(logger_, "⚠️ 机器人在软急停状态, 先恢复到贴下...");
-        if (!sendCommandUntilBasicState(CMD_STAND_UP_DOWN, {BasicState::LYING_DOWN},
-                                        kRecoverEarlyResponseMs, "软急停恢复",
-                                        kColdTakeoverWarmupMs)) {
+        if (!sendSingleCommandAndWait(CMD_STAND_UP_DOWN, {BasicState::LYING_DOWN},
+                                      kRecoverEarlyResponseMs, "软急停恢复",
+                                      kColdTakeoverWarmupMs)) {
             RCLCPP_WARN(logger_, "⚠️ 从软急停恢复贴下超时");
             return {false, "Timeout recovering from soft estop to lying down."};
         }
@@ -164,11 +164,11 @@ ActionResult ActionExecutor::stand() {
     if (state == static_cast<uint8_t>(BasicState::LYING_DOWN) ||
         state == static_cast<uint8_t>(BasicState::GOING_DOWN)) {
         RCLCPP_INFO(logger_, "⏳ 等待机器人起立...");
-        if (!sendCommandDuringTakeoverWindow(CMD_STAND_UP_DOWN,
-                                             {BasicState::STANDING_UP, BasicState::INITIAL_STAND,
-                                              BasicState::FORCE_STAND, BasicState::STEPPING},
-                                             kStandOverallResponseMs, kStandResendIntervalMs, "起立",
-                                             kColdTakeoverWarmupMs)) {
+        if (!sendToggleCommandWithRetries(CMD_STAND_UP_DOWN,
+                                          {BasicState::STANDING_UP, BasicState::INITIAL_STAND,
+                                           BasicState::FORCE_STAND, BasicState::STEPPING},
+                                          kStandOverallResponseMs, kStandResendIntervalMs, "起立",
+                                          kColdTakeoverWarmupMs)) {
             RCLCPP_WARN(logger_, "⚠️ 起立指令发出后未观察到早期状态变化");
             return {false, "No response after stand-up command."};
         }
@@ -186,11 +186,11 @@ ActionResult ActionExecutor::stand() {
     if (state == static_cast<uint8_t>(BasicState::RL_MODE) ||
         state == static_cast<uint8_t>(BasicState::STEPPING)) {
         RCLCPP_INFO(logger_, "⏳ 先停止运动，回到站立静止态...");
-        if (!sendCommandDuringTakeoverWindow(CMD_STAND_UP_DOWN,
-                                             {BasicState::FORCE_STAND, BasicState::INITIAL_STAND},
-                                             kStopMotionOverallResponseMs,
-                                             kStopMotionResendIntervalMs, "停止运动",
-                                             kWarmTakeoverWarmupMs)) {
+        if (!sendToggleCommandWithRetries(CMD_MOTION,
+                                          {BasicState::FORCE_STAND, BasicState::INITIAL_STAND},
+                                          kStopMotionOverallResponseMs,
+                                          kStopMotionResendIntervalMs, "停止运动",
+                                          kWarmTakeoverWarmupMs)) {
             RCLCPP_WARN(logger_, "⚠️ 从运动状态退回站立超时");
             return {false, "Timeout stopping motion before entering force stand."};
         }
@@ -229,9 +229,9 @@ ActionResult ActionExecutor::lieDown() {
 
     if (state == static_cast<uint8_t>(BasicState::SOFT_ESTOP)) {
         RCLCPP_INFO(logger_, "⏳ 从软急停恢复趴下...");
-        bool ok = sendCommandUntilBasicState(CMD_STAND_UP_DOWN, {BasicState::LYING_DOWN},
-                                             5000, "软急停恢复趴下",
-                                             kWarmTakeoverWarmupMs);
+        bool ok = sendSingleCommandAndWait(CMD_STAND_UP_DOWN, {BasicState::LYING_DOWN},
+                                           5000, "软急停恢复趴下",
+                                           kWarmTakeoverWarmupMs);
         if (ok) {
             RCLCPP_INFO(logger_, "✅ 趴下完成");
         } else {
@@ -242,24 +242,40 @@ ActionResult ActionExecutor::lieDown() {
 
     if (state == static_cast<uint8_t>(BasicState::RL_MODE) ||
         state == static_cast<uint8_t>(BasicState::STEPPING)) {
-        RCLCPP_INFO(logger_, "⏳ 先停止运动...");
-        if (!sendCommandDuringTakeoverWindow(CMD_STAND_UP_DOWN,
-                                             {BasicState::FORCE_STAND, BasicState::INITIAL_STAND},
-                                             kStopMotionOverallResponseMs,
-                                             kStopMotionResendIntervalMs, "停止运动",
-                                             kWarmTakeoverWarmupMs)) {
-            RCLCPP_WARN(logger_, "⚠️ 停止运动超时");
-            return {false, "Timeout stopping motion before lie down."};
+        RCLCPP_INFO(logger_, "⏳ 从运动态退出，进入趴下流程...");
+        if (!sendSingleCommandAndWait(CMD_STAND_UP_DOWN,
+                                      {BasicState::FORCE_STAND, BasicState::INITIAL_STAND,
+                                       BasicState::GOING_DOWN, BasicState::LYING_DOWN},
+                                      6000, "退出运动态准备趴下",
+                                      kWarmTakeoverWarmupMs)) {
+            RCLCPP_WARN(logger_, "⚠️ 无法从运动态退出到趴下链");
+            return {false, "Timeout exiting motion state before lie down."};
         }
-        RCLCPP_INFO(logger_, "✅ 已停止运动");
+
+        state = state_store_.basicState();
+        if (state == static_cast<uint8_t>(BasicState::LYING_DOWN)) {
+            RCLCPP_INFO(logger_, "✅ 趴下完成");
+            return {true, "Robot has lied down."};
+        }
+        if (state == static_cast<uint8_t>(BasicState::GOING_DOWN)) {
+            bool ok = waitForBasicState({BasicState::LYING_DOWN}, 7000);
+            if (ok) {
+                RCLCPP_INFO(logger_, "✅ 趴下完成");
+            } else {
+                RCLCPP_WARN(logger_, "⚠️ 趴下超时");
+            }
+            return {ok, ok ? "Robot has lied down." : "Timeout waiting for robot to lie down."};
+        }
+
+        RCLCPP_INFO(logger_, "✅ 已退出运动态，继续执行最终趴下");
     }
 
     RCLCPP_INFO(logger_, "⏳ 等待机器人趴下...");
-    bool ok = sendCommandDuringTakeoverWindow(CMD_STAND_UP_DOWN,
-                                              {BasicState::GOING_DOWN, BasicState::LYING_DOWN},
-                                              kLieDownOverallResponseMs,
-                                              kLieDownResendIntervalMs, "趴下",
-                                              kWarmTakeoverWarmupMs) &&
+    bool ok = sendSingleCommandAndWait(CMD_STAND_UP_DOWN,
+                                       {BasicState::STEPPING, BasicState::GOING_DOWN,
+                                        BasicState::LYING_DOWN},
+                                       6000, "趴下",
+                                       kWarmTakeoverWarmupMs) &&
               waitForBasicState({BasicState::LYING_DOWN}, 7000);
     if (ok) {
         RCLCPP_INFO(logger_, "✅ 趴下完成");
@@ -277,9 +293,9 @@ ActionResult ActionExecutor::ready() {
 
     if (state == static_cast<uint8_t>(BasicState::SOFT_ESTOP)) {
         RCLCPP_INFO(logger_, "📌 [0/5] 机器人在软急停状态, 先恢复到贴下...");
-        if (!sendCommandUntilBasicState(CMD_STAND_UP_DOWN, {BasicState::LYING_DOWN},
-                                        kRecoverEarlyResponseMs, "ready: 软急停恢复",
-                                        kColdTakeoverWarmupMs)) {
+        if (!sendSingleCommandAndWait(CMD_STAND_UP_DOWN, {BasicState::LYING_DOWN},
+                                      kRecoverEarlyResponseMs, "ready: 软急停恢复",
+                                      kColdTakeoverWarmupMs)) {
             RCLCPP_ERROR(logger_, "❌ Ready 失败: 从软急停恢复超时");
             return {false, "Ready failed: timeout recovering from soft estop."};
         }
@@ -290,11 +306,11 @@ ActionResult ActionExecutor::ready() {
     if (state == static_cast<uint8_t>(BasicState::LYING_DOWN) ||
         state == static_cast<uint8_t>(BasicState::GOING_DOWN)) {
         RCLCPP_INFO(logger_, "📌 [1/5] 起立...");
-        if (!sendCommandDuringTakeoverWindow(CMD_STAND_UP_DOWN,
-                                             {BasicState::STANDING_UP, BasicState::INITIAL_STAND,
-                                              BasicState::FORCE_STAND, BasicState::STEPPING},
-                                             kStandOverallResponseMs, kStandResendIntervalMs,
-                                             "ready: 起立", kColdTakeoverWarmupMs)) {
+        if (!sendToggleCommandWithRetries(CMD_STAND_UP_DOWN,
+                                          {BasicState::STANDING_UP, BasicState::INITIAL_STAND,
+                                           BasicState::FORCE_STAND, BasicState::STEPPING},
+                                          kStandOverallResponseMs, kStandResendIntervalMs,
+                                          "ready: 起立", kColdTakeoverWarmupMs)) {
             RCLCPP_ERROR(logger_, "❌ Ready 失败: 起立指令无早期响应");
             return {false, "Ready failed: no response at step 1 (stand up)."};
         }

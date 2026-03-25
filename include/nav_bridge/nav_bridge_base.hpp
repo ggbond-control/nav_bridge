@@ -79,6 +79,7 @@ protected:
     rclcpp::Service<std_srvs::srv::Trigger>::SharedPtr stand_srv_;
     rclcpp::Service<std_srvs::srv::Trigger>::SharedPtr lie_srv_;
     rclcpp::Service<std_srvs::srv::Trigger>::SharedPtr ready_srv_;
+    rclcpp::Service<std_srvs::srv::Trigger>::SharedPtr release_control_srv_;
 
     virtual void handleStandRequest(const std::shared_ptr<std_srvs::srv::Trigger::Request> req,
                                     std::shared_ptr<std_srvs::srv::Trigger::Response> res)      = 0;
@@ -86,6 +87,9 @@ protected:
                                   std::shared_ptr<std_srvs::srv::Trigger::Response> res)      = 0;
     virtual void handleReadyRequest(const std::shared_ptr<std_srvs::srv::Trigger::Request> req,
                                     std::shared_ptr<std_srvs::srv::Trigger::Response> res)      = 0;
+    virtual void handleReleaseControlRequest(
+        const std::shared_ptr<std_srvs::srv::Trigger::Request> req,
+        std::shared_ptr<std_srvs::srv::Trigger::Response> res) = 0;
 
     // ===================== TF =====================
     std::unique_ptr<tf2_ros::TransformBroadcaster> tf_broadcaster_;

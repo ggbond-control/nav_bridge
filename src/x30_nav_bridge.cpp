@@ -95,11 +95,15 @@ bool X30NavBridge::initialize() {
         "~/lie", std::bind(&X30NavBridge::handleLieRequest, this, _1, _2));
     ready_srv_ = this->create_service<std_srvs::srv::Trigger>(
         "~/ready", std::bind(&X30NavBridge::handleReadyRequest, this, _1, _2));
+    release_control_srv_ = this->create_service<std_srvs::srv::Trigger>(
+        "~/release_control", std::bind(&X30NavBridge::handleReleaseControlRequest, this, _1, _2));
 
     action_executor_ = std::make_unique<ActionExecutor>(
         this->get_logger(), state_store_, control_session_,
         [this](const ControlActions &actions) { this->applyControlActions(actions); },
         [this](uint32_t code) { this->sendGaitCommand(code); });
+
+    control_session_.acquire();
 
     // 3. 启动统一控制定时器 (速度发送 + 心跳 + 超时检测)
     running_ = true;
@@ -212,7 +216,7 @@ void X30NavBridge::sendCmdVelTick() {
     ControlActions actions = control_session_.tick(now);
     applyControlActions(actions);
     if (actions.session_stopped) {
-        RCLCPP_INFO(this->get_logger(), "🎮 控制超时, 停止心跳, 遥控器恢复控制");
+        RCLCPP_INFO(this->get_logger(), "🎮 控制已释放, 停止心跳, 遥控器恢复控制");
         return;
     }
 
@@ -225,9 +229,14 @@ void X30NavBridge::sendCmdVelTick() {
         RCLCPP_INFO(this->get_logger(), "🤖 控制权获取完成, 开始自主控制");
     }
 
-    double vx   = target_vx_.load();
-    double vy   = target_vy_.load();
-    double vyaw = target_vyaw_.load();
+    double vx   = 0.0;
+    double vy   = 0.0;
+    double vyaw = 0.0;
+    if (control_session_.isControlInputFresh(now)) {
+        vx   = target_vx_.load();
+        vy   = target_vy_.load();
+        vyaw = target_vyaw_.load();
+    }
     sendVelocityCommand(vx, vy, vyaw);
 }
 
@@ -611,11 +620,29 @@ void X30NavBridge::handleReadyRequest(
     res->message = result.message;
 }
 
+void X30NavBridge::handleReleaseControlRequest(
+    const std::shared_ptr<std_srvs::srv::Trigger::Request> /*req*/,
+    std::shared_ptr<std_srvs::srv::Trigger::Response> res) {
+    RCLCPP_INFO(this->get_logger(), "🛑 收到 release_control 请求，准备释放控制权");
+    auto actions = control_session_.release();
+    applyControlActions(actions);
+    if (actions.session_stopped) {
+        RCLCPP_INFO(this->get_logger(), "🛑 控制权已释放，心跳已停止");
+        res->success = true;
+        res->message = "Control released and heartbeat stopped.";
+    } else {
+        RCLCPP_INFO(this->get_logger(), "🛑 当前本就未持有可释放的控制会话");
+        res->success = true;
+        res->message = "No active control session to release.";
+    }
+}
+
 // ============================================================================
 // 基类回调
 // ============================================================================
 
 void X30NavBridge::onControlInputUpdated() {
+    control_session_.acquire();
     control_session_.noteActivity(std::chrono::steady_clock::now());
 }
 
