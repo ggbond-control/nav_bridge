@@ -7,9 +7,9 @@
 1. 把 ROS2 的 `/cmd_vel` 与动作服务转换成 X30 底层可识别的 UDP 控制报文
 2. 把机器人底层回传的高频状态、IMU、电池和足式里程计转换为标准 ROS2 话题
 
-当前实现基于 `docs/udp_manual.txt` 中的 X30 UDP 接口规格，并针对实际控制接管时序做了额外的业务封装。
+当前实现基于 **《绝影X30接口规格书（对外）ros+udp V1.0.5.pdf》** 中的 X30 UDP 接口规格，并针对实际控制接管时序做了额外的业务封装。
 
-## 1. 当前架构
+## 1. 系统架构
 
 本项目现在不是一个“大类包办所有事情”的实现，而是按职责拆成了几层：
 
@@ -107,13 +107,20 @@ X30 并不是“发一条动作指令就一定立刻执行”的设备。对于�
 
 `ready` 是当前最核心的业务服务，用于把机器人从静态或异常态拉到可导航工作态。
 
-当前流程如下：
+当前实现的目标不是“机械地执行固定脚本”，而是把机器人**收敛到 `RL_MODE + MOUNTAIN`**。  
+在当前代码和实机表现下，主要流程通常是：
 
 1. 如果在 `SOFT_ESTOP`，先恢复到 `LYING_DOWN`
 2. 若在 `LYING_DOWN / GOING_DOWN`，执行起立
 3. 若起立后处于 `INITIAL_STAND`，切入力控站立
 4. 切换山地步态 `CMD_GAIT_MOUNTAIN`
 5. 等待进入 `RL_MODE + MOUNTAIN`
+
+需要注意的是：
+
+- `ready` 内部仍然保留了针对 toggle 型命令的接管预热和重试逻辑
+- 若底层状态反馈比预期更慢，服务会按当前状态继续等待或重试，而不是假定机器人一定线性流转
+- 文档中描述的是当前代码下的主路径，真正行为仍以实机状态反馈为准
 
 成功后，机器人应当处于：
 
@@ -126,7 +133,12 @@ X30 并不是“发一条动作指令就一定立刻执行”的设备。对于�
 
 将机器人收敛到**静止、可控、力控站立态**。
 
-当前逻辑会：
+当前实现不是简单“发一个站立命令”，而是按当前状态把机器人收敛到 `FORCE_STAND`。  
+根据当前实机验证，`RL_MODE` 到 `FORCE_STAND` 的路径并不是一步完成，而是：
+
+`RL_MODE -> CMD_GAIT_WALK -> WALK/STEPPING -> CMD_MOTION -> FORCE_STAND`
+
+所以当前逻辑会：
 
 - 若已经处于 `FORCE_STAND`，直接返回成功
 - 若处于软急停，先恢复到趴下
@@ -136,11 +148,19 @@ X30 并不是“发一条动作指令就一定立刻执行”的设备。对于�
 - 若处于 `INITIAL_STAND`，再补一次力控模式切换
 - 最终目标状态是 `FORCE_STAND`
 
+这里最重要的一点是：
+
+- `CMD_GAIT_WALK` 本身并不直接等价于“静止站立”
+- 当前代码是按实机观察到的状态机实现这条链路，而不是单纯按协议图静态推导
+
 ### 3.3 `~/lie`
 
 让机器人安全回到趴下状态。
 
-当前策略比旧版本更保守，按业务场景分段处理：
+当前实现同样是“目标态收敛”，不是一条固定长度的命令链。  
+它会根据机器人从运动态退出后实际落到哪个状态，决定是否继续补发趴下命令。
+
+当前策略按业务场景分段处理：
 
 - 若已经趴下，直接成功
 - 若正在趴下，只等待最终进入 `LYING_DOWN`
@@ -211,7 +231,7 @@ X30 并不是“发一条动作指令就一定立刻执行”的设备。对于�
 - **`0x21050F0A BatterySensorData`**
   - 发布电池电量百分比 `/battery/level`
 
-## 6. 当前 ROS2 接口
+## 6. ROS2 接口
 
 ### 6.1 订阅的话题
 
@@ -276,28 +296,26 @@ nav_bridge/
 ├── package.xml
 ├── README.md
 ├── config/
-│   └── x30_params.yaml
-├── docs/
-│   └── udp_manual.txt
+│   └── x30_params.yaml                    # 默认运行参数
 ├── launch/
-│   └── nav_bridge.launch.py
+│   └── nav_bridge.launch.py               # 启动 nav_bridge_node 并加载参数
 ├── include/nav_bridge/
-│   ├── action_executor.hpp
-│   ├── nav_bridge_base.hpp
-│   ├── robot_state_store.hpp
-│   ├── udp_transport.hpp
-│   ├── x30_nav_bridge.hpp
-│   └── x30_protocol.hpp
+│   ├── action_executor.hpp                # 动作执行器接口，封装 stand/lie/ready 业务流程
+│   ├── nav_bridge_base.hpp                # 桥接节点抽象基类与通用 ROS 接口定义
+│   ├── robot_state_store.hpp              # 机器人状态缓存与条件变量等待接口
+│   ├── udp_transport.hpp                  # UDP 传输封装接口
+│   ├── x30_nav_bridge.hpp                 # X30 桥接节点类定义
+│   └── x30_protocol.hpp                   # X30 协议常量、状态枚举、报文结构与工具函数
 └── src/
-    ├── action_executor.cpp
-    ├── nav_bridge_node.cpp
-    ├── udp_transport.cpp
-    └── x30_nav_bridge.cpp
+    ├── action_executor.cpp                # 动作执行器实现
+    ├── nav_bridge_node.cpp                # ROS2 节点入口
+    ├── udp_transport.cpp                  # UDP 传输封装实现
+    └── x30_nav_bridge.cpp                 # X30 桥接节点主实现
 ```
 
-## 10. 当前实现特点
+## 10. 实现特性
 
-相较于项目早期版本，当前实现的几个显著特点是：
+当前实现的主要工程特性如下：
 
 - 状态等待已改为事件驱动，而不是显式轮询 sleep
 - 心跳与速度发送统一到同一个控制时基
@@ -335,7 +353,7 @@ stateDiagram-v2
 
 `RL_MODE/STEPPING -> (退出运动态) -> GOING_DOWN/LYING_DOWN`
 
-## 12. 实机调试建议
+## 12. 运行与调试建议
 
 当前实现已经能在实机上工作，但从控制时序角度，仍然建议按下面的方式调试和使用：
 
@@ -346,6 +364,7 @@ stateDiagram-v2
 - `~/lie` 在 `RL_MODE` 下不简单复用 `stand` 的停止运动逻辑，而是优先进入“趴下链”
 - 如果启动时已接管控制权，`/cmd_vel` 长时间静默只会归零速度，不会自动释放控制权
 - 若日志中看到“保持接管并继续重发命令”，说明系统正在处理 toggle 型命令阶段的保守重试，不一定代表逻辑故障
+- 若协议图、手册描述与当前实机行为不一致，排查时应优先以当前状态反馈和实测路径为准
 
 建议的最小回归顺序：
 
@@ -367,13 +386,14 @@ stateDiagram-v2
 - `基本状态: ... -> ...`
 - `步态: ... -> ...`
 
-## 13. 已知实现边界
+## 13. 实现边界与说明
 
-当前版本有一些明确的工程边界，文档里也一并说明：
+当前版本有一些明确的工程边界，文档中一并说明如下：
 
 - 当前只桥接运动主机 `192.168.1.103:43893`，`percept_udp_` 仍未接入业务流程
 - 控制接管依然是工程策略，不是依赖底层显式 ack
 - 动作执行器对 `CMD_STAND_UP_DOWN`、`CMD_MOTION` 这类 toggle 型命令仍保留了分阶段保活与重发机制
+- `stand / lie / ready` 的若干阶段路径是根据当前 X30 实机状态反馈逐步收敛出来的，未来若底层固件行为变化，业务路径也可能需要同步调整
 - 机器人名称字段当前常见为空字符串，这不影响主控制链路
 - 接收线程可能看到一部分未处理指令码，只要核心状态包正常即可先不视为故障
 
@@ -404,7 +424,37 @@ stateDiagram-v2
 | `/robot_gait_state` | `std_msgs/msg/Int32` | 步态状态码 |
 | `/battery/level` | `std_msgs/msg/UInt8` | 电池百分比 |
 
-### 14.4 关键参数
+### 14.4 状态码对照
+
+`/robot_basic_state` 当前使用的数值定义如下：
+
+| 数值 | 枚举名 | 含义 |
+| --- | --- | --- |
+| `0` | `LYING_DOWN` | 趴下 |
+| `1` | `STANDING_UP` | 正在起立 |
+| `2` | `INITIAL_STAND` | 初始站立 |
+| `3` | `FORCE_STAND` | 力控站立 |
+| `4` | `STEPPING` | 踏步/运动中 |
+| `5` | `GOING_DOWN` | 正在趴下 |
+| `6` | `SOFT_ESTOP` | 软急停/摔倒 |
+| `16` | `RL_MODE` | RL 状态 |
+
+`/robot_gait_state` 当前使用的数值定义如下：
+
+| 数值 | 枚举名 | 含义 |
+| --- | --- | --- |
+| `0` | `WALK` | 行走 |
+| `1` | `OBSTACLE` | 越障 |
+| `2` | `SLOPE` | 斜坡 |
+| `3` | `RUN` | 跑步 |
+| `6` | `STAIR_SOLID` | 楼梯（实心/镂空/无踢面） |
+| `7` | `STAIR_ACC` | 楼梯（累积帧） |
+| `8` | `STAIR45_ACC` | 45°楼梯（累积帧） |
+| `32` | `L_WALK` | L 行走 |
+| `33` | `MOUNTAIN` | 山地 |
+| `34` | `SILENT` | 静音 |
+
+### 14.5 关键参数
 
 | 参数名 | 默认值 | 说明 |
 | --- | --- | --- |
