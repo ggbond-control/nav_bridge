@@ -68,6 +68,7 @@ private:
     void warmupControl(int warmup_ms, int pulse_ms);
     bool isControlInputFresh(std::chrono::steady_clock::time_point now) const;
     ControlPulse evaluateControlPulse(std::chrono::steady_clock::time_point now, bool force_heartbeat);
+    bool isCmdVelForwardingAllowed() const;
     void handleRcsData(const x30_protocol::RcsData &data);
     void handleMotionState(const x30_protocol::MotionStateData &data);
     void handleControllerSensor(const x30_protocol::ControllerSensorData &data);

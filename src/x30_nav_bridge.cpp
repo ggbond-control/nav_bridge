@@ -181,7 +181,7 @@ void X30NavBridge::sendVelocityCommand(double vx, double vy, double vyaw) {
 void X30NavBridge::sendGaitCommand(uint32_t gait_cmd_code) {
     auto cmd = makeSimpleCommand(gait_cmd_code, 0);
     motion_udp_.send(&cmd, sizeof(cmd));
-    RCLCPP_INFO(this->get_logger(), "发送步态指令: 0x%08X", gait_cmd_code);
+    RCLCPP_INFO(this->get_logger(), "发送控制指令: 0x%08X", gait_cmd_code);
 }
 
 // ============================================================================
@@ -244,6 +244,10 @@ bool X30NavBridge::isControlInputFresh(std::chrono::steady_clock::time_point now
            now - last_input < std::chrono::milliseconds(cmd_vel_timeout_ms_);
 }
 
+bool X30NavBridge::isCmdVelForwardingAllowed() const {
+    return state_store_.basicState() == static_cast<uint8_t>(BasicState::RL_MODE);
+}
+
 X30NavBridge::ControlPulse X30NavBridge::evaluateControlPulse(
     std::chrono::steady_clock::time_point now, bool force_heartbeat) {
     std::lock_guard<std::mutex> lock(control_mutex_);
@@ -296,6 +300,12 @@ void X30NavBridge::sendCmdVelTick() {
     if (actions.session_started) {
         RCLCPP_INFO(this->get_logger(), "🤖 控制会话激活, 执行控制权获取...");
         RCLCPP_INFO(this->get_logger(), "🤖 控制权获取完成, 开始自主控制");
+    }
+
+    if (!isCmdVelForwardingAllowed()) {
+        RCLCPP_INFO_THROTTLE(this->get_logger(), *this->get_clock(), 2000,
+                             "⏸️ 当前不在 RL_MODE，暂不转发 /cmd_vel UDP 轴指令");
+        return;
     }
 
     double vx   = 0.0;

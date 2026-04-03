@@ -23,6 +23,8 @@ constexpr int kStopMotionTimeoutMs      = 12000;
 constexpr int kStopMotionResendMs       = 4000;
 constexpr int kLieTransitionTimeoutMs   = 6000;
 constexpr int kLieFinalWaitMs           = 7000;
+constexpr int kLieResendIntervalMs      = 3000;
+constexpr int kLieOverallTimeoutMs      = 12000;
 constexpr int kMaxCommandAttempts       = 2;
 
 }  // namespace
@@ -264,11 +266,11 @@ ActionResult ActionExecutor::lieDown() {
     }
 
     RCLCPP_INFO(logger_, "⏳ 等待机器人趴下...");
-    bool ok = sendSingleCommandAndWait(CMD_STAND_UP_DOWN,
-                                       {BasicState::STEPPING, BasicState::GOING_DOWN,
-                                        BasicState::LYING_DOWN},
-                                       kLieTransitionTimeoutMs, "趴下",
-                                       kControlWarmupMs) &&
+    bool ok = sendToggleCommandWithRetries(CMD_STAND_UP_DOWN,
+                                           {BasicState::STEPPING, BasicState::GOING_DOWN,
+                                            BasicState::LYING_DOWN},
+                                           kLieOverallTimeoutMs, kLieResendIntervalMs, "趴下",
+                                           kControlWarmupMs) &&
               waitForBasicState({BasicState::LYING_DOWN}, kLieFinalWaitMs);
     if (ok) {
         RCLCPP_INFO(logger_, "✅ 趴下完成");
