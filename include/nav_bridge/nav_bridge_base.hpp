@@ -103,14 +103,13 @@ protected:
 
     // ===================== cmd_vel 回调 =====================
     void cmdVelCallback(const geometry_msgs::msg::Twist::SharedPtr msg);
-    virtual void onControlInputUpdated() {}
 
     // 缓存最新的速度指令
     std::atomic<double> target_vx_{0.0};
     std::atomic<double> target_vy_{0.0};
     std::atomic<double> target_vyaw_{0.0};
 
-    // 控制活跃状态跟踪 (超时后停止发送轴指令及心跳, 交还遥控器)
+    // 最近一次收到 /cmd_vel 的时间戳，用于速度输入超时归零
     std::atomic<std::chrono::steady_clock::time_point> last_active_time_{
         std::chrono::steady_clock::time_point::min()};  // 初始为最小值 = 从未收到
 

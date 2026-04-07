@@ -31,8 +31,6 @@ protected:
     void sendVelocityCommand(double vx, double vy, double vyaw) override;
     void sendGaitCommand(uint32_t gait_cmd_code) override;
     void processIncomingData() override;
-    void onControlInputUpdated() override;
-
     void handleStandRequest(const std::shared_ptr<std_srvs::srv::Trigger::Request> req,
                             std::shared_ptr<std_srvs::srv::Trigger::Response> res) override;
     void handleLieRequest(const std::shared_ptr<std_srvs::srv::Trigger::Request> req,

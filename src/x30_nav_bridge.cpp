@@ -717,13 +717,6 @@ void X30NavBridge::handleReleaseControlRequest(
 }
 
 // ============================================================================
-// 基类回调
-// ============================================================================
-
-void X30NavBridge::onControlInputUpdated() {
-    acquireControl();
-}
-
 void NavBridgeBase::cmdVelCallback(const geometry_msgs::msg::Twist::SharedPtr msg) {
     target_vx_.store(msg->linear.x);
     target_vy_.store(msg->linear.y);
@@ -731,7 +724,6 @@ void NavBridgeBase::cmdVelCallback(const geometry_msgs::msg::Twist::SharedPtr ms
 
     // 更新最后一次收到有效指令的时间
     last_active_time_.store(std::chrono::steady_clock::now());
-    onControlInputUpdated();
 }
 
 NavBridgeBase::NavBridgeBase(const std::string &node_name, const rclcpp::NodeOptions &options)
