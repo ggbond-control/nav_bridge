@@ -13,6 +13,15 @@ namespace nav_bridge {
 
 using namespace x30_protocol;
 
+namespace {
+
+constexpr int kControlWarmupMs        = 400;
+constexpr int kControlWarmupPulseMs   = 100;
+constexpr int kGaitSwitchTimeoutMs    = 5000;
+constexpr int kCmdVelStateWaitMs      = 4000;
+
+}  // namespace
+
 // ============================================================================
 // 构造 / 析构
 // ============================================================================
@@ -98,6 +107,8 @@ bool X30NavBridge::initialize() {
         "~/ready", std::bind(&X30NavBridge::handleReadyRequest, this, _1, _2));
     release_control_srv_ = this->create_service<std_srvs::srv::Trigger>(
         "~/release_control", std::bind(&X30NavBridge::handleReleaseControlRequest, this, _1, _2));
+    set_gait_srv_ = this->create_service<nav_bridge::srv::SetGait>(
+        "~/set_gait", std::bind(&X30NavBridge::handleSetGaitRequest, this, _1, _2));
 
     action_executor_ = std::make_unique<ActionExecutor>(
         this->get_logger(), state_store_,
@@ -244,8 +255,116 @@ bool X30NavBridge::isControlInputFresh(std::chrono::steady_clock::time_point now
            now - last_input < std::chrono::milliseconds(cmd_vel_timeout_ms_);
 }
 
+ActionResult X30NavBridge::executeActionWithCmdVelSuppressed(
+    const char *action_name, const std::function<ActionResult()> &action) {
+    enterCmdVelSuppression(action_name);
+    struct ScopeExit {
+        X30NavBridge *self;
+        const char *name;
+        ~ScopeExit() { self->exitCmdVelSuppression(name); }
+    } scope_exit{this, action_name};
+
+    return action();
+}
+
+void X30NavBridge::enterCmdVelSuppression(const char *action_name) {
+    int previous_depth = cmd_vel_suppression_depth_.fetch_add(1);
+    if (previous_depth == 0) {
+        RCLCPP_INFO(this->get_logger(), "⏸️ %s 执行期间暂停转发 /cmd_vel UDP 轴指令", action_name);
+    }
+}
+
+void X30NavBridge::exitCmdVelSuppression(const char *action_name) {
+    int previous_depth = cmd_vel_suppression_depth_.fetch_sub(1);
+    if (previous_depth <= 0) {
+        cmd_vel_suppression_depth_.store(0);
+        RCLCPP_WARN(this->get_logger(), "cmd_vel suppression depth underflow after %s", action_name);
+        return;
+    }
+
+    if (previous_depth == 1) {
+        RCLCPP_INFO(this->get_logger(), "▶️ %s 执行结束，恢复 /cmd_vel UDP 轴指令转发", action_name);
+    }
+}
+
+bool X30NavBridge::isCmdVelSuppressed() const {
+    return cmd_vel_suppression_depth_.load() > 0;
+}
+
+bool X30NavBridge::isSupportedNavigationGait(uint8_t gait) const {
+    return gait == static_cast<uint8_t>(GaitState::L_WALK) ||
+           gait == static_cast<uint8_t>(GaitState::MOUNTAIN);
+}
+
+bool X30NavBridge::isCmdVelCompatibleState(uint8_t basic_state, uint8_t gait_state) const {
+    return basic_state == static_cast<uint8_t>(BasicState::RL_MODE) &&
+           isSupportedNavigationGait(gait_state);
+}
+
 bool X30NavBridge::isCmdVelForwardingAllowed() const {
-    return state_store_.basicState() == static_cast<uint8_t>(BasicState::RL_MODE);
+    if (isCmdVelSuppressed()) {
+        return false;
+    }
+
+    auto snapshot = state_store_.snapshot();
+    return isCmdVelCompatibleState(snapshot.basic_state, snapshot.gait_state);
+}
+
+bool X30NavBridge::waitForCmdVelCompatibleState(int timeout_ms) const {
+    return state_store_.waitForState(
+        [this](uint8_t basic_state, uint8_t gait_state) {
+            return isCmdVelCompatibleState(basic_state, gait_state);
+        },
+        timeout_ms);
+}
+
+ActionResult X30NavBridge::setNavigationGait(uint8_t gait) {
+    if (!isSupportedNavigationGait(gait)) {
+        return {false, "Unsupported navigation gait. Allowed values: 32 (L_WALK), 33 (MOUNTAIN)."};
+    }
+
+    auto snapshot = state_store_.snapshot();
+    if (!snapshot.connected) {
+        return {false, "Robot is not connected."};
+    }
+
+    if (snapshot.basic_state != static_cast<uint8_t>(BasicState::RL_MODE) &&
+        snapshot.basic_state != static_cast<uint8_t>(BasicState::STEPPING)) {
+        return {false, "Gait switching is only allowed in RL_MODE or STEPPING."};
+    }
+
+    if (snapshot.gait_state == gait && isCmdVelCompatibleState(snapshot.basic_state, gait)) {
+        return {true, "Robot is already in the requested navigation gait."};
+    }
+
+    uint32_t command = 0;
+    const char *gait_name = "UNKNOWN";
+    switch (static_cast<GaitState>(gait)) {
+        case GaitState::L_WALK:
+            command = CMD_GAIT_L_WALK;
+            gait_name = "L_WALK";
+            break;
+        case GaitState::MOUNTAIN:
+            command = CMD_GAIT_MOUNTAIN;
+            gait_name = "MOUNTAIN";
+            break;
+        default:
+            return {false, "Unsupported navigation gait."};
+    }
+
+    RCLCPP_INFO(this->get_logger(), "📌 请求切换导航步态到 %s(%u)", gait_name, gait);
+    warmupControl(kControlWarmupMs, kControlWarmupPulseMs);
+    sendGaitCommand(command);
+
+    if (!state_store_.waitForGaitState({static_cast<GaitState>(gait)}, kGaitSwitchTimeoutMs)) {
+        return {false, "Timeout waiting for requested gait state."};
+    }
+
+    if (!waitForCmdVelCompatibleState(kCmdVelStateWaitMs)) {
+        return {false, "Gait switched, but robot did not enter a cmd_vel-ready state in time."};
+    }
+
+    return {true, std::string("Navigation gait switched to ") + gait_name + "."};
 }
 
 X30NavBridge::ControlPulse X30NavBridge::evaluateControlPulse(
@@ -303,8 +422,10 @@ void X30NavBridge::sendCmdVelTick() {
     }
 
     if (!isCmdVelForwardingAllowed()) {
+        auto snapshot = state_store_.snapshot();
         RCLCPP_INFO_THROTTLE(this->get_logger(), *this->get_clock(), 2000,
-                             "⏸️ 当前不在 RL_MODE，暂不转发 /cmd_vel UDP 轴指令");
+                             "⏸️ 当前状态(basic=%u, gait=%u)不允许转发 /cmd_vel UDP 轴指令",
+                             snapshot.basic_state, snapshot.gait_state);
         return;
     }
 
@@ -678,7 +799,9 @@ void X30NavBridge::handleBattery(const BatterySensorData &data) {
 void X30NavBridge::handleStandRequest(
     const std::shared_ptr<std_srvs::srv::Trigger::Request> /*req*/,
     std::shared_ptr<std_srvs::srv::Trigger::Response> res) {
-    auto result  = action_executor_->stand();
+    auto result  = executeActionWithCmdVelSuppressed("stand", [this]() {
+        return action_executor_->stand();
+    });
     res->success = result.success;
     res->message = result.message;
 }
@@ -686,7 +809,9 @@ void X30NavBridge::handleStandRequest(
 void X30NavBridge::handleLieRequest(
     const std::shared_ptr<std_srvs::srv::Trigger::Request> /*req*/,
     std::shared_ptr<std_srvs::srv::Trigger::Response> res) {
-    auto result  = action_executor_->lieDown();
+    auto result  = executeActionWithCmdVelSuppressed("lie", [this]() {
+        return action_executor_->lieDown();
+    });
     res->success = result.success;
     res->message = result.message;
 }
@@ -694,7 +819,9 @@ void X30NavBridge::handleLieRequest(
 void X30NavBridge::handleReadyRequest(
     const std::shared_ptr<std_srvs::srv::Trigger::Request> /*req*/,
     std::shared_ptr<std_srvs::srv::Trigger::Response> res) {
-    auto result  = action_executor_->ready();
+    auto result  = executeActionWithCmdVelSuppressed("ready", [this]() {
+        return action_executor_->ready();
+    });
     res->success = result.success;
     res->message = result.message;
 }
@@ -716,7 +843,21 @@ void X30NavBridge::handleReleaseControlRequest(
     }
 }
 
+void X30NavBridge::handleSetGaitRequest(
+    const std::shared_ptr<nav_bridge::srv::SetGait::Request> req,
+    std::shared_ptr<nav_bridge::srv::SetGait::Response> res) {
+    auto result = executeActionWithCmdVelSuppressed("set_gait", [this, req]() {
+        return setNavigationGait(req->gait);
+    });
+    res->success = result.success;
+    res->message = result.message;
+}
+
 // ============================================================================
+void X30NavBridge::onControlInputUpdated() {
+    acquireControl();
+}
+
 void NavBridgeBase::cmdVelCallback(const geometry_msgs::msg::Twist::SharedPtr msg) {
     target_vx_.store(msg->linear.x);
     target_vy_.store(msg->linear.y);
@@ -724,6 +865,7 @@ void NavBridgeBase::cmdVelCallback(const geometry_msgs::msg::Twist::SharedPtr ms
 
     // 更新最后一次收到有效指令的时间
     last_active_time_.store(std::chrono::steady_clock::now());
+    onControlInputUpdated();
 }
 
 NavBridgeBase::NavBridgeBase(const std::string &node_name, const rclcpp::NodeOptions &options)

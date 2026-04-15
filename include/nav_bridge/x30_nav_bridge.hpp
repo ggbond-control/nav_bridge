@@ -6,6 +6,7 @@
 #include <atomic>
 #include <chrono>
 #include <condition_variable>
+#include <functional>
 #include <memory>
 #include <mutex>
 #include <thread>
@@ -31,6 +32,7 @@ protected:
     void sendVelocityCommand(double vx, double vy, double vyaw) override;
     void sendGaitCommand(uint32_t gait_cmd_code) override;
     void processIncomingData() override;
+    void onControlInputUpdated() override;
     void handleStandRequest(const std::shared_ptr<std_srvs::srv::Trigger::Request> req,
                             std::shared_ptr<std_srvs::srv::Trigger::Response> res) override;
     void handleLieRequest(const std::shared_ptr<std_srvs::srv::Trigger::Request> req,
@@ -40,6 +42,8 @@ protected:
     void handleReleaseControlRequest(
         const std::shared_ptr<std_srvs::srv::Trigger::Request> req,
         std::shared_ptr<std_srvs::srv::Trigger::Response> res) override;
+    void handleSetGaitRequest(const std::shared_ptr<nav_bridge::srv::SetGait::Request> req,
+                              std::shared_ptr<nav_bridge::srv::SetGait::Response> res) override;
 
 private:
     struct ControlPulse {
@@ -66,7 +70,16 @@ private:
     void warmupControl(int warmup_ms, int pulse_ms);
     bool isControlInputFresh(std::chrono::steady_clock::time_point now) const;
     ControlPulse evaluateControlPulse(std::chrono::steady_clock::time_point now, bool force_heartbeat);
+    ActionResult executeActionWithCmdVelSuppressed(const char *action_name,
+                                                   const std::function<ActionResult()> &action);
+    void enterCmdVelSuppression(const char *action_name);
+    void exitCmdVelSuppression(const char *action_name);
+    bool isCmdVelSuppressed() const;
     bool isCmdVelForwardingAllowed() const;
+    bool isSupportedNavigationGait(uint8_t gait) const;
+    bool isCmdVelCompatibleState(uint8_t basic_state, uint8_t gait_state) const;
+    bool waitForCmdVelCompatibleState(int timeout_ms) const;
+    ActionResult setNavigationGait(uint8_t gait);
     void handleRcsData(const x30_protocol::RcsData &data);
     void handleMotionState(const x30_protocol::MotionStateData &data);
     void handleControllerSensor(const x30_protocol::ControllerSensorData &data);
@@ -91,6 +104,7 @@ private:
     bool control_query_sent_{false};
     std::chrono::steady_clock::time_point last_heartbeat_sent_{
         std::chrono::steady_clock::time_point::min()};
+    std::atomic<int> cmd_vel_suppression_depth_{0};
 
     // ===================== 业务模块 =====================
     RobotStateStore state_store_;

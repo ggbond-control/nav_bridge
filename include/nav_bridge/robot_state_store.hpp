@@ -7,6 +7,7 @@
 #include <chrono>
 #include <condition_variable>
 #include <cstdint>
+#include <functional>
 #include <mutex>
 #include <vector>
 
@@ -114,9 +115,16 @@ public:
         return cv_.wait_for(lock, std::chrono::milliseconds(timeout_ms), matches);
     }
 
+    bool waitForState(const std::function<bool(uint8_t, uint8_t)> &predicate, int timeout_ms) const {
+        auto matches = [this, &predicate]() { return predicate(basic_state_, gait_state_); };
+
+        std::unique_lock<std::mutex> lock(mutex_);
+        return cv_.wait_for(lock, std::chrono::milliseconds(timeout_ms), matches);
+    }
+
 private:
     mutable std::mutex mutex_;
-    std::condition_variable cv_;
+    mutable std::condition_variable cv_;
     uint8_t basic_state_{0};
     uint8_t gait_state_{0};
     bool rcs_received_{false};
