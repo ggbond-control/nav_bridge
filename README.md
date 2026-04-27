@@ -165,9 +165,11 @@ X30 并不是“发一条动作指令就一定立刻执行”的设备。对于�
 - 若已经趴下，直接成功
 - 若正在趴下，只等待最终进入 `LYING_DOWN`
 - 若处于软急停，先恢复趴下
-- 若处于 `RL_MODE / STEPPING`，先发送一次 `CMD_STAND_UP_DOWN` 把机器人从运动态拉回“趴下链”
+- 若处于 `RL_MODE`，先发送一次 `CMD_STAND_UP_DOWN` 退出 RL
+- 若退出后或调用时仍处于 `STEPPING`，先发送 `CMD_MOTION` 停止运动并回到站立态
 - 如果已经进入 `GOING_DOWN / LYING_DOWN`，则直接等待最终趴下
-- 如果只是回到 `FORCE_STAND / INITIAL_STAND`，再补一次 `CMD_STAND_UP_DOWN` 进入最终趴下阶段
+- 如果退出运动态后落在 `FORCE_STAND / INITIAL_STAND`，会先等待站立态稳定
+- 只有在站立态稳定后，才补发 `CMD_STAND_UP_DOWN` 进入最终趴下阶段
 
 `lie` 当前也复用了持续接管窗口，以提高首次接管或刚释放控制权后再次服务调用的稳定性。
 

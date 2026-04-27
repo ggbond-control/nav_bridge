@@ -25,6 +25,10 @@ constexpr int kLieTransitionTimeoutMs   = 6000;
 constexpr int kLieFinalWaitMs           = 7000;
 constexpr int kLieResendIntervalMs      = 3000;
 constexpr int kLieOverallTimeoutMs      = 12000;
+constexpr int kLieStandSettleMs         = 3000;
+constexpr int kLieStandSettlePollMs     = 100;
+constexpr int kLieStopMotionTimeoutMs   = 8000;
+constexpr int kLieStopMotionResendMs    = 3000;
 constexpr int kMaxCommandAttempts       = 2;
 
 }  // namespace
@@ -235,12 +239,12 @@ ActionResult ActionExecutor::lieDown() {
         return {ok, ok ? "Robot recovered and lied down." : "Timeout recovering from estop."};
     }
 
-    if (state == static_cast<uint8_t>(BasicState::RL_MODE) ||
-        state == static_cast<uint8_t>(BasicState::STEPPING)) {
+    if (state == static_cast<uint8_t>(BasicState::RL_MODE)) {
         RCLCPP_INFO(logger_, "⏳ 从运动态退出，进入趴下流程...");
         if (!sendSingleCommandAndWait(CMD_STAND_UP_DOWN,
                                       {BasicState::FORCE_STAND, BasicState::INITIAL_STAND,
-                                       BasicState::GOING_DOWN, BasicState::LYING_DOWN},
+                                       BasicState::STEPPING, BasicState::GOING_DOWN,
+                                       BasicState::LYING_DOWN},
                                       kLieTransitionTimeoutMs, "退出运动态准备趴下",
                                       kControlWarmupMs)) {
             RCLCPP_WARN(logger_, "⚠️ 无法从运动态退出到趴下链");
@@ -261,14 +265,59 @@ ActionResult ActionExecutor::lieDown() {
             }
             return {ok, ok ? "Robot has lied down." : "Timeout waiting for robot to lie down."};
         }
+    }
 
+    state = state_store_.basicState();
+    if (state == static_cast<uint8_t>(BasicState::STEPPING)) {
+        RCLCPP_INFO(logger_, "⏳ 当前仍在踏步运动，先停止运动回到站立态...");
+        if (!sendToggleCommandWithRetries(CMD_MOTION,
+                                          {BasicState::FORCE_STAND, BasicState::INITIAL_STAND},
+                                          kLieStopMotionTimeoutMs, kLieStopMotionResendMs,
+                                          "趴下前停止运动", kControlWarmupMs)) {
+            RCLCPP_WARN(logger_, "⚠️ 趴下前停止运动超时");
+            return {false, "Timeout stopping motion before lie down."};
+        }
+    }
+
+    state = state_store_.basicState();
+    if (state == static_cast<uint8_t>(BasicState::FORCE_STAND) ||
+        state == static_cast<uint8_t>(BasicState::INITIAL_STAND)) {
+        RCLCPP_INFO(logger_, "⏳ 已进入站立态，等待稳定后再执行最终趴下...");
+        auto settle_deadline = std::chrono::steady_clock::now() +
+                               std::chrono::milliseconds(kLieStandSettleMs);
+        while (std::chrono::steady_clock::now() < settle_deadline) {
+            state = state_store_.basicState();
+            if (state == static_cast<uint8_t>(BasicState::LYING_DOWN)) {
+                RCLCPP_INFO(logger_, "✅ 趴下完成");
+                return {true, "Robot has lied down."};
+            }
+            if (state == static_cast<uint8_t>(BasicState::GOING_DOWN)) {
+                bool ok = waitForBasicState({BasicState::LYING_DOWN}, kLieFinalWaitMs);
+                return {ok, ok ? "Robot has lied down." :
+                                  "Timeout waiting for robot to lie down."};
+            }
+            if (state == static_cast<uint8_t>(BasicState::STEPPING)) {
+                RCLCPP_INFO(logger_, "⏳ 稳定等待期间又进入踏步，重新停止运动后再趴下");
+                if (!sendToggleCommandWithRetries(CMD_MOTION,
+                                                  {BasicState::FORCE_STAND,
+                                                   BasicState::INITIAL_STAND},
+                                                  kLieStopMotionTimeoutMs,
+                                                  kLieStopMotionResendMs,
+                                                  "趴下前停止运动", kControlWarmupMs)) {
+                    RCLCPP_WARN(logger_, "⚠️ 趴下前停止运动超时");
+                    return {false, "Timeout stopping motion before lie down."};
+                }
+                settle_deadline = std::chrono::steady_clock::now() +
+                                  std::chrono::milliseconds(kLieStandSettleMs);
+            }
+            std::this_thread::sleep_for(std::chrono::milliseconds(kLieStandSettlePollMs));
+        }
         RCLCPP_INFO(logger_, "✅ 已退出运动态，继续执行最终趴下");
     }
 
     RCLCPP_INFO(logger_, "⏳ 等待机器人趴下...");
     bool ok = sendToggleCommandWithRetries(CMD_STAND_UP_DOWN,
-                                           {BasicState::STEPPING, BasicState::GOING_DOWN,
-                                            BasicState::LYING_DOWN},
+                                           {BasicState::GOING_DOWN, BasicState::LYING_DOWN},
                                            kLieOverallTimeoutMs, kLieResendIntervalMs, "趴下",
                                            kControlWarmupMs) &&
               waitForBasicState({BasicState::LYING_DOWN}, kLieFinalWaitMs);
