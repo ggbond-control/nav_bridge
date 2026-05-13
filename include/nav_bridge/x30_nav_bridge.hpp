@@ -9,6 +9,7 @@
 #include <functional>
 #include <memory>
 #include <mutex>
+#include <string>
 #include <thread>
 #include <vector>
 
@@ -44,6 +45,9 @@ protected:
         std::shared_ptr<std_srvs::srv::Trigger::Response> res) override;
     void handleSetGaitRequest(const std::shared_ptr<nav_bridge::srv::SetGait::Request> req,
                               std::shared_ptr<nav_bridge::srv::SetGait::Response> res) override;
+    void handleChargeCommandRequest(
+        const std::shared_ptr<nav_bridge::srv::ChargeCommand::Request> req,
+        std::shared_ptr<nav_bridge::srv::ChargeCommand::Response> res) override;
 
 private:
     struct ControlPulse {
@@ -60,6 +64,7 @@ private:
     UdpTransport percept_udp_;  ///< 与105感知主机通信 (可选)
 
     std::thread recv_thread_;
+    std::thread charge_recv_thread_;
     std::atomic<bool> running_{false};
     void receiveLoop();
 
@@ -80,6 +85,10 @@ private:
     bool isCmdVelCompatibleState(uint8_t basic_state, uint8_t gait_state) const;
     bool waitForCmdVelCompatibleState(int timeout_ms) const;
     ActionResult setNavigationGait(uint8_t gait);
+    bool sendChargeCommand(uint32_t code, int32_t value);
+    bool waitForChargeResponse(uint64_t previous_seq, int timeout_ms, uint16_t &out_state);
+    bool isExpectedChargeStateForCommand(uint8_t command, uint16_t state) const;
+    void chargeReceiveLoop();
     void handleRcsData(const x30_protocol::RcsData &data);
     void handleMotionState(const x30_protocol::MotionStateData &data);
     void handleControllerSensor(const x30_protocol::ControllerSensorData &data);
@@ -105,6 +114,12 @@ private:
     std::chrono::steady_clock::time_point last_heartbeat_sent_{
         std::chrono::steady_clock::time_point::min()};
     std::atomic<int> cmd_vel_suppression_depth_{0};
+    std::mutex charge_service_mutex_;
+    mutable std::mutex charge_state_mutex_;
+    std::condition_variable charge_state_cv_;
+    uint16_t latest_charge_response_state_{x30_protocol::CHARGE_STATE_IDLE};
+    uint64_t charge_response_seq_{0};
+    int charge_wait_window_ms_{10000};
 
     // ===================== 业务模块 =====================
     RobotStateStore state_store_;

@@ -41,6 +41,8 @@ constexpr int MOTION_HOST_PORT  = 43893;
 constexpr char PERCEPT_HOST_IP[] = "192.168.1.105";  ///< 感知主机
 constexpr int PERCEPT_HOST_PORT  = 43899;
 constexpr int PERCEPT_LIDAR_PORT = 60000;
+constexpr int PERCEPT_CHARGE_PORT = 3333;
+constexpr int PERCEPT_CHARGE_LOCAL_PORT = 49004;
 
 // ============================================================================
 // 发送指令码 (0x21 前缀 = 模拟手柄/遥控器, 0x31 前缀 = 导航模块)
@@ -91,6 +93,12 @@ constexpr uint32_t CMD_GROUND_MODE =
     0x3101EE01;  ///< 地形图模式: 3=实心, 4=镂空, 5=无踢面, 20=累积帧
 constexpr uint32_t CMD_BRAKE_MODE      = 0x3101EE02;  ///< 停避障模式: 1=停障, 2=避障
 constexpr uint32_t CMD_OBSTACLE_HEIGHT = 0x3101EE04;  ///< 障碍高度: 1=8cm, 2=28cm
+constexpr uint32_t CMD_CHARGE_MANAGER = 0x91910250;   ///< 自主充电请求
+constexpr uint32_t CMD_CHARGE_MANAGER_QUERY = 0x91910253;  ///< 自主充电查询
+constexpr int32_t CHARGE_COMMAND_START_VALUE = 1;
+constexpr int32_t CHARGE_COMMAND_STOP_VALUE = 0;
+constexpr int32_t CHARGE_COMMAND_RESET_VALUE = 2;
+constexpr int32_t CHARGE_COMMAND_QUERY_VALUE = 0;
 
 // --- 感知主机 (发往 105:60000) ---
 constexpr uint32_t CMD_LIDAR_ODOM = 0x0BAA0001;  ///< 激光里程计: 1=开, 0=关
@@ -363,6 +371,59 @@ inline int32_t velocityToAxisValue(float velocity, float max_vel) {
         return 0;
     }
     return raw_val;
+}
+
+// ============================================================================
+// 自主充电状态
+// ============================================================================
+
+constexpr uint16_t CHARGE_STATE_IDLE = 0x0000;
+constexpr uint16_t CHARGE_STATE_DO_CHARGE_TASK = 0x0001;
+constexpr uint16_t CHARGE_STATE_CHARGING = 0x0002;
+constexpr uint16_t CHARGE_STATE_DO_OVER_CHARGE_TASK = 0x0003;
+constexpr uint16_t CHARGE_STATE_PILE_ERROR = 0x0004;
+constexpr uint16_t CHARGE_STATE_SAFETY_WARNING = 0x0005;
+constexpr uint16_t CHARGE_STATE_TAG_RECV_TIMEOUT = 0x1002;
+constexpr uint16_t CHARGE_STATE_MARK_LAUNCH_FAILED = 0x1003;
+constexpr uint16_t CHARGE_STATE_TAG_NO_VALUE = 0x1005;
+constexpr uint16_t CHARGE_STATE_GOTO_STACK_FAILED = 0x1004;
+constexpr uint16_t CHARGE_STATE_TAG_POSE_JUMP = 0x1006;
+constexpr uint16_t CHARGE_STATE_NO_CHARGE_PLUG = 0x1007;
+constexpr uint16_t CHARGE_STATE_NO_CHARGE_PLUG_STEP_BACK = 0x100A;
+
+inline const char *chargeStateToString(uint16_t state)
+{
+    switch (state)
+    {
+    case CHARGE_STATE_IDLE:
+        return "idle";
+    case CHARGE_STATE_DO_CHARGE_TASK:
+        return "do_charge_task";
+    case CHARGE_STATE_CHARGING:
+        return "charging";
+    case CHARGE_STATE_DO_OVER_CHARGE_TASK:
+        return "do_over_charge_task";
+    case CHARGE_STATE_PILE_ERROR:
+        return "pile_error";
+    case CHARGE_STATE_SAFETY_WARNING:
+        return "safety_warning";
+    case CHARGE_STATE_TAG_RECV_TIMEOUT:
+        return "TAGRECETIMEOUT";
+    case CHARGE_STATE_MARK_LAUNCH_FAILED:
+        return "MARKLAUNCHFAILED";
+    case CHARGE_STATE_TAG_NO_VALUE:
+        return "TAGNOVALUE";
+    case CHARGE_STATE_GOTO_STACK_FAILED:
+        return "GOTOSTACKFAILED";
+    case CHARGE_STATE_TAG_POSE_JUMP:
+        return "TAGPOSEJUMP";
+    case CHARGE_STATE_NO_CHARGE_PLUG:
+        return "NOCHARGEPLUG";
+    case CHARGE_STATE_NO_CHARGE_PLUG_STEP_BACK:
+        return "NOCHARGEPLUG_STEP_BACK";
+    default:
+        return "unknown";
+    }
 }
 
 }  // namespace x30_protocol

@@ -10,6 +10,7 @@
 #include <functional>
 #include <geometry_msgs/msg/twist.hpp>
 #include <nav_msgs/msg/odometry.hpp>
+#include <nav_bridge/srv/charge_command.hpp>
 #include <nav_bridge/srv/set_gait.hpp>
 #include <rclcpp/rclcpp.hpp>
 #include <sensor_msgs/msg/imu.hpp>
@@ -83,6 +84,7 @@ protected:
     rclcpp::Service<std_srvs::srv::Trigger>::SharedPtr ready_srv_;
     rclcpp::Service<std_srvs::srv::Trigger>::SharedPtr release_control_srv_;
     rclcpp::Service<nav_bridge::srv::SetGait>::SharedPtr set_gait_srv_;
+    rclcpp::Service<nav_bridge::srv::ChargeCommand>::SharedPtr charge_command_srv_;
 
     virtual void handleStandRequest(const std::shared_ptr<std_srvs::srv::Trigger::Request> req,
                                     std::shared_ptr<std_srvs::srv::Trigger::Response> res)      = 0;
@@ -96,6 +98,9 @@ protected:
     virtual void handleSetGaitRequest(
         const std::shared_ptr<nav_bridge::srv::SetGait::Request> req,
         std::shared_ptr<nav_bridge::srv::SetGait::Response> res) = 0;
+    virtual void handleChargeCommandRequest(
+        const std::shared_ptr<nav_bridge::srv::ChargeCommand::Request> req,
+        std::shared_ptr<nav_bridge::srv::ChargeCommand::Response> res) = 0;
 
     // ===================== TF =====================
     std::unique_ptr<tf2_ros::TransformBroadcaster> tf_broadcaster_;

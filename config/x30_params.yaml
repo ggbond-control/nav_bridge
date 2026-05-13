@@ -10,6 +10,7 @@ nav_bridge_node:
     cmd_vel_rate_hz: 50              # 轴指令下发频率 (规格书要求50Hz)
     cmd_vel_timeout_ms: 5000         # /cmd_vel 速度输入保鲜时间, 超时后自动发零速度但不释放控制权 (ms)
     startup_acquire_control: true    # 节点启动后是否立即接管并持续发送 heartbeat
+    charge_wait_window_ms: 10000     # 充电状态流等待窗口（ms）
 
     # === Frame IDs ===
     imu_frame_id: "imu_link"

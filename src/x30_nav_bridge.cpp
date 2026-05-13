@@ -19,6 +19,9 @@ constexpr int kControlWarmupMs        = 400;
 constexpr int kControlWarmupPulseMs   = 100;
 constexpr int kGaitSwitchTimeoutMs    = 5000;
 constexpr int kCmdVelStateWaitMs      = 4000;
+constexpr int kChargePrepSettleMs        = 200;
+constexpr int kChargeReceivePollMs       = 100;
+constexpr int kChargeVelSourceNavigation = 2;
 
 }  // namespace
 
@@ -36,6 +39,7 @@ X30NavBridge::X30NavBridge(const rclcpp::NodeOptions &options)
     this->declare_parameter("cmd_vel_rate_hz", CMD_VEL_RATE_HZ);
     this->declare_parameter("cmd_vel_timeout_ms", 5000);
     this->declare_parameter("startup_acquire_control", true);
+    this->declare_parameter("charge_wait_window_ms", 10000);
     this->declare_parameter("imu_frame_id", std::string("imu_link"));
     this->declare_parameter("odom_frame_id", std::string("odom"));
     this->declare_parameter("base_frame_id", std::string("base_link"));
@@ -49,6 +53,7 @@ X30NavBridge::X30NavBridge(const rclcpp::NodeOptions &options)
     cmd_vel_rate_hz_       = this->get_parameter("cmd_vel_rate_hz").as_int();
     cmd_vel_timeout_ms_    = this->get_parameter("cmd_vel_timeout_ms").as_int();
     startup_acquire_control_ = this->get_parameter("startup_acquire_control").as_bool();
+    charge_wait_window_ms_ = this->get_parameter("charge_wait_window_ms").as_int();
     imu_frame_id_          = this->get_parameter("imu_frame_id").as_string();
     odom_frame_id_         = this->get_parameter("odom_frame_id").as_string();
     base_frame_id_         = this->get_parameter("base_frame_id").as_string();
@@ -68,6 +73,8 @@ bool X30NavBridge::initialize() {
     RCLCPP_INFO(this->get_logger(), "=== 绝影X30 Nav Bridge 初始化 ===");
     RCLCPP_INFO(this->get_logger(), "运动主机: %s:%d", motion_host_ip_.c_str(), motion_host_port_);
     RCLCPP_INFO(this->get_logger(), "本地接收端口: %d", local_recv_port_);
+    RCLCPP_INFO(this->get_logger(), "自主充电服务: %s:%d (local:%d), wait_window=%dms",
+                PERCEPT_HOST_IP, PERCEPT_CHARGE_PORT, PERCEPT_CHARGE_LOCAL_PORT, charge_wait_window_ms_);
 
     // 打印结构体大小，方便调试协议对齐
     RCLCPP_INFO(this->get_logger(),
@@ -79,6 +86,11 @@ bool X30NavBridge::initialize() {
     // 1. 打开UDP — 连接运动主机, 同时绑定本地端口用于接收
     if (!motion_udp_.open(motion_host_ip_, motion_host_port_, local_recv_port_)) {
         RCLCPP_ERROR(this->get_logger(), "无法打开UDP socket (运动主机)");
+        return false;
+    }
+    if (!percept_udp_.open(PERCEPT_HOST_IP, PERCEPT_CHARGE_PORT, PERCEPT_CHARGE_LOCAL_PORT))
+    {
+        RCLCPP_ERROR(this->get_logger(), "无法打开UDP socket (感知主机自主充电)");
         return false;
     }
     RCLCPP_INFO(this->get_logger(), "UDP socket 已打开");
@@ -109,6 +121,8 @@ bool X30NavBridge::initialize() {
         "~/release_control", std::bind(&X30NavBridge::handleReleaseControlRequest, this, _1, _2));
     set_gait_srv_ = this->create_service<nav_bridge::srv::SetGait>(
         "~/set_gait", std::bind(&X30NavBridge::handleSetGaitRequest, this, _1, _2));
+    charge_command_srv_ = this->create_service<nav_bridge::srv::ChargeCommand>(
+        "~/charge_command", std::bind(&X30NavBridge::handleChargeCommandRequest, this, _1, _2));
 
     action_executor_ = std::make_unique<ActionExecutor>(
         this->get_logger(), state_store_,
@@ -130,6 +144,7 @@ bool X30NavBridge::initialize() {
 
     // 4. 启动接收线程
     recv_thread_ = std::thread(&X30NavBridge::receiveLoop, this);
+    charge_recv_thread_ = std::thread(&X30NavBridge::chargeReceiveLoop, this);
 
     RCLCPP_INFO(this->get_logger(), "=== Nav Bridge 初始化完成, 等待机器狗连接... ===");
     return true;
@@ -143,6 +158,10 @@ void X30NavBridge::shutdown() {
     running_ = false;
     if (recv_thread_.joinable()) {
         recv_thread_.join();
+    }
+    if (charge_recv_thread_.joinable())
+    {
+        charge_recv_thread_.join();
     }
 
     // 发送速度归零
@@ -365,6 +384,86 @@ ActionResult X30NavBridge::setNavigationGait(uint8_t gait) {
     }
 
     return {true, std::string("Navigation gait switched to ") + gait_name + "."};
+}
+
+bool X30NavBridge::sendChargeCommand(uint32_t code, int32_t value)
+{
+    auto cmd = makeSimpleCommand(code, value);
+    return percept_udp_.send(&cmd, sizeof(cmd));
+}
+
+bool X30NavBridge::waitForChargeResponse(uint64_t previous_seq, int timeout_ms, uint16_t &out_state)
+{
+    auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(timeout_ms);
+    std::unique_lock<std::mutex> lock(charge_state_mutex_);
+
+    while (std::chrono::steady_clock::now() < deadline)
+    {
+        if (charge_response_seq_ > previous_seq)
+        {
+            out_state = latest_charge_response_state_;
+            return true;
+        }
+
+        if (charge_state_cv_.wait_until(lock, deadline) == std::cv_status::timeout)
+        {
+            break;
+        }
+    }
+    return false;
+}
+
+bool X30NavBridge::isExpectedChargeStateForCommand(uint8_t command, uint16_t state) const
+{
+    switch (command)
+    {
+    case nav_bridge::srv::ChargeCommand::Request::COMMAND_START:
+        return state == CHARGE_STATE_DO_CHARGE_TASK || state == CHARGE_STATE_CHARGING;
+    case nav_bridge::srv::ChargeCommand::Request::COMMAND_STOP:
+        return state == CHARGE_STATE_DO_OVER_CHARGE_TASK || state == CHARGE_STATE_IDLE;
+    case nav_bridge::srv::ChargeCommand::Request::COMMAND_RESET:
+        return state == CHARGE_STATE_IDLE;
+    case nav_bridge::srv::ChargeCommand::Request::COMMAND_QUERY:
+        return true;
+    default:
+        return false;
+    }
+}
+
+void X30NavBridge::chargeReceiveLoop()
+{
+    while (running_)
+    {
+        CommandHead response{};
+        int received = percept_udp_.receive(&response, sizeof(response), kChargeReceivePollMs);
+        if (received <= 0)
+        {
+            continue;
+        }
+
+        if (received < static_cast<int>(sizeof(CommandHead)))
+        {
+            continue;
+        }
+
+        if (response.type != 0)
+        {
+            continue;
+        }
+
+        if (response.code != CMD_CHARGE_MANAGER && response.code != CMD_CHARGE_MANAGER_QUERY)
+        {
+            continue;
+        }
+
+        uint16_t state = static_cast<uint16_t>(response.paramters_size);
+        {
+            std::lock_guard<std::mutex> lock(charge_state_mutex_);
+            latest_charge_response_state_ = state;
+            ++charge_response_seq_;
+        }
+        charge_state_cv_.notify_all();
+    }
 }
 
 X30NavBridge::ControlPulse X30NavBridge::evaluateControlPulse(
@@ -851,6 +950,100 @@ void X30NavBridge::handleSetGaitRequest(
     });
     res->success = result.success;
     res->message = result.message;
+}
+
+void X30NavBridge::handleChargeCommandRequest(const std::shared_ptr<nav_bridge::srv::ChargeCommand::Request> req, std::shared_ptr<nav_bridge::srv::ChargeCommand::Response> res)
+{
+    uint32_t cmd_code = CMD_CHARGE_MANAGER;
+    int32_t cmd_value = CHARGE_COMMAND_START_VALUE;
+
+    switch (req->command)
+    {
+    case nav_bridge::srv::ChargeCommand::Request::COMMAND_START:
+        cmd_code = CMD_CHARGE_MANAGER;
+        cmd_value = CHARGE_COMMAND_START_VALUE;
+        break;
+    case nav_bridge::srv::ChargeCommand::Request::COMMAND_STOP:
+        cmd_code = CMD_CHARGE_MANAGER;
+        cmd_value = CHARGE_COMMAND_STOP_VALUE;
+        break;
+    case nav_bridge::srv::ChargeCommand::Request::COMMAND_RESET:
+        cmd_code = CMD_CHARGE_MANAGER;
+        cmd_value = CHARGE_COMMAND_RESET_VALUE;
+        break;
+    case nav_bridge::srv::ChargeCommand::Request::COMMAND_QUERY:
+        cmd_code = CMD_CHARGE_MANAGER_QUERY;
+        cmd_value = CHARGE_COMMAND_QUERY_VALUE;
+        break;
+    default:
+        res->success = false;
+        res->charge_state = CHARGE_STATE_IDLE;
+        res->state_name = "invalid_command";
+        res->message = "Invalid charge command. Allowed: 0(start),1(stop),2(reset),3(query).";
+        return;
+    }
+
+    if (req->command == nav_bridge::srv::ChargeCommand::Request::COMMAND_START)
+    {
+        auto snapshot = state_store_.snapshot();
+        if (snapshot.basic_state == static_cast<uint8_t>(BasicState::RL_MODE))
+        {
+            res->success = false;
+            res->charge_state = CHARGE_STATE_IDLE;
+            res->state_name = "rl_mode_not_allowed";
+            res->message = "Robot is in RL_MODE. Exit RL first, then retry charge START.";
+            return;
+        }
+
+        auto vel_source_cmd = makeSimpleCommand(CMD_VEL_SOURCE, kChargeVelSourceNavigation);
+        if (!percept_udp_.sendTo(&vel_source_cmd, sizeof(vel_source_cmd), PERCEPT_HOST_IP, PERCEPT_HOST_PORT))
+        {
+            res->success = false;
+            res->charge_state = CHARGE_STATE_IDLE;
+            res->state_name = "vel_source_send_failed";
+            res->message = "Failed to switch velocity source to navigation before charge START.";
+            return;
+        }
+        std::this_thread::sleep_for(std::chrono::milliseconds(kChargePrepSettleMs));
+    }
+
+    std::lock_guard<std::mutex> lock(charge_service_mutex_);
+    uint64_t before_seq = 0;
+    {
+        std::lock_guard<std::mutex> state_lock(charge_state_mutex_);
+        before_seq = charge_response_seq_;
+    }
+
+    if (!sendChargeCommand(cmd_code, cmd_value))
+    {
+        res->success = false;
+        res->charge_state = CHARGE_STATE_IDLE;
+        res->state_name = "send_failed";
+        res->message = "Failed to send charge command.";
+        return;
+    }
+
+    uint16_t final_state = CHARGE_STATE_IDLE;
+    if (!waitForChargeResponse(before_seq, charge_wait_window_ms_, final_state))
+    {
+        res->success = false;
+        res->charge_state = CHARGE_STATE_IDLE;
+        res->state_name = "response_timeout";
+        res->message = "Charge manager did not respond within wait window.";
+        return;
+    }
+
+    res->charge_state = final_state;
+    res->state_name = chargeStateToString(final_state);
+    if (!isExpectedChargeStateForCommand(req->command, final_state))
+    {
+        res->success = false;
+        res->message = "Charge manager responded, but state did not match the command.";
+        return;
+    }
+
+    res->success = true;
+    res->message = "Charge command accepted.";
 }
 
 // ============================================================================

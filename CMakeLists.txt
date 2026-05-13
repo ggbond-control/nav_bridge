@@ -23,6 +23,7 @@ find_package(tf2_geometry_msgs REQUIRED)
 
 rosidl_generate_interfaces(${PROJECT_NAME}
   "srv/SetGait.srv"
+  "srv/ChargeCommand.srv"
 )
 
 # Nav bridge node executable
