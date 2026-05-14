@@ -47,7 +47,7 @@ START 前会向 `192.168.1.105:43899` 发送 `0x3101EE03 value=2`，将速度源
 
 START 不使用固定超时判断成功失败。服务会持续等待充电管理器进入 `do_charge_task` 或 `charging`，如果收到明确错误状态则返回失败。
 
-STOP、RESET、QUERY 也会等待充电管理器返回对应状态。
+STOP 会持续等待充电管理器从 `do_over_charge_task` 回到 `idle`，成功后自动切回手动模式。RESET、QUERY 会等待充电管理器返回对应状态。
 
 ## 参数
 

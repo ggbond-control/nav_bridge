@@ -85,8 +85,10 @@ private:
     bool isCmdVelCompatibleState(uint8_t basic_state, uint8_t gait_state) const;
     bool waitForCmdVelCompatibleState(int timeout_ms) const;
     ActionResult setNavigationGait(uint8_t gait);
+    bool sendChargeVelocitySource(int32_t source);
     bool sendChargeCommand(uint32_t code, int32_t value);
     bool waitForChargeResponse(uint64_t previous_seq, uint16_t &out_state);
+    bool switchToManualModeAfterCharge();
     bool isFailureChargeState(uint16_t state) const;
     bool isExpectedChargeStateForCommand(uint8_t command, uint16_t state) const;
     void chargeReceiveLoop();
@@ -124,6 +126,8 @@ private:
     std::condition_variable charge_state_cv_;
     uint16_t latest_charge_response_state_{x30_protocol::CHARGE_STATE_IDLE};
     uint64_t charge_response_seq_{0};
+    std::atomic<bool> is_nav_mode_{false};
+    std::atomic<int> last_logged_nav_mode_{-1};
 
     // ===================== 业务模块 =====================
     RobotStateStore state_store_;

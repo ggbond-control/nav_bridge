@@ -65,8 +65,8 @@ constexpr uint32_t CMD_VEL_YAW     = 0x21010135;  ///< 右摇杆X: 转向 (正�
 constexpr uint32_t CMD_BODY_HEIGHT = 0x21010102;  ///< 右摇杆Y: 身体高度
 
 // --- 控制模式 ---
-constexpr uint32_t CMD_NON_MANUAL_MODE = 0x21010C02;  ///< 切入非手动模式
-constexpr uint32_t CMD_MANUAL_MODE     = 0x21010C03;  ///< 切入手动模式
+constexpr uint32_t CMD_MANUAL_MODE     = 0x21010C02;  ///< 切入手动模式
+constexpr uint32_t CMD_NON_MANUAL_MODE = 0x21010C03;  ///< 切入非手动模式
 
 // --- 身体高度 ---
 constexpr uint32_t CMD_HEIGHT_SWITCH = 0x21010406;  ///< 值: 0=匍匐, 2=正常

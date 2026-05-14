@@ -23,6 +23,8 @@ constexpr int kChargePrepSettleMs        = 200;
 constexpr int kChargeReceivePollMs       = 100;
 constexpr int kChargeQueryPollMs         = 1000;
 constexpr int kChargeVelSourceNavigation = 2;
+constexpr int kChargeManualModeRetryMs   = 200;
+constexpr int kChargeManualModeTimeoutMs = 20000;
 
 }  // namespace
 
@@ -407,6 +409,12 @@ bool X30NavBridge::sendChargeCommand(uint32_t code, int32_t value)
     return percept_udp_.send(&cmd, sizeof(cmd));
 }
 
+bool X30NavBridge::sendChargeVelocitySource(int32_t source)
+{
+    auto cmd = makeSimpleCommand(CMD_VEL_SOURCE, source);
+    return percept_udp_.sendTo(&cmd, sizeof(cmd), charge_host_ip_, charge_config_port_);
+}
+
 bool X30NavBridge::waitForChargeResponse(uint64_t previous_seq, uint16_t &out_state)
 {
     std::unique_lock<std::mutex> lock(charge_state_mutex_);
@@ -422,6 +430,30 @@ bool X30NavBridge::waitForChargeResponse(uint64_t previous_seq, uint16_t &out_st
         charge_state_cv_.wait(lock);
     }
     return false;
+}
+
+bool X30NavBridge::switchToManualModeAfterCharge()
+{
+    auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(kChargeManualModeTimeoutMs);
+
+    warmupControl(kControlWarmupMs, kControlWarmupPulseMs);
+    while (std::chrono::steady_clock::now() < deadline)
+    {
+        if (!is_nav_mode_.load())
+        {
+            return true;
+        }
+
+        auto manual_cmd = makeSimpleCommand(CMD_MANUAL_MODE, 0);
+        if (!motion_udp_.send(&manual_cmd, sizeof(manual_cmd)))
+        {
+            return false;
+        }
+
+        std::this_thread::sleep_for(std::chrono::milliseconds(kChargeManualModeRetryMs));
+    }
+
+    return !is_nav_mode_.load();
 }
 
 bool X30NavBridge::isFailureChargeState(uint16_t state) const
@@ -450,7 +482,7 @@ bool X30NavBridge::isExpectedChargeStateForCommand(uint8_t command, uint16_t sta
     case nav_bridge::srv::ChargeCommand::Request::COMMAND_START:
         return state == CHARGE_STATE_DO_CHARGE_TASK || state == CHARGE_STATE_CHARGING;
     case nav_bridge::srv::ChargeCommand::Request::COMMAND_STOP:
-        return state == CHARGE_STATE_DO_OVER_CHARGE_TASK || state == CHARGE_STATE_IDLE;
+        return state == CHARGE_STATE_IDLE;
     case nav_bridge::srv::ChargeCommand::Request::COMMAND_RESET:
         return state == CHARGE_STATE_IDLE;
     case nav_bridge::srv::ChargeCommand::Request::COMMAND_QUERY:
@@ -680,13 +712,23 @@ void X30NavBridge::processIncomingData() {
 // 数据处理: RcsData (运行状态, 0x1008)
 // ============================================================================
 
-void X30NavBridge::handleRcsData(const RcsData &data) {
+void X30NavBridge::handleRcsData(const RcsData &data)
+{
+    const bool is_nav_mode = data.rcs_state_list.is_nav_mode != 0;
+    is_nav_mode_.store(is_nav_mode);
+
+    int mode_value = is_nav_mode ? 1 : 0;
+    int previous_logged_mode = last_logged_nav_mode_.exchange(mode_value);
+    if (previous_logged_mode >= 0 && previous_logged_mode != mode_value)
+    {
+        RCLCPP_INFO(this->get_logger(), "🔄 控制模式: %s → %s", previous_logged_mode ? "非手动" : "手动", is_nav_mode ? "非手动" : "手动");
+    }
+
     // 首次收到 RcsData 时打印机器人名称
     if (state_store_.markRcsReceived()) {
         RCLCPP_INFO(this->get_logger(), "🐕 机器人名称: %.*s", 15, data.robot_name);
         RCLCPP_INFO(this->get_logger(), "   控制模式: %s, 累计里程: %.1f m, 累计运行: %ld s",
-                    data.rcs_state_list.is_nav_mode ? "非手动" : "手动", data.total_mileage / 100.0,
-                    data.total_run_time);
+                    data.rcs_state_list.is_nav_mode ? "非手动" : "手动", data.total_mileage / 100.0, data.total_run_time);
     }
 
     // 检查错误状态
@@ -1013,6 +1055,10 @@ void X30NavBridge::handleChargeCommandRequest(const std::shared_ptr<nav_bridge::
         return;
     }
 
+    const bool should_wait_until_target = req->command == nav_bridge::srv::ChargeCommand::Request::COMMAND_START || req->command == nav_bridge::srv::ChargeCommand::Request::COMMAND_STOP;
+
+    RCLCPP_INFO(this->get_logger(), "⚡ 收到充电服务请求 command=%u", req->command);
+
     if (req->command == nav_bridge::srv::ChargeCommand::Request::COMMAND_START)
     {
         auto snapshot = state_store_.snapshot();
@@ -1030,8 +1076,7 @@ void X30NavBridge::handleChargeCommandRequest(const std::shared_ptr<nav_bridge::
             }
         }
 
-        auto vel_source_cmd = makeSimpleCommand(CMD_VEL_SOURCE, kChargeVelSourceNavigation);
-        if (!percept_udp_.sendTo(&vel_source_cmd, sizeof(vel_source_cmd), charge_host_ip_, charge_config_port_))
+        if (!sendChargeVelocitySource(kChargeVelSourceNavigation))
         {
             res->success = false;
             res->charge_state = CHARGE_STATE_IDLE;
@@ -1039,6 +1084,7 @@ void X30NavBridge::handleChargeCommandRequest(const std::shared_ptr<nav_bridge::
             res->message = "Failed to switch velocity source to navigation before charge START.";
             return;
         }
+        RCLCPP_INFO(this->get_logger(), "⚡ START前已切换速度源到导航模式");
         std::this_thread::sleep_for(std::chrono::milliseconds(kChargePrepSettleMs));
     }
 
@@ -1049,6 +1095,7 @@ void X30NavBridge::handleChargeCommandRequest(const std::shared_ptr<nav_bridge::
         before_seq = charge_response_seq_;
     }
 
+    RCLCPP_INFO(this->get_logger(), "⚡ 发送充电命令 command=%u code=0x%08X value=%d", req->command, cmd_code, cmd_value);
     if (!sendChargeCommand(cmd_code, cmd_value))
     {
         res->success = false;
@@ -1074,6 +1121,18 @@ void X30NavBridge::handleChargeCommandRequest(const std::shared_ptr<nav_bridge::
         res->state_name = chargeStateToString(final_state);
         if (isExpectedChargeStateForCommand(req->command, final_state))
         {
+            if (req->command == nav_bridge::srv::ChargeCommand::Request::COMMAND_STOP)
+            {
+                if (!switchToManualModeAfterCharge())
+                {
+                    res->success = false;
+                    res->message = "Charge STOP succeeded, but robot did not confirm manual mode.";
+                    return;
+                }
+                RCLCPP_INFO(this->get_logger(), "⚡ STOP完成后已切换到手动模式");
+            }
+            RCLCPP_INFO(this->get_logger(), "✅ 充电服务 command=%u 完成: state=0x%04X(%s)",
+                        req->command, final_state, chargeStateToString(final_state));
             res->success = true;
             res->message = "Charge command accepted.";
             return;
@@ -1081,12 +1140,14 @@ void X30NavBridge::handleChargeCommandRequest(const std::shared_ptr<nav_bridge::
 
         if (isFailureChargeState(final_state))
         {
+            RCLCPP_WARN(this->get_logger(), "⚠️ 充电服务 command=%u 返回错误状态: 0x%04X(%s)",
+                        req->command, final_state, chargeStateToString(final_state));
             res->success = false;
             res->message = "Charge manager reported a failure state.";
             return;
         }
 
-        if (req->command != nav_bridge::srv::ChargeCommand::Request::COMMAND_START)
+        if (!should_wait_until_target)
         {
             res->success = false;
             res->message = "Charge manager responded, but state did not match the command.";
@@ -1101,7 +1162,7 @@ void X30NavBridge::handleChargeCommandRequest(const std::shared_ptr<nav_bridge::
         if (!sendChargeCommand(CMD_CHARGE_MANAGER_QUERY, CHARGE_COMMAND_QUERY_VALUE))
         {
             res->success = false;
-            res->message = "Failed to query charge state after START.";
+            res->message = "Failed to query charge state after command.";
             return;
         }
     }
