@@ -19,6 +19,8 @@ ros2 service call /nav_bridge_node/charge_command nav_bridge/srv/ChargeCommand "
 
 START 前会向 `192.168.1.105:43899` 发送 `0x3101EE03 value=2`，将速度源切到导航模式；充电管理指令发送到 `192.168.1.105:3333`。
 
+如果机器人处于 RL 模式，START 会先调用现有站立动作退出 RL，再发送充电指令。
+
 ## 返回
 
 响应字段：
@@ -41,12 +43,19 @@ START 前会向 `192.168.1.105:43899` 发送 `0x3101EE03 value=2`，将速度源
 | `0x0004` | `pile_error`          | 充电桩断电       |
 | `0x0005` | `safety_warning`      | 请先拔掉充电器   |
 
+## 等待行为
+
+START 不使用固定超时判断成功失败。服务会持续等待充电管理器进入 `do_charge_task` 或 `charging`，如果收到明确错误状态则返回失败。
+
+STOP、RESET、QUERY 也会等待充电管理器返回对应状态。
+
 ## 参数
 
-仅保留一个充电相关参数：
+充电相关网络参数位于 `config/x30_params.yaml`：
 
-```yaml
-charge_wait_window_ms: 10000
-```
-
-它控制服务在发送指令后等待充电管理器 UDP 响应的时间。
+| 参数                 | 默认值          | 说明                    |
+| -------------------- | --------------- | ----------------------- |
+| `charge_host_ip`     | `192.168.1.105` | 感知主机 IP             |
+| `charge_host_port`   | `3333`          | 自主充电请求端口        |
+| `charge_config_port` | `43899`         | 速度源/导航模式配置端口 |
+| `charge_local_port`  | `49004`         | 本地源端口              |

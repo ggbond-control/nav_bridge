@@ -86,7 +86,8 @@ private:
     bool waitForCmdVelCompatibleState(int timeout_ms) const;
     ActionResult setNavigationGait(uint8_t gait);
     bool sendChargeCommand(uint32_t code, int32_t value);
-    bool waitForChargeResponse(uint64_t previous_seq, int timeout_ms, uint16_t &out_state);
+    bool waitForChargeResponse(uint64_t previous_seq, uint16_t &out_state);
+    bool isFailureChargeState(uint16_t state) const;
     bool isExpectedChargeStateForCommand(uint8_t command, uint16_t state) const;
     void chargeReceiveLoop();
     void handleRcsData(const x30_protocol::RcsData &data);
@@ -99,7 +100,11 @@ private:
 
     // ===================== 参数 =====================
     std::string motion_host_ip_;
+    std::string charge_host_ip_;
     int motion_host_port_;
+    int charge_host_port_;
+    int charge_config_port_;
+    int charge_local_port_;
     int local_recv_port_;
     int heartbeat_interval_ms_;
     int cmd_vel_rate_hz_;
@@ -119,7 +124,6 @@ private:
     std::condition_variable charge_state_cv_;
     uint16_t latest_charge_response_state_{x30_protocol::CHARGE_STATE_IDLE};
     uint64_t charge_response_seq_{0};
-    int charge_wait_window_ms_{10000};
 
     // ===================== 业务模块 =====================
     RobotStateStore state_store_;

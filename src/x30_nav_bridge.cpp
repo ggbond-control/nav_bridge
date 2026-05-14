@@ -21,6 +21,7 @@ constexpr int kGaitSwitchTimeoutMs    = 5000;
 constexpr int kCmdVelStateWaitMs      = 4000;
 constexpr int kChargePrepSettleMs        = 200;
 constexpr int kChargeReceivePollMs       = 100;
+constexpr int kChargeQueryPollMs         = 1000;
 constexpr int kChargeVelSourceNavigation = 2;
 
 }  // namespace
@@ -34,12 +35,15 @@ X30NavBridge::X30NavBridge(const rclcpp::NodeOptions &options)
     // 声明参数
     this->declare_parameter("motion_host_ip", std::string(MOTION_HOST_IP));
     this->declare_parameter("motion_host_port", MOTION_HOST_PORT);
+    this->declare_parameter("charge_host_ip", std::string(PERCEPT_HOST_IP));
+    this->declare_parameter("charge_host_port", PERCEPT_CHARGE_PORT);
+    this->declare_parameter("charge_config_port", PERCEPT_HOST_PORT);
+    this->declare_parameter("charge_local_port", PERCEPT_CHARGE_LOCAL_PORT);
     this->declare_parameter("local_recv_port", 43897);
     this->declare_parameter("heartbeat_interval_ms", HEARTBEAT_INTERVAL_MS);
     this->declare_parameter("cmd_vel_rate_hz", CMD_VEL_RATE_HZ);
     this->declare_parameter("cmd_vel_timeout_ms", 5000);
     this->declare_parameter("startup_acquire_control", true);
-    this->declare_parameter("charge_wait_window_ms", 10000);
     this->declare_parameter("imu_frame_id", std::string("imu_link"));
     this->declare_parameter("odom_frame_id", std::string("odom"));
     this->declare_parameter("base_frame_id", std::string("base_link"));
@@ -48,12 +52,15 @@ X30NavBridge::X30NavBridge(const rclcpp::NodeOptions &options)
     // 读取参数
     motion_host_ip_        = this->get_parameter("motion_host_ip").as_string();
     motion_host_port_      = this->get_parameter("motion_host_port").as_int();
+    charge_host_ip_        = this->get_parameter("charge_host_ip").as_string();
+    charge_host_port_      = this->get_parameter("charge_host_port").as_int();
+    charge_config_port_    = this->get_parameter("charge_config_port").as_int();
+    charge_local_port_     = this->get_parameter("charge_local_port").as_int();
     local_recv_port_       = this->get_parameter("local_recv_port").as_int();
     heartbeat_interval_ms_ = this->get_parameter("heartbeat_interval_ms").as_int();
     cmd_vel_rate_hz_       = this->get_parameter("cmd_vel_rate_hz").as_int();
     cmd_vel_timeout_ms_    = this->get_parameter("cmd_vel_timeout_ms").as_int();
     startup_acquire_control_ = this->get_parameter("startup_acquire_control").as_bool();
-    charge_wait_window_ms_ = this->get_parameter("charge_wait_window_ms").as_int();
     imu_frame_id_          = this->get_parameter("imu_frame_id").as_string();
     odom_frame_id_         = this->get_parameter("odom_frame_id").as_string();
     base_frame_id_         = this->get_parameter("base_frame_id").as_string();
@@ -73,8 +80,15 @@ bool X30NavBridge::initialize() {
     RCLCPP_INFO(this->get_logger(), "=== 绝影X30 Nav Bridge 初始化 ===");
     RCLCPP_INFO(this->get_logger(), "运动主机: %s:%d", motion_host_ip_.c_str(), motion_host_port_);
     RCLCPP_INFO(this->get_logger(), "本地接收端口: %d", local_recv_port_);
-    RCLCPP_INFO(this->get_logger(), "自主充电服务: %s:%d (local:%d), wait_window=%dms",
-                PERCEPT_HOST_IP, PERCEPT_CHARGE_PORT, PERCEPT_CHARGE_LOCAL_PORT, charge_wait_window_ms_);
+    RCLCPP_INFO(this->get_logger(), "自主充电请求: %s:%d (local:%d)",
+                charge_host_ip_.c_str(), charge_host_port_, charge_local_port_);
+    RCLCPP_INFO(this->get_logger(), "自主充电START前速度源: %s:%d code=0x%08X value=%d(导航)",
+                charge_host_ip_.c_str(), charge_config_port_, CMD_VEL_SOURCE, kChargeVelSourceNavigation);
+    RCLCPP_INFO(this->get_logger(), "自主充电命令: START(0x%08X,%d) STOP(0x%08X,%d) RESET(0x%08X,%d) QUERY(0x%08X,%d)",
+                CMD_CHARGE_MANAGER, CHARGE_COMMAND_START_VALUE, CMD_CHARGE_MANAGER,
+                CHARGE_COMMAND_STOP_VALUE, CMD_CHARGE_MANAGER, CHARGE_COMMAND_RESET_VALUE,
+                CMD_CHARGE_MANAGER_QUERY, CHARGE_COMMAND_QUERY_VALUE);
+    RCLCPP_INFO(this->get_logger(), "自主充电服务会持续等待充电管理器进入目标状态或返回错误状态");
 
     // 打印结构体大小，方便调试协议对齐
     RCLCPP_INFO(this->get_logger(),
@@ -88,7 +102,7 @@ bool X30NavBridge::initialize() {
         RCLCPP_ERROR(this->get_logger(), "无法打开UDP socket (运动主机)");
         return false;
     }
-    if (!percept_udp_.open(PERCEPT_HOST_IP, PERCEPT_CHARGE_PORT, PERCEPT_CHARGE_LOCAL_PORT))
+    if (!percept_udp_.open(charge_host_ip_, charge_host_port_, charge_local_port_))
     {
         RCLCPP_ERROR(this->get_logger(), "无法打开UDP socket (感知主机自主充电)");
         return false;
@@ -156,6 +170,7 @@ void X30NavBridge::shutdown() {
     RCLCPP_INFO(this->get_logger(), "Nav Bridge 关闭中...");
 
     running_ = false;
+    charge_state_cv_.notify_all();
     if (recv_thread_.joinable()) {
         recv_thread_.join();
     }
@@ -392,12 +407,11 @@ bool X30NavBridge::sendChargeCommand(uint32_t code, int32_t value)
     return percept_udp_.send(&cmd, sizeof(cmd));
 }
 
-bool X30NavBridge::waitForChargeResponse(uint64_t previous_seq, int timeout_ms, uint16_t &out_state)
+bool X30NavBridge::waitForChargeResponse(uint64_t previous_seq, uint16_t &out_state)
 {
-    auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(timeout_ms);
     std::unique_lock<std::mutex> lock(charge_state_mutex_);
 
-    while (std::chrono::steady_clock::now() < deadline)
+    while (running_)
     {
         if (charge_response_seq_ > previous_seq)
         {
@@ -405,12 +419,28 @@ bool X30NavBridge::waitForChargeResponse(uint64_t previous_seq, int timeout_ms, 
             return true;
         }
 
-        if (charge_state_cv_.wait_until(lock, deadline) == std::cv_status::timeout)
-        {
-            break;
-        }
+        charge_state_cv_.wait(lock);
     }
     return false;
+}
+
+bool X30NavBridge::isFailureChargeState(uint16_t state) const
+{
+    switch (state)
+    {
+    case CHARGE_STATE_PILE_ERROR:
+    case CHARGE_STATE_SAFETY_WARNING:
+    case CHARGE_STATE_TAG_RECV_TIMEOUT:
+    case CHARGE_STATE_MARK_LAUNCH_FAILED:
+    case CHARGE_STATE_TAG_NO_VALUE:
+    case CHARGE_STATE_GOTO_STACK_FAILED:
+    case CHARGE_STATE_TAG_POSE_JUMP:
+    case CHARGE_STATE_NO_CHARGE_PLUG:
+    case CHARGE_STATE_NO_CHARGE_PLUG_STEP_BACK:
+        return true;
+    default:
+        return false;
+    }
 }
 
 bool X30NavBridge::isExpectedChargeStateForCommand(uint8_t command, uint16_t state) const
@@ -988,15 +1018,20 @@ void X30NavBridge::handleChargeCommandRequest(const std::shared_ptr<nav_bridge::
         auto snapshot = state_store_.snapshot();
         if (snapshot.basic_state == static_cast<uint8_t>(BasicState::RL_MODE))
         {
-            res->success = false;
-            res->charge_state = CHARGE_STATE_IDLE;
-            res->state_name = "rl_mode_not_allowed";
-            res->message = "Robot is in RL_MODE. Exit RL first, then retry charge START.";
-            return;
+            RCLCPP_INFO(this->get_logger(), "⚡ START前检测到RL_MODE，先自动切换到可充电状态");
+            auto exit_result = executeActionWithCmdVelSuppressed("charge_prepare_exit_rl", [this](){ return action_executor_->stand(); });
+            if (!exit_result.success)
+            {
+                res->success = false;
+                res->charge_state = CHARGE_STATE_IDLE;
+                res->state_name = "failed_to_exit_rl";
+                res->message = std::string("Failed to exit RL mode before charge START: ") + exit_result.message;
+                return;
+            }
         }
 
         auto vel_source_cmd = makeSimpleCommand(CMD_VEL_SOURCE, kChargeVelSourceNavigation);
-        if (!percept_udp_.sendTo(&vel_source_cmd, sizeof(vel_source_cmd), PERCEPT_HOST_IP, PERCEPT_HOST_PORT))
+        if (!percept_udp_.sendTo(&vel_source_cmd, sizeof(vel_source_cmd), charge_host_ip_, charge_config_port_))
         {
             res->success = false;
             res->charge_state = CHARGE_STATE_IDLE;
@@ -1024,26 +1059,57 @@ void X30NavBridge::handleChargeCommandRequest(const std::shared_ptr<nav_bridge::
     }
 
     uint16_t final_state = CHARGE_STATE_IDLE;
-    if (!waitForChargeResponse(before_seq, charge_wait_window_ms_, final_state))
+    while (rclcpp::ok() && running_)
     {
-        res->success = false;
-        res->charge_state = CHARGE_STATE_IDLE;
-        res->state_name = "response_timeout";
-        res->message = "Charge manager did not respond within wait window.";
-        return;
+        if (!waitForChargeResponse(before_seq, final_state))
+        {
+            res->success = false;
+            res->charge_state = CHARGE_STATE_IDLE;
+            res->state_name = "interrupted";
+            res->message = "Charge wait was interrupted by node shutdown.";
+            return;
+        }
+
+        res->charge_state = final_state;
+        res->state_name = chargeStateToString(final_state);
+        if (isExpectedChargeStateForCommand(req->command, final_state))
+        {
+            res->success = true;
+            res->message = "Charge command accepted.";
+            return;
+        }
+
+        if (isFailureChargeState(final_state))
+        {
+            res->success = false;
+            res->message = "Charge manager reported a failure state.";
+            return;
+        }
+
+        if (req->command != nav_bridge::srv::ChargeCommand::Request::COMMAND_START)
+        {
+            res->success = false;
+            res->message = "Charge manager responded, but state did not match the command.";
+            return;
+        }
+
+        std::this_thread::sleep_for(std::chrono::milliseconds(kChargeQueryPollMs));
+        {
+            std::lock_guard<std::mutex> state_lock(charge_state_mutex_);
+            before_seq = charge_response_seq_;
+        }
+        if (!sendChargeCommand(CMD_CHARGE_MANAGER_QUERY, CHARGE_COMMAND_QUERY_VALUE))
+        {
+            res->success = false;
+            res->message = "Failed to query charge state after START.";
+            return;
+        }
     }
 
+    res->success = false;
     res->charge_state = final_state;
     res->state_name = chargeStateToString(final_state);
-    if (!isExpectedChargeStateForCommand(req->command, final_state))
-    {
-        res->success = false;
-        res->message = "Charge manager responded, but state did not match the command.";
-        return;
-    }
-
-    res->success = true;
-    res->message = "Charge command accepted.";
+    res->message = "Charge wait was interrupted.";
 }
 
 // ============================================================================
