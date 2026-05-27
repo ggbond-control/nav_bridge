@@ -65,6 +65,7 @@ private:
 
     std::thread recv_thread_;
     std::thread charge_recv_thread_;
+    std::thread charge_query_thread_;
     std::atomic<bool> running_{false};
     void receiveLoop();
 
@@ -88,10 +89,12 @@ private:
     bool sendChargeVelocitySource(int32_t source);
     bool sendChargeCommand(uint32_t code, int32_t value);
     bool waitForChargeResponse(uint64_t previous_seq, uint16_t &out_state);
+    bool waitForChargeResponseFor(uint64_t previous_seq, std::chrono::milliseconds timeout, uint16_t &out_state);
     bool switchToManualModeAfterCharge();
     bool isFailureChargeState(uint16_t state) const;
     bool isExpectedChargeStateForCommand(uint8_t command, uint16_t state) const;
     void chargeReceiveLoop();
+    void chargeQueryLoop();
     void handleRcsData(const x30_protocol::RcsData &data);
     void handleMotionState(const x30_protocol::MotionStateData &data);
     void handleControllerSensor(const x30_protocol::ControllerSensorData &data);
@@ -111,6 +114,9 @@ private:
     int heartbeat_interval_ms_;
     int cmd_vel_rate_hz_;
     int cmd_vel_timeout_ms_;
+    bool enable_charge_state_query_;
+    int charge_state_query_interval_ms_;
+    int charge_state_query_timeout_ms_;
     bool startup_acquire_control_;
 
     // ===================== 控制权 & 心跳 =====================

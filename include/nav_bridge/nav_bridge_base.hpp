@@ -13,6 +13,7 @@
 #include <nav_bridge/srv/charge_command.hpp>
 #include <nav_bridge/srv/set_gait.hpp>
 #include <rclcpp/rclcpp.hpp>
+#include <rviz_2d_overlay_msgs/msg/overlay_text.hpp>
 #include <sensor_msgs/msg/imu.hpp>
 #include <std_msgs/msg/int32.hpp>
 #include <std_msgs/msg/u_int8.hpp>
@@ -75,7 +76,9 @@ protected:
     rclcpp::Publisher<nav_msgs::msg::Odometry>::SharedPtr odom_pub_;
     rclcpp::Publisher<std_msgs::msg::Int32>::SharedPtr robot_state_pub_;
     rclcpp::Publisher<std_msgs::msg::Int32>::SharedPtr gait_state_pub_;
+    rclcpp::Publisher<std_msgs::msg::Int32>::SharedPtr charge_state_pub_;
     rclcpp::Publisher<std_msgs::msg::UInt8>::SharedPtr battery_level_pub_;
+    rclcpp::Publisher<rviz_2d_overlay_msgs::msg::OverlayText>::SharedPtr battery_text_pub_;
 
     // ===================== ROS2 服务接口 =====================
     // -- 服务端 --

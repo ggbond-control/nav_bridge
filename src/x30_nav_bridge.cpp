@@ -45,6 +45,9 @@ X30NavBridge::X30NavBridge(const rclcpp::NodeOptions &options)
     this->declare_parameter("heartbeat_interval_ms", HEARTBEAT_INTERVAL_MS);
     this->declare_parameter("cmd_vel_rate_hz", CMD_VEL_RATE_HZ);
     this->declare_parameter("cmd_vel_timeout_ms", 5000);
+    this->declare_parameter("enable_charge_state_query", true);
+    this->declare_parameter("charge_state_query_interval_ms", 1000);
+    this->declare_parameter("charge_state_query_timeout_ms", 1500);
     this->declare_parameter("startup_acquire_control", true);
     this->declare_parameter("imu_frame_id", std::string("imu_link"));
     this->declare_parameter("odom_frame_id", std::string("odom"));
@@ -62,6 +65,9 @@ X30NavBridge::X30NavBridge(const rclcpp::NodeOptions &options)
     heartbeat_interval_ms_ = this->get_parameter("heartbeat_interval_ms").as_int();
     cmd_vel_rate_hz_       = this->get_parameter("cmd_vel_rate_hz").as_int();
     cmd_vel_timeout_ms_    = this->get_parameter("cmd_vel_timeout_ms").as_int();
+    enable_charge_state_query_      = this->get_parameter("enable_charge_state_query").as_bool();
+    charge_state_query_interval_ms_ = this->get_parameter("charge_state_query_interval_ms").as_int();
+    charge_state_query_timeout_ms_  = this->get_parameter("charge_state_query_timeout_ms").as_int();
     startup_acquire_control_ = this->get_parameter("startup_acquire_control").as_bool();
     imu_frame_id_          = this->get_parameter("imu_frame_id").as_string();
     odom_frame_id_         = this->get_parameter("odom_frame_id").as_string();
@@ -120,7 +126,9 @@ bool X30NavBridge::initialize() {
     odom_pub_          = this->create_publisher<nav_msgs::msg::Odometry>("/leg_odom", 10);
     robot_state_pub_   = this->create_publisher<std_msgs::msg::Int32>("/robot_basic_state", 10);
     gait_state_pub_    = this->create_publisher<std_msgs::msg::Int32>("/robot_gait_state", 10);
+    charge_state_pub_  = this->create_publisher<std_msgs::msg::Int32>("/charge_manager_state", 10);
     battery_level_pub_ = this->create_publisher<std_msgs::msg::UInt8>("/battery/level", 10);
+    battery_text_pub_ = this->create_publisher<rviz_2d_overlay_msgs::msg::OverlayText>("/battery_text", 10);
 
     if (publish_tf_) {
         tf_broadcaster_ = std::make_unique<tf2_ros::TransformBroadcaster>(*this);
@@ -161,6 +169,10 @@ bool X30NavBridge::initialize() {
     // 4. 启动接收线程
     recv_thread_ = std::thread(&X30NavBridge::receiveLoop, this);
     charge_recv_thread_ = std::thread(&X30NavBridge::chargeReceiveLoop, this);
+    if (enable_charge_state_query_)
+    {
+        charge_query_thread_ = std::thread(&X30NavBridge::chargeQueryLoop, this);
+    }
 
     RCLCPP_INFO(this->get_logger(), "=== Nav Bridge 初始化完成, 等待机器狗连接... ===");
     return true;
@@ -179,6 +191,10 @@ void X30NavBridge::shutdown() {
     if (charge_recv_thread_.joinable())
     {
         charge_recv_thread_.join();
+    }
+    if (charge_query_thread_.joinable())
+    {
+        charge_query_thread_.join();
     }
 
     // 发送速度归零
@@ -432,6 +448,20 @@ bool X30NavBridge::waitForChargeResponse(uint64_t previous_seq, uint16_t &out_st
     return false;
 }
 
+bool X30NavBridge::waitForChargeResponseFor(uint64_t previous_seq, std::chrono::milliseconds timeout, uint16_t &out_state)
+{
+    std::unique_lock<std::mutex> lock(charge_state_mutex_);
+    const bool ready = charge_state_cv_.wait_for(lock, timeout, [this, previous_seq]()
+                                                 { return !running_ || charge_response_seq_ > previous_seq; });
+    if (!ready || !running_ || charge_response_seq_ <= previous_seq)
+    {
+        return false;
+    }
+
+    out_state = latest_charge_response_state_;
+    return true;
+}
+
 bool X30NavBridge::switchToManualModeAfterCharge()
 {
     auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(kChargeManualModeTimeoutMs);
@@ -524,7 +554,52 @@ void X30NavBridge::chargeReceiveLoop()
             latest_charge_response_state_ = state;
             ++charge_response_seq_;
         }
+        if (charge_state_pub_)
+        {
+            auto msg = std_msgs::msg::Int32();
+            msg.data = static_cast<int32_t>(state);
+            charge_state_pub_->publish(msg);
+        }
         charge_state_cv_.notify_all();
+    }
+}
+
+void X30NavBridge::chargeQueryLoop()
+{
+    const auto interval = std::chrono::milliseconds(std::max(100, charge_state_query_interval_ms_));
+    const auto timeout = std::chrono::milliseconds(std::max(100, charge_state_query_timeout_ms_));
+
+    while (running_)
+    {
+        std::this_thread::sleep_for(interval);
+        if (!running_)
+        {
+            break;
+        }
+
+        std::unique_lock<std::mutex> service_lock(charge_service_mutex_, std::try_to_lock);
+        if (!service_lock.owns_lock())
+        {
+            continue;
+        }
+
+        uint64_t before_seq = 0;
+        {
+            std::lock_guard<std::mutex> state_lock(charge_state_mutex_);
+            before_seq = charge_response_seq_;
+        }
+
+        if (!sendChargeCommand(CMD_CHARGE_MANAGER_QUERY, CHARGE_COMMAND_QUERY_VALUE))
+        {
+            RCLCPP_WARN_THROTTLE(this->get_logger(), *this->get_clock(), 10000, "自主充电状态周期查询发送失败");
+            continue;
+        }
+
+        uint16_t state = CHARGE_STATE_IDLE;
+        if (!waitForChargeResponseFor(before_seq, timeout, state))
+        {
+            RCLCPP_WARN_THROTTLE(this->get_logger(), *this->get_clock(), 10000, "自主充电状态周期查询超时");
+        }
     }
 }
 
@@ -958,6 +1033,28 @@ void X30NavBridge::handleBattery(const BatterySensorData &data) {
     auto msg = std_msgs::msg::UInt8();
     msg.data = data.battery_level;
     battery_level_pub_->publish(msg);
+
+    auto battery_text_msg = rviz_2d_overlay_msgs::msg::OverlayText();
+    battery_text_msg.action = 0;
+    battery_text_msg.width = 250;
+    battery_text_msg.height = 100;
+    battery_text_msg.horizontal_distance = 20;
+    battery_text_msg.vertical_distance = 20;
+    battery_text_msg.horizontal_alignment = 0;
+    battery_text_msg.vertical_alignment = 0;
+    battery_text_msg.bg_color.r = 0.0;
+    battery_text_msg.bg_color.g = 0.0;
+    battery_text_msg.bg_color.b = 0.0;
+    battery_text_msg.bg_color.a = 0.5;
+    battery_text_msg.fg_color.r = 0.0;
+    battery_text_msg.fg_color.g = 1.0;
+    battery_text_msg.fg_color.b = 0.0;
+    battery_text_msg.fg_color.a = 1.0;
+    battery_text_msg.line_width = 2;
+    battery_text_msg.text_size = 20.0;
+    battery_text_msg.font = "sans-serif";
+    battery_text_msg.text = "电量：" + std::to_string(data.battery_level) + "%";
+    battery_text_pub_->publish(battery_text_msg);
 
     RCLCPP_INFO_THROTTLE(this->get_logger(), *this->get_clock(), 30000, "🔋 电池: %d%%, 电压: %dV",
                          data.battery_level, data.voltage);
