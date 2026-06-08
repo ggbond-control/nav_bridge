@@ -5,9 +5,11 @@
 
 #include <tf2/LinearMath/Quaternion.h>
 
+#include <algorithm>
 #include <chrono>
 #include <cmath>
 #include <geometry_msgs/msg/transform_stamped.hpp>
+#include <unordered_map>
 
 namespace nav_bridge {
 
@@ -143,7 +145,7 @@ bool X30NavBridge::initialize() {
         "~/ready", std::bind(&X30NavBridge::handleReadyRequest, this, _1, _2));
     release_control_srv_ = this->create_service<std_srvs::srv::Trigger>(
         "~/release_control", std::bind(&X30NavBridge::handleReleaseControlRequest, this, _1, _2));
-    set_gait_srv_ = this->create_service<nav_bridge::srv::SetGait>(
+    set_gait_srv_ = this->create_service<rcl_interfaces::srv::SetParameters>(
         "~/set_gait", std::bind(&X30NavBridge::handleSetGaitRequest, this, _1, _2));
     charge_command_srv_ = this->create_service<nav_bridge::srv::ChargeCommand>(
         "~/charge_command", std::bind(&X30NavBridge::handleChargeCommandRequest, this, _1, _2));
@@ -344,13 +346,36 @@ bool X30NavBridge::isCmdVelSuppressed() const {
 }
 
 bool X30NavBridge::isSupportedNavigationGait(uint8_t gait) const {
-    return gait == static_cast<uint8_t>(GaitState::L_WALK) ||
-           gait == static_cast<uint8_t>(GaitState::MOUNTAIN);
+    switch (static_cast<GaitState>(gait)) {
+        case GaitState::WALK:
+        case GaitState::OBSTACLE:
+        case GaitState::SLOPE:
+        case GaitState::RUN:
+        case GaitState::STAIR_SOLID:
+        case GaitState::STAIR_ACC:
+        case GaitState::STAIR45_ACC:
+        case GaitState::L_WALK:
+        case GaitState::MOUNTAIN:
+        case GaitState::SILENT:
+            return true;
+        default:
+            return false;
+    }
 }
 
 bool X30NavBridge::isCmdVelCompatibleState(uint8_t basic_state, uint8_t gait_state) const {
-    return basic_state == static_cast<uint8_t>(BasicState::RL_MODE) &&
-           isSupportedNavigationGait(gait_state);
+    // 按手册 1.2.3.2: 踏步状态(STEPPING)下可发轴指令控制速度, 适用于所有步态.
+    // RL 类步态(L_WALK/MOUNTAIN/SILENT)切换后进入 RL_MODE, 同样允许速度转发.
+    if (basic_state == static_cast<uint8_t>(BasicState::STEPPING) &&
+        isSupportedNavigationGait(gait_state)) {
+        return true;
+    }
+    auto is_rl_gait = [](uint8_t g) {
+        return g == static_cast<uint8_t>(GaitState::L_WALK) ||
+               g == static_cast<uint8_t>(GaitState::MOUNTAIN) ||
+               g == static_cast<uint8_t>(GaitState::SILENT);
+    };
+    return basic_state == static_cast<uint8_t>(BasicState::RL_MODE) && is_rl_gait(gait_state);
 }
 
 bool X30NavBridge::isCmdVelForwardingAllowed() const {
@@ -372,7 +397,7 @@ bool X30NavBridge::waitForCmdVelCompatibleState(int timeout_ms) const {
 
 ActionResult X30NavBridge::setNavigationGait(uint8_t gait) {
     if (!isSupportedNavigationGait(gait)) {
-        return {false, "Unsupported navigation gait. Allowed values: 32 (L_WALK), 33 (MOUNTAIN)."};
+        return {false, "Unsupported navigation gait."};
     }
 
     auto snapshot = state_store_.snapshot();
@@ -385,35 +410,94 @@ ActionResult X30NavBridge::setNavigationGait(uint8_t gait) {
         return {false, "Gait switching is only allowed in RL_MODE or STEPPING."};
     }
 
-    if (snapshot.gait_state == gait && isCmdVelCompatibleState(snapshot.basic_state, gait)) {
+    // 按手册 1.2.6: RL 类步态 (L_WALK/MOUNTAIN/SILENT) 切换后机器人进入 RL_MODE,
+    // 普通步态 (WALK/SLOPE/OBSTACLE/STAIR*) 切换后机器人处于 STEPPING, 不会进入 RL_MODE.
+    auto isRlGait = [](uint8_t g) {
+        return g == static_cast<uint8_t>(GaitState::L_WALK) ||
+               g == static_cast<uint8_t>(GaitState::MOUNTAIN) ||
+               g == static_cast<uint8_t>(GaitState::SILENT);
+    };
+
+    // 快速检查: 是否已经处于目标步态且基本状态与步态类型一致
+    bool already_ready = (snapshot.gait_state == gait) &&
+                         (isRlGait(gait)
+                              ? snapshot.basic_state == static_cast<uint8_t>(BasicState::RL_MODE)
+                              : snapshot.basic_state == static_cast<uint8_t>(BasicState::STEPPING));
+    if (already_ready) {
         return {true, "Robot is already in the requested navigation gait."};
     }
 
     uint32_t command = 0;
     const char *gait_name = "UNKNOWN";
     switch (static_cast<GaitState>(gait)) {
+        case GaitState::WALK:
+            command   = CMD_GAIT_WALK;
+            gait_name = "WALK";
+            break;
+        case GaitState::OBSTACLE:
+            command   = CMD_GAIT_OBSTACLE;
+            gait_name = "OBSTACLE";
+            break;
+        case GaitState::SLOPE:
+            command   = CMD_GAIT_SLOPE;
+            gait_name = "SLOPE";
+            break;
+        case GaitState::RUN:
+            command   = CMD_GAIT_RUN;
+            gait_name = "RUN";
+            break;
+        case GaitState::STAIR_SOLID:
+            command   = CMD_GAIT_STAIR;
+            gait_name = "STAIR_SOLID";
+            break;
+        case GaitState::STAIR_ACC:
+            command   = CMD_GAIT_STAIR_ACC;
+            gait_name = "STAIR_ACC";
+            break;
+        case GaitState::STAIR45_ACC:
+            command   = CMD_GAIT_STAIR45_ACC;
+            gait_name = "STAIR45_ACC";
+            break;
         case GaitState::L_WALK:
-            command = CMD_GAIT_L_WALK;
+            command   = CMD_GAIT_L_WALK;
             gait_name = "L_WALK";
             break;
         case GaitState::MOUNTAIN:
-            command = CMD_GAIT_MOUNTAIN;
+            command   = CMD_GAIT_MOUNTAIN;
             gait_name = "MOUNTAIN";
+            break;
+        case GaitState::SILENT:
+            command   = CMD_GAIT_SILENT;
+            gait_name = "SILENT";
             break;
         default:
             return {false, "Unsupported navigation gait."};
     }
 
-    RCLCPP_INFO(this->get_logger(), "📌 请求切换导航步态到 %s(%u)", gait_name, gait);
+    RCLCPP_INFO(this->get_logger(), "📌 请求切换步态到 %s(%u)", gait_name, gait);
     warmupControl(kControlWarmupMs, kControlWarmupPulseMs);
     sendGaitCommand(command);
 
+    // 第一步: 等待步态反馈进入目标步态
     if (!state_store_.waitForGaitState({static_cast<GaitState>(gait)}, kGaitSwitchTimeoutMs)) {
-        return {false, "Timeout waiting for requested gait state."};
+        return {false, std::string("Timeout waiting for gait state: ") + gait_name + "."};
     }
 
-    if (!waitForCmdVelCompatibleState(kCmdVelStateWaitMs)) {
-        return {false, "Gait switched, but robot did not enter a cmd_vel-ready state in time."};
+    // 第二步: 根据步态类型等待对应的基本状态
+    // - RL 类步态 (L_WALK/MOUNTAIN/SILENT): 等待 RL_MODE (+ 满足 cmd_vel 转发条件)
+    // - 普通步态 (WALK/SLOPE/OBSTACLE/STAIR*): 等待 STEPPING (协议规定踏步下才能切换步态)
+    if (isRlGait(gait)) {
+        if (!waitForCmdVelCompatibleState(kCmdVelStateWaitMs)) {
+            return {false, std::string("Gait switched to ") + gait_name +
+                              ", but robot did not enter RL_MODE in time."};
+        }
+    } else {
+        if (!state_store_.waitForBasicState({BasicState::STEPPING}, kCmdVelStateWaitMs)) {
+            RCLCPP_WARN(this->get_logger(),
+                        "⚠️ 步态已切换到 %s, 但未观察到 STEPPING 状态 (可能已经处于 STEPPING)",
+                        gait_name);
+            // 非致命: 步态本身已切换成功, STEPPING 状态可能因时序未捕捉到
+        }
     }
 
     return {true, std::string("Navigation gait switched to ") + gait_name + "."};
@@ -1112,13 +1196,78 @@ void X30NavBridge::handleReleaseControlRequest(
 }
 
 void X30NavBridge::handleSetGaitRequest(
-    const std::shared_ptr<nav_bridge::srv::SetGait::Request> req,
-    std::shared_ptr<nav_bridge::srv::SetGait::Response> res) {
-    auto result = executeActionWithCmdVelSuppressed("set_gait", [this, req]() {
-        return setNavigationGait(req->gait);
-    });
-    res->success = result.success;
-    res->message = result.message;
+    const std::shared_ptr<rcl_interfaces::srv::SetParameters::Request> req,
+    std::shared_ptr<rcl_interfaces::srv::SetParameters::Response> res) {
+
+    // 字符串步态名称 → GaitState 数值的映射表 (大写, 与协议保持一致)
+    static const std::unordered_map<std::string, uint8_t> kGaitNameMap = {
+        {"WALK",        static_cast<uint8_t>(GaitState::WALK)},
+        {"OBSTACLE",    static_cast<uint8_t>(GaitState::OBSTACLE)},
+        {"SLOPE",       static_cast<uint8_t>(GaitState::SLOPE)},
+        {"RUN",         static_cast<uint8_t>(GaitState::RUN)},
+        {"STAIR_SOLID", static_cast<uint8_t>(GaitState::STAIR_SOLID)},
+        {"STAIR_ACC",   static_cast<uint8_t>(GaitState::STAIR_ACC)},
+        {"STAIR45_ACC", static_cast<uint8_t>(GaitState::STAIR45_ACC)},
+        {"L_WALK",      static_cast<uint8_t>(GaitState::L_WALK)},
+        {"MOUNTAIN",    static_cast<uint8_t>(GaitState::MOUNTAIN)},
+        {"SILENT",      static_cast<uint8_t>(GaitState::SILENT)},
+    };
+
+    for (const auto &param : req->parameters) {
+        rcl_interfaces::msg::SetParametersResult result;
+
+        if (param.name != "gait") {
+            result.successful = false;
+            result.reason     = "Unknown parameter '" + param.name + "'. Only 'gait' is supported.";
+            res->results.push_back(result);
+            continue;
+        }
+
+        // 解析步态值: 支持整数或字符串两种方式
+        // rcl_interfaces::msg::ParameterType: BOOL=1, INT=2, DOUBLE=3, STRING=4, ...
+        uint8_t gait_value = 0;
+        bool parse_ok      = false;
+
+        if (param.value.type == rcl_interfaces::msg::ParameterType::PARAMETER_INTEGER) {
+            int64_t raw = param.value.integer_value;
+            if (raw >= 0 && raw <= 255) {
+                gait_value = static_cast<uint8_t>(raw);
+                parse_ok   = true;
+            } else {
+                result.successful = false;
+                result.reason     = "Integer value " + std::to_string(raw) + " out of range [0, 255].";
+            }
+        } else if (param.value.type == rcl_interfaces::msg::ParameterType::PARAMETER_STRING) {
+            // 转为大写以实现不区分大小写匹配
+            std::string upper = param.value.string_value;
+            std::transform(upper.begin(), upper.end(), upper.begin(), ::toupper);
+            auto it = kGaitNameMap.find(upper);
+            if (it != kGaitNameMap.end()) {
+                gait_value = it->second;
+                parse_ok   = true;
+            } else {
+                result.successful = false;
+                result.reason     = "Unknown gait name '" + param.value.string_value +
+                                    "'. Supported: WALK, OBSTACLE, SLOPE, RUN, STAIR_SOLID, "
+                                    "STAIR_ACC, STAIR45_ACC, L_WALK, MOUNTAIN, SILENT.";
+            }
+        } else {
+            result.successful = false;
+            result.reason     = "Unsupported parameter type " +
+                                std::to_string(static_cast<int>(param.value.type)) +
+                                ". Use INTEGER (type=2) or STRING (type=4).";
+        }
+
+        if (parse_ok) {
+            auto action_result = executeActionWithCmdVelSuppressed("set_gait", [this, gait_value]() {
+                return setNavigationGait(gait_value);
+            });
+            result.successful = action_result.success;
+            result.reason     = action_result.message;
+        }
+
+        res->results.push_back(result);
+    }
 }
 
 void X30NavBridge::handleChargeCommandRequest(const std::shared_ptr<nav_bridge::srv::ChargeCommand::Request> req, std::shared_ptr<nav_bridge::srv::ChargeCommand::Response> res)

@@ -175,22 +175,52 @@ X30 并不是“发一条动作指令就一定立刻执行”的设备。对于�
 
 ### 3.4 `~/set_gait`
 
-用于在导航工作态下切换导航步态模型。
+用于在踏步状态（`STEPPING`）或 RL 模式（`RL_MODE`）下切换步态模型。
 
-当前实现只开放导航白名单步态，而不是把任意协议数字直接透传到底层：
+> **注意：** 切换到 RL 类步态（`L_WALK`/`MOUNTAIN`/`SILENT`）后，机器人将进入 `RL_MODE`；
+> 切换到普通步态（`WALK`/`SLOPE`/`OBSTACLE`/`STAIR*`）后，机器人处于 `STEPPING` 状态。
+> 两种情况下均支持 `/cmd_vel` 速度转发。
 
-- `32` -> `L_WALK`
-- `33` -> `MOUNTAIN`
+接口类型已更改为 ROS2 标准 `rcl_interfaces/srv/SetParameters`，通过设置参数名 `gait` 来指定目标步态。
+
+支持全部 10 种步态：
+
+| 整数值 | 字符串名称 | 步态 |
+| --- | --- | --- |
+| `0` | `WALK` | 行走 |
+| `1` | `OBSTACLE` | 越障 |
+| `2` | `SLOPE` | 斜坡 |
+| `3` | `RUN` | 跑步 |
+| `6` | `STAIR_SOLID` | 楼梯（实心/镂空/无踢面） |
+| `7` | `STAIR_ACC` | 楼梯（累积帧） |
+| `8` | `STAIR45_ACC` | 45°楼梯（累积帧） |
+| `32` | `L_WALK` | L 行走 |
+| `33` | `MOUNTAIN` | 山地 |
+| `34` | `SILENT` | 静音 |
+
+调用示例：
+
+```bash
+# 整数方式切换到山地步态 (MOUNTAIN=33, type=2 表示 INTEGER)
+ros2 service call /nav_bridge_node/set_gait rcl_interfaces/srv/SetParameters \
+  "{parameters: [{name: 'gait', value: {type: 2, integer_value: 33}}]}"
+
+# 字符串方式切换到楼梯步态 (不区分大小写, type=4 表示 STRING)
+ros2 service call /nav_bridge_node/set_gait rcl_interfaces/srv/SetParameters \
+  "{parameters: [{name: 'gait', value: {type: 4, string_value: 'STAIR_SOLID'}}]}"
+```
 
 服务执行时会：
 
-1. 检查当前是否处于 `RL_MODE` 或 `STEPPING`
-2. 做一次控制接管预热
-3. 发送目标步态控制指令
-4. 等待 `/robot_gait_state` 进入目标步态
-5. 等待机器人重新进入允许 `/cmd_vel` 转发的状态窗口
+1. 解析 `gait` 参数（整数值或字符串值）
+2. 检查当前是否处于 `RL_MODE` 或 `STEPPING`
+3. 做一次控制接管预热
+4. 发送目标步态控制指令
+5. 等待 `/robot_gait_state` 进入目标步态
+6. 等待机器人进入允许 `/cmd_vel` 转发的状态（`STEPPING` 或 `RL_MODE`）
 
-这样可以保证“切步态后仍可继续导航发速度”，同时避免把危险或未验证的模型号直接暴露给上层。
+这样可以保证"切步态后仍可继续导航发速度"，同时以结构化参数报文替代裸数字透传。
+
 
 ## 4. `/cmd_vel` 速度控制
 
@@ -210,10 +240,10 @@ X30 并不是“发一条动作指令就一定立刻执行”的设备。对于�
    - 才停止心跳
    - 释放控制权
 
-当前允许 `/cmd_vel` 转发的状态窗口为：
+当前允许 `/cmd_vel` 转发的状态窗口为（与手册 1.2.3.2 一致）：
 
-- `RL_MODE + MOUNTAIN`
-- `RL_MODE + L_WALK`
+- `STEPPING + 任意受支持步态`（WALK/OBSTACLE/SLOPE/RUN/STAIR*/L_WALK/MOUNTAIN/SILENT）
+- `RL_MODE + RL 类步态`（L_WALK/MOUNTAIN/SILENT）
 
 同时，在以下服务执行期间会临时暂停 `/cmd_vel` UDP 转发，以避免动作控制链和速度控制链互相打架：
 
@@ -286,13 +316,13 @@ X30 并不是“发一条动作指令就一定立刻执行”的设备。对于�
 - `~/lie` (`std_srvs/srv/Trigger`)
 - `~/ready` (`std_srvs/srv/Trigger`)
 - `~/release_control` (`std_srvs/srv/Trigger`)
-- `~/set_gait` (`nav_bridge/srv/SetGait`)
+- `~/set_gait` (`rcl_interfaces/srv/SetParameters`)
 
 说明：
 
 - 当前业务上只保留三个目标态服务：`lie / stand / ready`
 - `~/release_control` 用于显式停止 heartbeat 并交还控制权
-- `~/set_gait` 用于导航白名单步态切换，目前支持 `L_WALK(32)` 与 `MOUNTAIN(33)`
+- `~/set_gait` 用于步态切换，支持全部 10 种步态（整数或字符串方式），参数名 `gait`
 - 旧版本里存在的 `motion` 与 `force_stand` 对外服务链路已移除
 - `ready` 进入山地步态后，机器人会根据底层状态机进入 `RL_MODE`
 
@@ -336,7 +366,7 @@ nav_bridge/
 ├── launch/
 │   └── nav_bridge.launch.py               # 启动 nav_bridge_node 并加载参数
 ├── srv/
-│   └── SetGait.srv                        # 导航步态切换服务定义
+│   └── ChargeCommand.srv                  # 自主充电控制服务定义
 ├── include/nav_bridge/
 │   ├── action_executor.hpp                # 动作执行器接口，封装 stand/lie/ready 业务流程
 │   ├── nav_bridge_base.hpp                # 桥接节点抽象基类与通用 ROS 接口定义
@@ -413,9 +443,9 @@ stateDiagram-v2
 5. 调用一次 `~/stand`，确认 `RL -> WALK -> STEPPING -> FORCE_STAND` 路径正确
 6. 调用 `~/lie`
 7. 再次调用 `~/ready`
-8. 调用一次 `~/set_gait`，将步态切到 `L_WALK(32)`
+8. 调用一次 `~/set_gait`，将步态切到 `L_WALK`（例: `{name: 'gait', value: {type: 4, string_value: 'L_WALK'}}`）
 9. 在 `RL_MODE + L_WALK` 下发送少量 `/cmd_vel`，确认仍可转发
-10. 调用一次 `~/set_gait`，将步态切回 `MOUNTAIN(33)`
+10. 调用一次 `~/set_gait`，将步态切回 `MOUNTAIN`（例: `{name: 'gait', value: {type: 4, string_value: 'MOUNTAIN'}}`）
 11. 调用 `~/release_control`，确认 heartbeat 停止并交还控制权
 
 如果现场需要分析问题，最值得重点观察的日志关键词包括：
@@ -435,7 +465,7 @@ stateDiagram-v2
 - 当前只桥接运动主机 `192.168.1.103:43893`，`percept_udp_` 仍未接入业务流程
 - 控制接管依然是工程策略，不是依赖底层显式 ack
 - 动作执行器对 `CMD_STAND_UP_DOWN`、`CMD_MOTION` 这类 toggle 型命令仍保留了分阶段保活与重发机制
-- `~/set_gait` 当前只开放 `L_WALK` 与 `MOUNTAIN` 两个导航白名单步态
+- `~/set_gait` 现已改用标准 `rcl_interfaces/srv/SetParameters` 接口，支持全部 10 种步态，参数名 `gait`，支持整数或字符串输入
 - `stand / lie / ready` 的若干阶段路径是根据当前 X30 实机状态反馈逐步收敛出来的，未来若底层固件行为变化，业务路径也可能需要同步调整
 - 机器人名称字段当前常见为空字符串，这不影响主控制链路
 - 接收线程可能看到一部分未处理指令码，只要核心状态包正常即可先不视为故障
@@ -449,7 +479,7 @@ stateDiagram-v2
 | `~/stand` | `std_srvs/srv/Trigger` | 收敛到静止力控站立态 |
 | `~/lie` | `std_srvs/srv/Trigger` | 安全退回趴下状态 |
 | `~/ready` | `std_srvs/srv/Trigger` | 一键进入 `RL_MODE + MOUNTAIN` |
-| `~/set_gait` | `nav_bridge/srv/SetGait` | 切换导航白名单步态，目前支持 `L_WALK(32)` 与 `MOUNTAIN(33)` |
+| `~/set_gait` | `rcl_interfaces/srv/SetParameters` | 切换步态，支持全部 10 种步态，参数名 `gait`（整数或字符串） |
 | `~/release_control` | `std_srvs/srv/Trigger` | 显式停止 heartbeat 并释放控制权 |
 
 ### 14.2 订阅话题

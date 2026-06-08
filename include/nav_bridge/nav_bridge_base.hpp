@@ -11,7 +11,7 @@
 #include <geometry_msgs/msg/twist.hpp>
 #include <nav_msgs/msg/odometry.hpp>
 #include <nav_bridge/srv/charge_command.hpp>
-#include <nav_bridge/srv/set_gait.hpp>
+#include <rcl_interfaces/srv/set_parameters.hpp>
 #include <rclcpp/rclcpp.hpp>
 #include <rviz_2d_overlay_msgs/msg/overlay_text.hpp>
 #include <sensor_msgs/msg/imu.hpp>
@@ -86,7 +86,7 @@ protected:
     rclcpp::Service<std_srvs::srv::Trigger>::SharedPtr lie_srv_;
     rclcpp::Service<std_srvs::srv::Trigger>::SharedPtr ready_srv_;
     rclcpp::Service<std_srvs::srv::Trigger>::SharedPtr release_control_srv_;
-    rclcpp::Service<nav_bridge::srv::SetGait>::SharedPtr set_gait_srv_;
+    rclcpp::Service<rcl_interfaces::srv::SetParameters>::SharedPtr set_gait_srv_;
     rclcpp::Service<nav_bridge::srv::ChargeCommand>::SharedPtr charge_command_srv_;
 
     virtual void handleStandRequest(const std::shared_ptr<std_srvs::srv::Trigger::Request> req,
@@ -99,8 +99,8 @@ protected:
         const std::shared_ptr<std_srvs::srv::Trigger::Request> req,
         std::shared_ptr<std_srvs::srv::Trigger::Response> res) = 0;
     virtual void handleSetGaitRequest(
-        const std::shared_ptr<nav_bridge::srv::SetGait::Request> req,
-        std::shared_ptr<nav_bridge::srv::SetGait::Response> res) = 0;
+        const std::shared_ptr<rcl_interfaces::srv::SetParameters::Request> req,
+        std::shared_ptr<rcl_interfaces::srv::SetParameters::Response> res) = 0;
     virtual void handleChargeCommandRequest(
         const std::shared_ptr<nav_bridge::srv::ChargeCommand::Request> req,
         std::shared_ptr<nav_bridge::srv::ChargeCommand::Response> res) = 0;

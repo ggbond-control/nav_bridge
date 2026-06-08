@@ -18,6 +18,7 @@
 #include "nav_bridge/robot_state_store.hpp"
 #include "nav_bridge/udp_transport.hpp"
 #include "nav_bridge/x30_protocol.hpp"
+#include <rcl_interfaces/srv/set_parameters.hpp>
 
 namespace nav_bridge {
 
@@ -43,8 +44,8 @@ protected:
     void handleReleaseControlRequest(
         const std::shared_ptr<std_srvs::srv::Trigger::Request> req,
         std::shared_ptr<std_srvs::srv::Trigger::Response> res) override;
-    void handleSetGaitRequest(const std::shared_ptr<nav_bridge::srv::SetGait::Request> req,
-                              std::shared_ptr<nav_bridge::srv::SetGait::Response> res) override;
+    void handleSetGaitRequest(const std::shared_ptr<rcl_interfaces::srv::SetParameters::Request> req,
+                              std::shared_ptr<rcl_interfaces::srv::SetParameters::Response> res) override;
     void handleChargeCommandRequest(
         const std::shared_ptr<nav_bridge::srv::ChargeCommand::Request> req,
         std::shared_ptr<nav_bridge::srv::ChargeCommand::Response> res) override;
