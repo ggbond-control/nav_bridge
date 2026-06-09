@@ -39,8 +39,6 @@ protected:
                             std::shared_ptr<std_srvs::srv::Trigger::Response> res) override;
     void handleLieRequest(const std::shared_ptr<std_srvs::srv::Trigger::Request> req,
                           std::shared_ptr<std_srvs::srv::Trigger::Response> res) override;
-    void handleReadyRequest(const std::shared_ptr<std_srvs::srv::Trigger::Request> req,
-                            std::shared_ptr<std_srvs::srv::Trigger::Response> res) override;
     void handleReleaseControlRequest(
         const std::shared_ptr<std_srvs::srv::Trigger::Request> req,
         std::shared_ptr<std_srvs::srv::Trigger::Response> res) override;

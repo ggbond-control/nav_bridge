@@ -34,7 +34,7 @@
    - 只会在 `~/release_control` 时显式释放，不再按 `/cmd_vel` 超时自动停心跳
 
 5. **动作执行层：`ActionExecutor`**
-   - 封装 `stand`、`lie`、`ready`
+   - 封装 `stand`、`lie`，以及内部力控站立收敛流程
    - 负责冷启动接管预热、必要时的重复发令、状态等待和超时判定
    - 是当前所有动作业务逻辑的核心
 
@@ -89,7 +89,7 @@ X30 并不是“发一条动作指令就一定立刻执行”的设备。对于�
 
 ### 2.3 持续接管窗口
 
-当前代码中，`ready` 的起立步骤以及 `lie` 中的关键阶段不再简单依赖“一次发令 + 一次等待”。
+当前代码中，`stand` 的起立步骤以及 `lie` 中的关键阶段不再简单依赖“一次发令 + 一次等待”。
 
 对于 `CMD_STAND_UP_DOWN`、`CMD_MOTION` 这类 toggle 型命令，系统会进入一个**持续接管窗口**：
 
@@ -103,9 +103,9 @@ X30 并不是“发一条动作指令就一定立刻执行”的设备。对于�
 
 ## 3. 主要服务语义
 
-### 3.1 `~/ready`
+### 3.1 `~/stand`
 
-`ready` 是当前最核心的业务服务，用于把机器人从静态或异常态拉到可导航工作态。
+`stand` 是当前最核心的业务服务，用于把机器人从静态或异常态拉到可导航工作态。
 
 当前实现的目标不是“机械地执行固定脚本”，而是把机器人**收敛到 `RL_MODE + MOUNTAIN`**。  
 在当前代码和实机表现下，主要流程通常是：
@@ -113,14 +113,15 @@ X30 并不是“发一条动作指令就一定立刻执行”的设备。对于�
 1. 如果在 `SOFT_ESTOP`，先恢复到 `LYING_DOWN`
 2. 若在 `LYING_DOWN / GOING_DOWN`，执行起立
 3. 若起立后处于 `INITIAL_STAND`，切入力控站立
-4. 切换山地步态 `CMD_GAIT_MOUNTAIN`
-5. 等待进入 `RL_MODE + MOUNTAIN`
+4. 若处于 `FORCE_STAND`，先发送 `CMD_MOTION` 进入踏步
+5. 切换山地步态 `CMD_GAIT_MOUNTAIN`
+6. 等待进入 `RL_MODE + MOUNTAIN`
 
 需要注意的是：
 
-- `ready` 内部仍然保留了针对 toggle 型命令的接管预热和重试逻辑
+- `stand` 内部仍然保留了针对 toggle 型命令的接管预热和重试逻辑
 - 若底层状态反馈比预期更慢，服务会按当前状态继续等待或重试，而不是假定机器人一定线性流转
-- 切换山地步态时底层可能短暂经过普通步态或力控站立等中间状态，`ready` 只以最终 `RL_MODE + MOUNTAIN` 作为成功条件
+- 切换山地步态时底层可能短暂经过普通步态或力控站立等中间状态，`stand` 只以最终 `RL_MODE + MOUNTAIN` 作为成功条件
 - 文档中描述的是当前代码下的主路径，真正行为仍以实机状态反馈为准
 
 成功后，机器人应当处于：
@@ -130,31 +131,7 @@ X30 并不是“发一条动作指令就一定立刻执行”的设备。对于�
 
 此时可以接受 `/cmd_vel` 导航速度输入。
 
-### 3.2 `~/stand`
-
-将机器人收敛到**静止、可控、力控站立态**。
-
-当前实现不是简单“发一个站立命令”，而是按当前状态把机器人收敛到 `FORCE_STAND`。  
-根据当前实机验证，`RL_MODE` 到 `FORCE_STAND` 的路径并不是一步完成，而是：
-
-`RL_MODE -> CMD_GAIT_WALK -> WALK/STEPPING -> CMD_MOTION -> FORCE_STAND`
-
-所以当前逻辑会：
-
-- 若已经处于 `FORCE_STAND`，直接返回成功
-- 若处于软急停，先恢复到趴下
-- 若处于趴下或正在趴下，先执行起立流程
-- 若处于 `RL_MODE`，先发送 `CMD_GAIT_WALK`，等待步态进入 `WALK`，再等待基本状态进入 `STEPPING`
-- 若处于 `STEPPING`，再发送 `CMD_MOTION` 停止运动
-- 若处于 `INITIAL_STAND`，再补一次力控模式切换
-- 最终目标状态是 `FORCE_STAND`
-
-这里最重要的一点是：
-
-- `CMD_GAIT_WALK` 本身并不直接等价于“静止站立”
-- 当前代码是按实机观察到的状态机实现这条链路，而不是单纯按协议图静态推导
-
-### 3.3 `~/lie`
+### 3.2 `~/lie`
 
 让机器人安全回到趴下状态。
 
@@ -176,7 +153,7 @@ X30 并不是“发一条动作指令就一定立刻执行”的设备。对于�
 
 ### 3.4 `~/set_gait`
 
-用于在踏步状态（`STEPPING`）、力控站立状态（`FORCE_STAND`）或 RL 模式（`RL_MODE`）下切换步态模型。普通步态从 `FORCE_STAND` 启动时，服务会先发送开始运动指令进入踏步状态。
+用于在踏步状态（`STEPPING`）、力控站立状态（`FORCE_STAND`）或 RL 模式（`RL_MODE`）下切换步态模型。从 `FORCE_STAND` 启动时，服务会先发送开始运动指令进入踏步状态，再发送目标步态指令。
 
 > **注意：** 切换到 RL 类步态（`L_WALK`/`MOUNTAIN`/`SILENT`）后，机器人将进入 `RL_MODE`；
 > 切换到普通步态（`WALK`/`SLOPE`/`OBSTACLE`/`STAIR*`）后，机器人处于 `STEPPING` 状态。
@@ -217,11 +194,11 @@ ros2 service call /nav_bridge_node/set_gait rcl_interfaces/srv/SetParameters \
 2. 解析 `gait` 参数（整数值或字符串值）
 3. 检查当前是否处于 `RL_MODE`、`STEPPING` 或 `FORCE_STAND`
 4. 做一次控制接管预热
-5. 若普通步态从 `FORCE_STAND` 起步，先重试发送 `CMD_MOTION` 进入 `STEPPING`
+5. 若从 `FORCE_STAND` 起步，先重试发送 `CMD_MOTION` 进入 `STEPPING`
 6. 发送目标步态控制指令
 7. 等待 `/robot_gait_state` 进入目标步态
 8. 等待机器人进入目标最终状态：RL 类步态为 `RL_MODE + 目标步态`，普通步态为 `STEPPING + 目标步态`
-   - 普通步态切换前或切换后如果观察到机器人停在 `FORCE_STAND`，会在等待窗口内重试发送 `CMD_MOTION`，触发进入踏步状态
+   - 如果观察到机器人停在 `FORCE_STAND`，会在等待窗口内重试发送 `CMD_MOTION`，触发进入踏步状态
 
 这样可以保证"切步态后仍可继续导航发速度"，同时以结构化参数报文替代裸数字透传。
 
@@ -251,7 +228,6 @@ ros2 service call /nav_bridge_node/set_gait rcl_interfaces/srv/SetParameters \
 
 同时，在以下服务执行期间会临时暂停 `/cmd_vel` UDP 转发，以避免动作控制链和速度控制链互相打架：
 
-- `~/ready`
 - `~/stand`
 - `~/lie`
 - `~/set_gait`
@@ -318,17 +294,16 @@ ros2 service call /nav_bridge_node/set_gait rcl_interfaces/srv/SetParameters \
 
 - `~/stand` (`std_srvs/srv/Trigger`)
 - `~/lie` (`std_srvs/srv/Trigger`)
-- `~/ready` (`std_srvs/srv/Trigger`)
 - `~/release_control` (`std_srvs/srv/Trigger`)
 - `~/set_gait` (`rcl_interfaces/srv/SetParameters`)
 
 说明：
 
-- 当前业务上只保留三个目标态服务：`lie / stand / ready`
+- 当前业务上只保留两个目标态服务：`stand / lie`
 - `~/release_control` 用于显式停止 heartbeat 并交还控制权
 - `~/set_gait` 用于步态切换，支持全部 10 种步态（整数或字符串方式），参数名 `gait`
 - 旧版本里存在的 `motion` 与 `force_stand` 对外服务链路已移除
-- `ready` 进入山地步态后，机器人会根据底层状态机进入 `RL_MODE`
+- `stand` 会收敛到 `RL_MODE + MOUNTAIN`
 
 ## 7. 配置参数
 
@@ -372,7 +347,7 @@ nav_bridge/
 ├── srv/
 │   └── ChargeCommand.srv                  # 自主充电控制服务定义
 ├── include/nav_bridge/
-│   ├── action_executor.hpp                # 动作执行器接口，封装 stand/lie/ready 业务流程
+│   ├── action_executor.hpp                # 动作执行器接口，封装 stand/lie 业务流程
 │   ├── nav_bridge_base.hpp                # 桥接节点抽象基类与通用 ROS 接口定义
 │   ├── robot_state_store.hpp              # 机器人状态缓存与条件变量等待接口
 │   ├── udp_transport.hpp                  # UDP 传输封装接口
@@ -404,12 +379,11 @@ nav_bridge/
 stateDiagram-v2
     [*] --> LYING_DOWN
 
-    LYING_DOWN --> INITIAL_STAND: ~/stand 或 ~/ready
-    INITIAL_STAND --> FORCE_STAND: ~/stand 或 ~/ready
-    FORCE_STAND --> RL_MODE: ~/ready + 山地步态
+    LYING_DOWN --> INITIAL_STAND: ~/stand
+    INITIAL_STAND --> FORCE_STAND: ~/stand
+    FORCE_STAND --> STEPPING: ~/stand 先开始运动
+    STEPPING --> RL_MODE: ~/stand + 山地步态
 
-    RL_MODE --> STEPPING: ~/stand 先切 WALK
-    STEPPING --> FORCE_STAND: ~/stand 再停 motion
     RL_MODE --> GOING_DOWN: ~/lie 可直接进入趴下链
     FORCE_STAND --> GOING_DOWN: ~/lie
     GOING_DOWN --> LYING_DOWN: 趴下完成
@@ -417,9 +391,9 @@ stateDiagram-v2
     SOFT_ESTOP --> LYING_DOWN: 恢复阶段
 ```
 
-如果按 `ready` 的完整顺序理解，可以简化为：
+如果按 `stand` 的完整顺序理解，可以简化为：
 
-`SOFT_ESTOP/LYING_DOWN -> INITIAL_STAND -> FORCE_STAND -> RL_MODE + MOUNTAIN`
+`SOFT_ESTOP/LYING_DOWN -> INITIAL_STAND -> FORCE_STAND -> STEPPING -> RL_MODE + MOUNTAIN`
 
 如果按 `lie` 的完整顺序理解，可以简化为：
 
@@ -431,8 +405,7 @@ stateDiagram-v2
 
 - 第一次上电或节点刚启动后，如果启用了 `startup_acquire_control`，节点会立即持有控制权
 - 如果刚释放控制权又立刻调用动作服务，允许系统先完成接管预热，不要连续高频猛点服务
-- `~/stand` 的目标不是“仅仅站起来”，而是最终进入 `FORCE_STAND`
-- `~/stand` 从 `RL_MODE` 收敛时，会先切 `WALK`，等待进入 `STEPPING`，再停止 motion
+- `~/stand` 的目标不是“仅仅站起来”，而是最终进入 `RL_MODE + MOUNTAIN`
 - `~/lie` 在 `RL_MODE` 下不简单复用 `stand` 的停止运动逻辑，而是优先进入“趴下链”
 - 如果启动时已接管控制权，`/cmd_vel` 长时间静默只会归零速度，不会自动释放控制权
 - 若日志中看到“保持接管并继续重发命令”，说明系统正在处理 toggle 型命令阶段的保守重试，不一定代表逻辑故障
@@ -441,16 +414,15 @@ stateDiagram-v2
 建议的最小回归顺序：
 
 1. 启动节点，确认已收到状态包
-2. 调用一次 `~/ready`
+2. 调用一次 `~/stand`
 3. 在 `RL_MODE + MOUNTAIN` 下发送少量 `/cmd_vel`
 4. 停止 `/cmd_vel`，确认速度归零但控制权仍保持
-5. 调用一次 `~/stand`，确认 `RL -> WALK -> STEPPING -> FORCE_STAND` 路径正确
-6. 调用 `~/lie`
-7. 再次调用 `~/ready`
-8. 调用一次 `~/set_gait`，将步态切到 `L_WALK`（例: `{name: 'gait', value: {type: 4, string_value: 'L_WALK'}}`）
-9. 在 `RL_MODE + L_WALK` 下发送少量 `/cmd_vel`，确认仍可转发
-10. 调用一次 `~/set_gait`，将步态切回 `MOUNTAIN`（例: `{name: 'gait', value: {type: 4, string_value: 'MOUNTAIN'}}`）
-11. 调用 `~/release_control`，确认 heartbeat 停止并交还控制权
+5. 调用 `~/lie`
+6. 再次调用 `~/stand`
+7. 调用一次 `~/set_gait`，将步态切到 `L_WALK`（例: `{name: 'gait', value: {type: 4, string_value: 'L_WALK'}}`）
+8. 在 `RL_MODE + L_WALK` 下发送少量 `/cmd_vel`，确认仍可转发
+9. 调用一次 `~/set_gait`，将步态切回 `MOUNTAIN`（例: `{name: 'gait', value: {type: 4, string_value: 'MOUNTAIN'}}`）
+10. 调用 `~/release_control`，确认 heartbeat 停止并交还控制权
 
 如果现场需要分析问题，最值得重点观察的日志关键词包括：
 
@@ -470,7 +442,7 @@ stateDiagram-v2
 - 控制接管依然是工程策略，不是依赖底层显式 ack
 - 动作执行器对 `CMD_STAND_UP_DOWN`、`CMD_MOTION` 这类 toggle 型命令仍保留了分阶段保活与重发机制
 - `~/set_gait` 现已改用标准 `rcl_interfaces/srv/SetParameters` 接口，支持全部 10 种步态，参数名 `gait`，支持整数或字符串输入
-- `stand / lie / ready` 的若干阶段路径是根据当前 X30 实机状态反馈逐步收敛出来的，未来若底层固件行为变化，业务路径也可能需要同步调整
+- `stand / lie` 的若干阶段路径是根据当前 X30 实机状态反馈逐步收敛出来的，未来若底层固件行为变化，业务路径也可能需要同步调整
 - 机器人名称字段当前常见为空字符串，这不影响主控制链路
 - 接收线程可能看到一部分未处理指令码，只要核心状态包正常即可先不视为故障
 
@@ -480,9 +452,8 @@ stateDiagram-v2
 
 | 服务名 | 类型 | 作用 |
 | --- | --- | --- |
-| `~/stand` | `std_srvs/srv/Trigger` | 收敛到静止力控站立态 |
+| `~/stand` | `std_srvs/srv/Trigger` | 一键进入 `RL_MODE + MOUNTAIN` |
 | `~/lie` | `std_srvs/srv/Trigger` | 安全退回趴下状态 |
-| `~/ready` | `std_srvs/srv/Trigger` | 一键进入 `RL_MODE + MOUNTAIN` |
 | `~/set_gait` | `rcl_interfaces/srv/SetParameters` | 切换步态，支持全部 10 种步态，参数名 `gait`（整数或字符串） |
 | `~/release_control` | `std_srvs/srv/Trigger` | 显式停止 heartbeat 并释放控制权 |
 

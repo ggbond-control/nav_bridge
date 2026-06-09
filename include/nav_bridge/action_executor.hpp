@@ -1,7 +1,7 @@
 #pragma once
 
 /// @file action_executor.hpp
-/// @brief 动作执行器，封装站立/趴下/ready 等业务流程
+/// @brief 动作执行器，封装 stand/lie 以及内部力控站立流程
 
 #include <functional>
 #include <memory>
@@ -29,8 +29,8 @@ public:
                    ControlWarmup control_warmup, CommandSender command_sender);
 
     ActionResult stand();
+    ActionResult forceStand();
     ActionResult lieDown();
-    ActionResult ready();
 
 private:
     void ensureControlTakeover();

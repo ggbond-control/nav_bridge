@@ -84,7 +84,6 @@ protected:
     // -- 服务端 --
     rclcpp::Service<std_srvs::srv::Trigger>::SharedPtr stand_srv_;
     rclcpp::Service<std_srvs::srv::Trigger>::SharedPtr lie_srv_;
-    rclcpp::Service<std_srvs::srv::Trigger>::SharedPtr ready_srv_;
     rclcpp::Service<std_srvs::srv::Trigger>::SharedPtr release_control_srv_;
     rclcpp::Service<rcl_interfaces::srv::SetParameters>::SharedPtr set_gait_srv_;
     rclcpp::Service<nav_bridge::srv::ChargeCommand>::SharedPtr charge_command_srv_;
@@ -93,8 +92,6 @@ protected:
                                     std::shared_ptr<std_srvs::srv::Trigger::Response> res)      = 0;
     virtual void handleLieRequest(const std::shared_ptr<std_srvs::srv::Trigger::Request> req,
                                   std::shared_ptr<std_srvs::srv::Trigger::Response> res)      = 0;
-    virtual void handleReadyRequest(const std::shared_ptr<std_srvs::srv::Trigger::Request> req,
-                                    std::shared_ptr<std_srvs::srv::Trigger::Response> res)      = 0;
     virtual void handleReleaseControlRequest(
         const std::shared_ptr<std_srvs::srv::Trigger::Request> req,
         std::shared_ptr<std_srvs::srv::Trigger::Response> res) = 0;

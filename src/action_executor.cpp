@@ -16,8 +16,10 @@ constexpr int kControlWarmupMs          = 400;
 constexpr int kControlWarmupPulseMs     = 100;
 constexpr int kSingleCommandTimeoutMs   = 5000;
 constexpr int kGaitSwitchTimeoutMs      = 5000;
-constexpr int kReadyMountainTimeoutMs   = 12000;
+constexpr int kStandMountainTimeoutMs   = 12000;
 constexpr int kSteppingEntryTimeoutMs   = 4000;
+constexpr int kStandStartMotionTimeoutMs = 8000;
+constexpr int kStandStartMotionResendMs  = 3000;
 constexpr int kStandTransitionMs        = 16000;
 constexpr int kStandResendIntervalMs    = 4000;
 constexpr int kStopMotionTimeoutMs      = 12000;
@@ -118,7 +120,7 @@ bool ActionExecutor::waitForGaitState(const std::vector<GaitState> &targets, int
     return state_store_.waitForGaitState(targets, timeout_ms);
 }
 
-ActionResult ActionExecutor::stand() {
+ActionResult ActionExecutor::forceStand() {
     uint8_t state = state_store_.basicState();
 
     if (state == static_cast<uint8_t>(BasicState::FORCE_STAND)) {
@@ -330,8 +332,8 @@ ActionResult ActionExecutor::lieDown() {
     return {ok, ok ? "Robot has lied down." : "Timeout waiting for robot to lie down."};
 }
 
-ActionResult ActionExecutor::ready() {
-    RCLCPP_INFO(logger_, "🚀 收到 ready 指令, 开始执行启动序列...");
+ActionResult ActionExecutor::stand() {
+    RCLCPP_INFO(logger_, "🚀 收到 stand 指令, 开始执行启动序列...");
 
     uint8_t state = state_store_.basicState();
     uint8_t gait  = state_store_.gaitState();
@@ -339,10 +341,10 @@ ActionResult ActionExecutor::ready() {
     if (state == static_cast<uint8_t>(BasicState::SOFT_ESTOP)) {
         RCLCPP_INFO(logger_, "📌 [0/5] 机器人在软急停状态, 先恢复到贴下...");
         if (!sendSingleCommandAndWait(CMD_STAND_UP_DOWN, {BasicState::LYING_DOWN},
-                                      kSingleCommandTimeoutMs, "ready: 软急停恢复",
+                                      kSingleCommandTimeoutMs, "stand: 软急停恢复",
                                       kControlWarmupMs)) {
-            RCLCPP_ERROR(logger_, "❌ Ready 失败: 从软急停恢复超时");
-            return {false, "Ready failed: timeout recovering from soft estop."};
+            RCLCPP_ERROR(logger_, "❌ Stand 失败: 从软急停恢复超时");
+            return {false, "Stand failed: timeout recovering from soft estop."};
         }
         RCLCPP_INFO(logger_, "✅ [0/5] 已恢复到贴下状态");
         state = state_store_.basicState();
@@ -355,15 +357,15 @@ ActionResult ActionExecutor::ready() {
                                           {BasicState::STANDING_UP, BasicState::INITIAL_STAND,
                                            BasicState::FORCE_STAND, BasicState::STEPPING},
                                           kStandTransitionMs, kStandResendIntervalMs,
-                                          "ready: 起立", kControlWarmupMs)) {
-            RCLCPP_ERROR(logger_, "❌ Ready 失败: 起立指令无早期响应");
-            return {false, "Ready failed: no response at step 1 (stand up)."};
+                                          "stand: 起立", kControlWarmupMs)) {
+            RCLCPP_ERROR(logger_, "❌ Stand 失败: 起立指令无早期响应");
+            return {false, "Stand failed: no response at step 1 (stand up)."};
         }
 
         if (!waitForBasicState(
                 {BasicState::INITIAL_STAND, BasicState::FORCE_STAND, BasicState::STEPPING}, 6500)) {
-            RCLCPP_ERROR(logger_, "❌ Ready 失败: 起立超时");
-            return {false, "Ready failed: timeout at step 1 (stand up)."};
+            RCLCPP_ERROR(logger_, "❌ Stand 失败: 起立超时");
+            return {false, "Stand failed: timeout at step 1 (stand up)."};
         }
         RCLCPP_INFO(logger_, "✅ [1/5] 起立完成");
     } else if (state == static_cast<uint8_t>(BasicState::INITIAL_STAND) ||
@@ -372,8 +374,8 @@ ActionResult ActionExecutor::ready() {
                state == static_cast<uint8_t>(BasicState::RL_MODE)) {
         RCLCPP_INFO(logger_, "✅ [1/5] 已站立, 跳过");
     } else {
-        RCLCPP_ERROR(logger_, "❌ Ready 失败: 无法识别的状态=%d", state);
-        return {false, "Ready failed: unexpected state=" + std::to_string(state)};
+        RCLCPP_ERROR(logger_, "❌ Stand 失败: 无法识别的状态=%d", state);
+        return {false, "Stand failed: unexpected state=" + std::to_string(state)};
     }
 
     state = state_store_.basicState();
@@ -383,8 +385,8 @@ ActionResult ActionExecutor::ready() {
         command_sender_(CMD_FORCE_CONTROL);
 
         if (!waitForBasicState({BasicState::FORCE_STAND}, 5000)) {
-            RCLCPP_ERROR(logger_, "❌ Ready 失败: 力控站立超时");
-            return {false, "Ready failed: timeout at step 2 (force stand)."};
+            RCLCPP_ERROR(logger_, "❌ Stand 失败: 力控站立超时");
+            return {false, "Stand failed: timeout at step 2 (force stand)."};
         }
         RCLCPP_INFO(logger_, "✅ [2/5] 力控站立完成");
     } else if (state == static_cast<uint8_t>(BasicState::FORCE_STAND) ||
@@ -392,8 +394,8 @@ ActionResult ActionExecutor::ready() {
                state == static_cast<uint8_t>(BasicState::STEPPING)) {
         RCLCPP_INFO(logger_, "✅ [2/5] 已在力控/运动, 跳过");
     } else {
-        RCLCPP_ERROR(logger_, "❌ Ready 失败: 无法切入力控(state=%d)", state);
-        return {false, "Ready failed: unexpected state for force stand (state=" +
+        RCLCPP_ERROR(logger_, "❌ Stand 失败: 无法切入力控(state=%d)", state);
+        return {false, "Stand failed: unexpected state for force stand (state=" +
                            std::to_string(state) + ")."};
     }
 
@@ -403,6 +405,25 @@ ActionResult ActionExecutor::ready() {
         gait == static_cast<uint8_t>(GaitState::MOUNTAIN)) {
         RCLCPP_INFO(logger_, "✅ [3/4] 已在RL模式+山地步态, 跳过");
     } else {
+        if (state == static_cast<uint8_t>(BasicState::FORCE_STAND)) {
+            RCLCPP_INFO(logger_, "📌 [3/4] 当前为力控站立, 先进入踏步再切换山地...");
+            if (!sendToggleCommandWithRetries(CMD_MOTION, {BasicState::STEPPING},
+                                              kStandStartMotionTimeoutMs,
+                                              kStandStartMotionResendMs,
+                                              "stand: 力控站立进入踏步",
+                                              kControlWarmupMs)) {
+                auto final_snap = state_store_.snapshot();
+                RCLCPP_ERROR(logger_,
+                             "❌ Stand 失败: 力控站立未进入踏步 (basic=%u, gait=%u)",
+                             final_snap.basic_state, final_snap.gait_state);
+                return {false, "Stand failed: timeout entering stepping before mountain gait."};
+            }
+            state = state_store_.basicState();
+            gait  = state_store_.gaitState();
+            RCLCPP_INFO(logger_, "✅ [3/4] 已进入踏步, 准备切换山地 (state=%d, gait=%d)",
+                        state, gait);
+        }
+
         RCLCPP_INFO(logger_, "📌 [3/4] 切换山地步态 (state=%d, gait=%d)...", state, gait);
         ensureControlTakeover(kControlWarmupMs, kControlWarmupPulseMs);
         command_sender_(CMD_GAIT_MOUNTAIN);
@@ -412,18 +433,18 @@ ActionResult ActionExecutor::ready() {
                     return basic_state == static_cast<uint8_t>(BasicState::RL_MODE) &&
                            gait_state == static_cast<uint8_t>(GaitState::MOUNTAIN);
                 },
-                kReadyMountainTimeoutMs)) {
+                kStandMountainTimeoutMs)) {
             auto final_snap = state_store_.snapshot();
             RCLCPP_ERROR(logger_,
-                         "❌ Ready 失败: 未进入RL模式+山地步态 (basic=%u, gait=%u)",
+                         "❌ Stand 失败: 未进入RL模式+山地步态 (basic=%u, gait=%u)",
                          final_snap.basic_state, final_snap.gait_state);
-            return {false, "Ready failed: timeout waiting for RL_MODE + MOUNTAIN."};
+            return {false, "Stand failed: timeout waiting for RL_MODE + MOUNTAIN."};
         }
         RCLCPP_INFO(logger_, "✅ [3/4] 山地步态+RL模式 就绪");
     }
 
-    RCLCPP_INFO(logger_, "🎉 Ready 序列完成! 机器人已就绪 (RL模式)");
-    return {true, "Robot is ready: standing, force control, mountain gait (RL mode)."};
+    RCLCPP_INFO(logger_, "🎉 Stand 序列完成! 机器人已就绪 (RL模式)");
+    return {true, "Robot is standing in RL mode with mountain gait."};
 }
 
 }  // namespace nav_bridge

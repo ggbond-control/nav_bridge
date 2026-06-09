@@ -144,8 +144,6 @@ bool X30NavBridge::initialize() {
         "~/stand", std::bind(&X30NavBridge::handleStandRequest, this, _1, _2));
     lie_srv_ = this->create_service<std_srvs::srv::Trigger>(
         "~/lie", std::bind(&X30NavBridge::handleLieRequest, this, _1, _2));
-    ready_srv_ = this->create_service<std_srvs::srv::Trigger>(
-        "~/ready", std::bind(&X30NavBridge::handleReadyRequest, this, _1, _2));
     release_control_srv_ = this->create_service<std_srvs::srv::Trigger>(
         "~/release_control", std::bind(&X30NavBridge::handleReleaseControlRequest, this, _1, _2));
     set_gait_srv_ = this->create_service<rcl_interfaces::srv::SetParameters>(
@@ -482,7 +480,7 @@ ActionResult X30NavBridge::setNavigationGait(uint8_t gait) {
     RCLCPP_INFO(this->get_logger(), "📌 请求切换步态到 %s(%u)", gait_name, gait);
     warmupControl(kControlWarmupMs, kControlWarmupPulseMs);
 
-    if (starts_from_force_stand && !isRlGait(gait)) {
+    if (starts_from_force_stand) {
         bool entered_stepping = false;
         int motion_retry_count = 0;
         auto deadline = std::chrono::steady_clock::now() +
@@ -498,7 +496,7 @@ ActionResult X30NavBridge::setNavigationGait(uint8_t gait) {
             if (snap.basic_state == static_cast<uint8_t>(BasicState::FORCE_STAND)) {
                 ++motion_retry_count;
                 RCLCPP_INFO(this->get_logger(),
-                            "⏳ 普通步态 %s 从力控站立启动, 发送开始运动指令 (attempt=%d)...",
+                            "⏳ 步态 %s 从力控站立启动, 先发送开始运动指令 (attempt=%d)...",
                             gait_name, motion_retry_count);
                 sendGaitCommand(CMD_MOTION);
             }
@@ -520,14 +518,14 @@ ActionResult X30NavBridge::setNavigationGait(uint8_t gait) {
         if (!entered_stepping) {
             auto final_snap = state_store_.snapshot();
             RCLCPP_WARN(this->get_logger(),
-                        "⚠️ 普通步态 %s 从力控站立启动失败 (basic=%u, gait=%u)",
+                        "⚠️ 步态 %s 从力控站立启动失败 (basic=%u, gait=%u)",
                         gait_name, final_snap.basic_state, final_snap.gait_state);
             return {false, std::string("Failed to start motion from FORCE_STAND for gait ") +
                               gait_name + "."};
         }
 
         auto snap = state_store_.snapshot();
-        if (snap.gait_state == gait) {
+        if (!isRlGait(gait) && snap.gait_state == gait) {
             RCLCPP_INFO(this->get_logger(), "✅ 机器人已进入踏步状态, 步态: %s", gait_name);
             return {true, std::string("Navigation gait switched to ") + gait_name + "."};
         }
@@ -535,29 +533,29 @@ ActionResult X30NavBridge::setNavigationGait(uint8_t gait) {
 
     sendGaitCommand(command);
 
-    // 第一步: 等待步态反馈进入目标步态
-    // 从 RL_MODE 切到 MPC 步态需经过 FORCE_STAND 过渡, 步态变化链为 RL_GAIT -> WALK -> target,
-    // 因此使用更长的超时时间.
-    int gait_wait_ms = isRlGait(gait) ? kGaitSwitchTimeoutMs : kNonRlGaitSwitchTimeoutMs;
-    if (!state_store_.waitForGaitState({static_cast<GaitState>(gait)}, gait_wait_ms)) {
-        return {false, std::string("Timeout waiting for gait state: ") + gait_name + "."};
-    }
-
-    // 第二步: 根据步态类型等待对应的基本状态
-    // - RL 类步态: 等待 RL_MODE
-    // - 非 RL 步态: 步态确认后机器人可能处于 FORCE_STAND (从 RL_MODE 退出后的过渡态),
-    //   需主动发送 CMD_MOTION (开始运动) 才能进入 STEPPING, 不会自动跳转.
+    // 根据步态类型等待最终状态.
+    // - RL 类步态: 直接等待 RL_MODE + 目标步态, 避免 gait 已经相同而过早进入短等待.
+    // - 非 RL 步态: 先等步态反馈进入目标步态, 再确保 STEPPING + 目标步态.
     if (isRlGait(gait)) {
         if (!state_store_.waitForState(
                 [gait](uint8_t basic_state, uint8_t gait_state) {
                     return basic_state == static_cast<uint8_t>(BasicState::RL_MODE) &&
                            gait_state == gait;
                 },
-                kCmdVelStateWaitMs)) {
-            return {false, std::string("Gait switched to ") + gait_name +
-                              ", but robot did not enter RL_MODE in time."};
+                kGaitSwitchTimeoutMs)) {
+            auto final_snap = state_store_.snapshot();
+            RCLCPP_WARN(this->get_logger(),
+                        "⚠️ 步态 %s 未进入RL最终状态 (basic=%u, gait=%u)",
+                        gait_name, final_snap.basic_state, final_snap.gait_state);
+            return {false, std::string("Timeout waiting for RL_MODE + ") + gait_name + "."};
         }
     } else {
+        // 从 RL_MODE 切到 MPC 步态需经过 FORCE_STAND 过渡, 步态变化链为 RL_GAIT -> WALK -> target,
+        // 因此使用更长的超时时间.
+        if (!state_store_.waitForGaitState({static_cast<GaitState>(gait)}, kNonRlGaitSwitchTimeoutMs)) {
+            return {false, std::string("Timeout waiting for gait state: ") + gait_name + "."};
+        }
+
         auto is_target_stepping = [gait](uint8_t basic_state, uint8_t gait_state) {
             return basic_state == static_cast<uint8_t>(BasicState::STEPPING) &&
                    gait_state == gait;
@@ -1276,16 +1274,6 @@ void X30NavBridge::handleLieRequest(
     res->message = result.message;
 }
 
-void X30NavBridge::handleReadyRequest(
-    const std::shared_ptr<std_srvs::srv::Trigger::Request> /*req*/,
-    std::shared_ptr<std_srvs::srv::Trigger::Response> res) {
-    auto result  = executeActionWithCmdVelSuppressed("ready", [this]() {
-        return action_executor_->ready();
-    });
-    res->success = result.success;
-    res->message = result.message;
-}
-
 void X30NavBridge::handleReleaseControlRequest(
     const std::shared_ptr<std_srvs::srv::Trigger::Request> /*req*/,
     std::shared_ptr<std_srvs::srv::Trigger::Response> res) {
@@ -1434,7 +1422,7 @@ void X30NavBridge::handleChargeCommandRequest(const std::shared_ptr<nav_bridge::
         if (snapshot.basic_state == static_cast<uint8_t>(BasicState::RL_MODE))
         {
             RCLCPP_INFO(this->get_logger(), "⚡ START前检测到RL_MODE，先自动切换到可充电状态");
-            auto exit_result = executeActionWithCmdVelSuppressed("charge_prepare_exit_rl", [this](){ return action_executor_->stand(); });
+            auto exit_result = executeActionWithCmdVelSuppressed("charge_prepare_exit_rl", [this](){ return action_executor_->forceStand(); });
             if (!exit_result.success)
             {
                 res->success = false;
