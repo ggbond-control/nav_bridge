@@ -120,6 +120,7 @@ X30 并不是“发一条动作指令就一定立刻执行”的设备。对于�
 
 - `ready` 内部仍然保留了针对 toggle 型命令的接管预热和重试逻辑
 - 若底层状态反馈比预期更慢，服务会按当前状态继续等待或重试，而不是假定机器人一定线性流转
+- 切换山地步态时底层可能短暂经过普通步态或力控站立等中间状态，`ready` 只以最终 `RL_MODE + MOUNTAIN` 作为成功条件
 - 文档中描述的是当前代码下的主路径，真正行为仍以实机状态反馈为准
 
 成功后，机器人应当处于：
@@ -175,7 +176,7 @@ X30 并不是“发一条动作指令就一定立刻执行”的设备。对于�
 
 ### 3.4 `~/set_gait`
 
-用于在踏步状态（`STEPPING`）或 RL 模式（`RL_MODE`）下切换步态模型。
+用于在踏步状态（`STEPPING`）、力控站立状态（`FORCE_STAND`）或 RL 模式（`RL_MODE`）下切换步态模型。普通步态从 `FORCE_STAND` 启动时，服务会先发送开始运动指令进入踏步状态。
 
 > **注意：** 切换到 RL 类步态（`L_WALK`/`MOUNTAIN`/`SILENT`）后，机器人将进入 `RL_MODE`；
 > 切换到普通步态（`WALK`/`SLOPE`/`OBSTACLE`/`STAIR*`）后，机器人处于 `STEPPING` 状态。
@@ -214,12 +215,13 @@ ros2 service call /nav_bridge_node/set_gait rcl_interfaces/srv/SetParameters \
 
 1. 检查请求中恰好包含一个 `gait` 参数
 2. 解析 `gait` 参数（整数值或字符串值）
-3. 检查当前是否处于 `RL_MODE` 或 `STEPPING`
+3. 检查当前是否处于 `RL_MODE`、`STEPPING` 或 `FORCE_STAND`
 4. 做一次控制接管预热
-5. 发送目标步态控制指令
-6. 等待 `/robot_gait_state` 进入目标步态
-7. 等待机器人进入目标最终状态：RL 类步态为 `RL_MODE + 目标步态`，普通步态为 `STEPPING + 目标步态`
-   - 普通步态切换后如果观察到机器人停在 `FORCE_STAND`，会在等待窗口内重试发送 `CMD_MOTION`，触发进入踏步状态
+5. 若普通步态从 `FORCE_STAND` 起步，先重试发送 `CMD_MOTION` 进入 `STEPPING`
+6. 发送目标步态控制指令
+7. 等待 `/robot_gait_state` 进入目标步态
+8. 等待机器人进入目标最终状态：RL 类步态为 `RL_MODE + 目标步态`，普通步态为 `STEPPING + 目标步态`
+   - 普通步态切换前或切换后如果观察到机器人停在 `FORCE_STAND`，会在等待窗口内重试发送 `CMD_MOTION`，触发进入踏步状态
 
 这样可以保证"切步态后仍可继续导航发速度"，同时以结构化参数报文替代裸数字透传。
 

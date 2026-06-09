@@ -20,10 +20,10 @@ namespace {
 
 constexpr int kControlWarmupMs        = 400;
 constexpr int kControlWarmupPulseMs   = 100;
-constexpr int kGaitSwitchTimeoutMs    = 5000;
+constexpr int kGaitSwitchTimeoutMs    = 8000;
 constexpr int kNonRlGaitSwitchTimeoutMs = 12000;  ///< 从 RL_MODE 切到 MPC 步态需经过 FORCE_STAND 过渡，留足时间
 constexpr int kCmdVelStateWaitMs      = 4000;
-constexpr int kMotionStartRetryMs     = 500;
+constexpr int kMotionStartRetryMs     = 1500;
 constexpr int kChargePrepSettleMs        = 200;
 constexpr int kChargeReceivePollMs       = 100;
 constexpr int kChargeQueryPollMs         = 1000;
@@ -408,11 +408,6 @@ ActionResult X30NavBridge::setNavigationGait(uint8_t gait) {
         return {false, "Robot is not connected."};
     }
 
-    if (snapshot.basic_state != static_cast<uint8_t>(BasicState::RL_MODE) &&
-        snapshot.basic_state != static_cast<uint8_t>(BasicState::STEPPING)) {
-        return {false, "Gait switching is only allowed in RL_MODE or STEPPING."};
-    }
-
     // 按手册 1.2.6: RL 类步态 (L_WALK/MOUNTAIN/SILENT) 切换后机器人进入 RL_MODE,
     // 普通步态 (WALK/SLOPE/OBSTACLE/STAIR*) 切换后机器人处于 STEPPING, 不会进入 RL_MODE.
     auto isRlGait = [](uint8_t g) {
@@ -420,6 +415,14 @@ ActionResult X30NavBridge::setNavigationGait(uint8_t gait) {
                g == static_cast<uint8_t>(GaitState::MOUNTAIN) ||
                g == static_cast<uint8_t>(GaitState::SILENT);
     };
+
+    const bool starts_from_force_stand =
+        snapshot.basic_state == static_cast<uint8_t>(BasicState::FORCE_STAND);
+    if (snapshot.basic_state != static_cast<uint8_t>(BasicState::RL_MODE) &&
+        snapshot.basic_state != static_cast<uint8_t>(BasicState::STEPPING) &&
+        !starts_from_force_stand) {
+        return {false, "Gait switching is only allowed in RL_MODE, STEPPING, or FORCE_STAND."};
+    }
 
     // 快速检查: 是否已经处于目标步态且基本状态与步态类型一致
     const uint8_t expected_basic_state = isRlGait(gait)
@@ -478,6 +481,58 @@ ActionResult X30NavBridge::setNavigationGait(uint8_t gait) {
 
     RCLCPP_INFO(this->get_logger(), "📌 请求切换步态到 %s(%u)", gait_name, gait);
     warmupControl(kControlWarmupMs, kControlWarmupPulseMs);
+
+    if (starts_from_force_stand && !isRlGait(gait)) {
+        bool entered_stepping = false;
+        int motion_retry_count = 0;
+        auto deadline = std::chrono::steady_clock::now() +
+                        std::chrono::milliseconds(kCmdVelStateWaitMs);
+
+        while (std::chrono::steady_clock::now() < deadline) {
+            auto snap = state_store_.snapshot();
+            if (snap.basic_state == static_cast<uint8_t>(BasicState::STEPPING)) {
+                entered_stepping = true;
+                break;
+            }
+
+            if (snap.basic_state == static_cast<uint8_t>(BasicState::FORCE_STAND)) {
+                ++motion_retry_count;
+                RCLCPP_INFO(this->get_logger(),
+                            "⏳ 普通步态 %s 从力控站立启动, 发送开始运动指令 (attempt=%d)...",
+                            gait_name, motion_retry_count);
+                sendGaitCommand(CMD_MOTION);
+            }
+
+            auto now = std::chrono::steady_clock::now();
+            auto remaining =
+                std::chrono::duration_cast<std::chrono::milliseconds>(deadline - now).count();
+            if (remaining <= 0) {
+                break;
+            }
+
+            int wait_ms = std::min<int>(kMotionStartRetryMs, static_cast<int>(remaining));
+            if (state_store_.waitForBasicState({BasicState::STEPPING}, wait_ms)) {
+                entered_stepping = true;
+                break;
+            }
+        }
+
+        if (!entered_stepping) {
+            auto final_snap = state_store_.snapshot();
+            RCLCPP_WARN(this->get_logger(),
+                        "⚠️ 普通步态 %s 从力控站立启动失败 (basic=%u, gait=%u)",
+                        gait_name, final_snap.basic_state, final_snap.gait_state);
+            return {false, std::string("Failed to start motion from FORCE_STAND for gait ") +
+                              gait_name + "."};
+        }
+
+        auto snap = state_store_.snapshot();
+        if (snap.gait_state == gait) {
+            RCLCPP_INFO(this->get_logger(), "✅ 机器人已进入踏步状态, 步态: %s", gait_name);
+            return {true, std::string("Navigation gait switched to ") + gait_name + "."};
+        }
+    }
+
     sendGaitCommand(command);
 
     // 第一步: 等待步态反馈进入目标步态

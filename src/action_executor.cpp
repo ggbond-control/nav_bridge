@@ -16,6 +16,7 @@ constexpr int kControlWarmupMs          = 400;
 constexpr int kControlWarmupPulseMs     = 100;
 constexpr int kSingleCommandTimeoutMs   = 5000;
 constexpr int kGaitSwitchTimeoutMs      = 5000;
+constexpr int kReadyMountainTimeoutMs   = 12000;
 constexpr int kSteppingEntryTimeoutMs   = 4000;
 constexpr int kStandTransitionMs        = 16000;
 constexpr int kStandResendIntervalMs    = 4000;
@@ -406,13 +407,17 @@ ActionResult ActionExecutor::ready() {
         ensureControlTakeover(kControlWarmupMs, kControlWarmupPulseMs);
         command_sender_(CMD_GAIT_MOUNTAIN);
 
-        if (!waitForGaitState({GaitState::MOUNTAIN}, 4000)) {
-            RCLCPP_ERROR(logger_, "❌ Ready 失败: 山地步态切换超时");
-            return {false, "Ready failed: timeout at step 3 (mountain gait)."};
-        }
-
-        if (!waitForBasicState({BasicState::RL_MODE}, 3000)) {
-            RCLCPP_WARN(logger_, "⚠️ 步态已切换但未进入RL模式, 可能仍可操作");
+        if (!state_store_.waitForState(
+                [](uint8_t basic_state, uint8_t gait_state) {
+                    return basic_state == static_cast<uint8_t>(BasicState::RL_MODE) &&
+                           gait_state == static_cast<uint8_t>(GaitState::MOUNTAIN);
+                },
+                kReadyMountainTimeoutMs)) {
+            auto final_snap = state_store_.snapshot();
+            RCLCPP_ERROR(logger_,
+                         "❌ Ready 失败: 未进入RL模式+山地步态 (basic=%u, gait=%u)",
+                         final_snap.basic_state, final_snap.gait_state);
+            return {false, "Ready failed: timeout waiting for RL_MODE + MOUNTAIN."};
         }
         RCLCPP_INFO(logger_, "✅ [3/4] 山地步态+RL模式 就绪");
     }
