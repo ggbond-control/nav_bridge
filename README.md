@@ -181,7 +181,7 @@ X30 并不是“发一条动作指令就一定立刻执行”的设备。对于�
 > 切换到普通步态（`WALK`/`SLOPE`/`OBSTACLE`/`STAIR*`）后，机器人处于 `STEPPING` 状态。
 > 两种情况下均支持 `/cmd_vel` 速度转发。
 
-接口类型已更改为 ROS2 标准 `rcl_interfaces/srv/SetParameters`，通过设置参数名 `gait` 来指定目标步态。
+接口类型已更改为 ROS2 标准 `rcl_interfaces/srv/SetParameters`，通过设置参数名 `gait` 来指定目标步态。虽然接口类型来自 `SetParameters`，但本服务是一个有副作用的步态切换动作，一次请求只接受一个 `gait` 参数；空参数、多个参数或非 `gait` 参数都会被拒绝，不会执行步态切换。
 
 支持全部 10 种步态：
 
@@ -212,12 +212,14 @@ ros2 service call /nav_bridge_node/set_gait rcl_interfaces/srv/SetParameters \
 
 服务执行时会：
 
-1. 解析 `gait` 参数（整数值或字符串值）
-2. 检查当前是否处于 `RL_MODE` 或 `STEPPING`
-3. 做一次控制接管预热
-4. 发送目标步态控制指令
-5. 等待 `/robot_gait_state` 进入目标步态
-6. 等待机器人进入允许 `/cmd_vel` 转发的状态（`STEPPING` 或 `RL_MODE`）
+1. 检查请求中恰好包含一个 `gait` 参数
+2. 解析 `gait` 参数（整数值或字符串值）
+3. 检查当前是否处于 `RL_MODE` 或 `STEPPING`
+4. 做一次控制接管预热
+5. 发送目标步态控制指令
+6. 等待 `/robot_gait_state` 进入目标步态
+7. 等待机器人进入目标最终状态：RL 类步态为 `RL_MODE + 目标步态`，普通步态为 `STEPPING + 目标步态`
+   - 普通步态切换后如果观察到机器人停在 `FORCE_STAND`，会在等待窗口内重试发送 `CMD_MOTION`，触发进入踏步状态
 
 这样可以保证"切步态后仍可继续导航发速度"，同时以结构化参数报文替代裸数字透传。
 

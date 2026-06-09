@@ -7,6 +7,7 @@
 
 #include <algorithm>
 #include <chrono>
+#include <cctype>
 #include <cmath>
 #include <geometry_msgs/msg/transform_stamped.hpp>
 #include <unordered_map>
@@ -20,7 +21,9 @@ namespace {
 constexpr int kControlWarmupMs        = 400;
 constexpr int kControlWarmupPulseMs   = 100;
 constexpr int kGaitSwitchTimeoutMs    = 5000;
+constexpr int kNonRlGaitSwitchTimeoutMs = 12000;  ///< 从 RL_MODE 切到 MPC 步态需经过 FORCE_STAND 过渡，留足时间
 constexpr int kCmdVelStateWaitMs      = 4000;
+constexpr int kMotionStartRetryMs     = 500;
 constexpr int kChargePrepSettleMs        = 200;
 constexpr int kChargeReceivePollMs       = 100;
 constexpr int kChargeQueryPollMs         = 1000;
@@ -419,11 +422,10 @@ ActionResult X30NavBridge::setNavigationGait(uint8_t gait) {
     };
 
     // 快速检查: 是否已经处于目标步态且基本状态与步态类型一致
-    bool already_ready = (snapshot.gait_state == gait) &&
-                         (isRlGait(gait)
-                              ? snapshot.basic_state == static_cast<uint8_t>(BasicState::RL_MODE)
-                              : snapshot.basic_state == static_cast<uint8_t>(BasicState::STEPPING));
-    if (already_ready) {
+    const uint8_t expected_basic_state = isRlGait(gait)
+                                             ? static_cast<uint8_t>(BasicState::RL_MODE)
+                                             : static_cast<uint8_t>(BasicState::STEPPING);
+    if (snapshot.gait_state == gait && snapshot.basic_state == expected_basic_state) {
         return {true, "Robot is already in the requested navigation gait."};
     }
 
@@ -479,25 +481,76 @@ ActionResult X30NavBridge::setNavigationGait(uint8_t gait) {
     sendGaitCommand(command);
 
     // 第一步: 等待步态反馈进入目标步态
-    if (!state_store_.waitForGaitState({static_cast<GaitState>(gait)}, kGaitSwitchTimeoutMs)) {
+    // 从 RL_MODE 切到 MPC 步态需经过 FORCE_STAND 过渡, 步态变化链为 RL_GAIT -> WALK -> target,
+    // 因此使用更长的超时时间.
+    int gait_wait_ms = isRlGait(gait) ? kGaitSwitchTimeoutMs : kNonRlGaitSwitchTimeoutMs;
+    if (!state_store_.waitForGaitState({static_cast<GaitState>(gait)}, gait_wait_ms)) {
         return {false, std::string("Timeout waiting for gait state: ") + gait_name + "."};
     }
 
     // 第二步: 根据步态类型等待对应的基本状态
-    // - RL 类步态 (L_WALK/MOUNTAIN/SILENT): 等待 RL_MODE (+ 满足 cmd_vel 转发条件)
-    // - 普通步态 (WALK/SLOPE/OBSTACLE/STAIR*): 等待 STEPPING (协议规定踏步下才能切换步态)
+    // - RL 类步态: 等待 RL_MODE
+    // - 非 RL 步态: 步态确认后机器人可能处于 FORCE_STAND (从 RL_MODE 退出后的过渡态),
+    //   需主动发送 CMD_MOTION (开始运动) 才能进入 STEPPING, 不会自动跳转.
     if (isRlGait(gait)) {
-        if (!waitForCmdVelCompatibleState(kCmdVelStateWaitMs)) {
+        if (!state_store_.waitForState(
+                [gait](uint8_t basic_state, uint8_t gait_state) {
+                    return basic_state == static_cast<uint8_t>(BasicState::RL_MODE) &&
+                           gait_state == gait;
+                },
+                kCmdVelStateWaitMs)) {
             return {false, std::string("Gait switched to ") + gait_name +
                               ", but robot did not enter RL_MODE in time."};
         }
     } else {
-        if (!state_store_.waitForBasicState({BasicState::STEPPING}, kCmdVelStateWaitMs)) {
-            RCLCPP_WARN(this->get_logger(),
-                        "⚠️ 步态已切换到 %s, 但未观察到 STEPPING 状态 (可能已经处于 STEPPING)",
-                        gait_name);
-            // 非致命: 步态本身已切换成功, STEPPING 状态可能因时序未捕捉到
+        auto is_target_stepping = [gait](uint8_t basic_state, uint8_t gait_state) {
+            return basic_state == static_cast<uint8_t>(BasicState::STEPPING) &&
+                   gait_state == gait;
+        };
+
+        bool entered_stepping = false;
+        int motion_retry_count = 0;
+        auto deadline = std::chrono::steady_clock::now() +
+                        std::chrono::milliseconds(kCmdVelStateWaitMs);
+
+        while (std::chrono::steady_clock::now() < deadline) {
+            auto snap = state_store_.snapshot();
+            if (is_target_stepping(snap.basic_state, snap.gait_state)) {
+                entered_stepping = true;
+                break;
+            }
+
+            if (snap.basic_state == static_cast<uint8_t>(BasicState::FORCE_STAND)) {
+                ++motion_retry_count;
+                RCLCPP_INFO(this->get_logger(),
+                            "⏳ 步态已切换到 %s, 机器人处于力控站立, 发送开始运动指令 (attempt=%d)...",
+                            gait_name, motion_retry_count);
+                sendGaitCommand(CMD_MOTION);
+            }
+
+            auto now = std::chrono::steady_clock::now();
+            auto remaining =
+                std::chrono::duration_cast<std::chrono::milliseconds>(deadline - now).count();
+            if (remaining <= 0) {
+                break;
+            }
+
+            int wait_ms = std::min<int>(kMotionStartRetryMs, static_cast<int>(remaining));
+            if (state_store_.waitForState(is_target_stepping, wait_ms)) {
+                entered_stepping = true;
+                break;
+            }
         }
+
+        if (!entered_stepping) {
+            auto final_snap = state_store_.snapshot();
+            RCLCPP_WARN(this->get_logger(),
+                        "⚠️ 步态已切换到 %s, 但机器人未进入踏步状态 (basic=%u, gait=%u)",
+                        gait_name, final_snap.basic_state, final_snap.gait_state);
+            return {false, std::string("Gait switched to ") + gait_name +
+                              ", but robot did not enter STEPPING in time."};
+        }
+        RCLCPP_INFO(this->get_logger(), "✅ 机器人已进入踏步状态, 步态: %s", gait_name);
     }
 
     return {true, std::string("Navigation gait switched to ") + gait_name + "."};
@@ -1213,6 +1266,19 @@ void X30NavBridge::handleSetGaitRequest(
         {"SILENT",      static_cast<uint8_t>(GaitState::SILENT)},
     };
 
+    if (req->parameters.size() != 1) {
+        rcl_interfaces::msg::SetParametersResult result;
+        result.successful = false;
+        result.reason     = "set_gait expects exactly one parameter named 'gait'.";
+
+        if (req->parameters.empty()) {
+            res->results.push_back(result);
+        } else {
+            res->results.assign(req->parameters.size(), result);
+        }
+        return;
+    }
+
     for (const auto &param : req->parameters) {
         rcl_interfaces::msg::SetParametersResult result;
 
@@ -1240,7 +1306,9 @@ void X30NavBridge::handleSetGaitRequest(
         } else if (param.value.type == rcl_interfaces::msg::ParameterType::PARAMETER_STRING) {
             // 转为大写以实现不区分大小写匹配
             std::string upper = param.value.string_value;
-            std::transform(upper.begin(), upper.end(), upper.begin(), ::toupper);
+            std::transform(upper.begin(), upper.end(), upper.begin(), [](unsigned char c) {
+                return static_cast<char>(std::toupper(c));
+            });
             auto it = kGaitNameMap.find(upper);
             if (it != kGaitNameMap.end()) {
                 gait_value = it->second;
