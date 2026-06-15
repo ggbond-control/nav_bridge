@@ -345,7 +345,6 @@ nav_bridge/
 ├── launch/
 │   └── nav_bridge.launch.py               # 启动 nav_bridge_node 并加载参数
 ├── srv/
-│   └── ChargeCommand.srv                  # 自主充电控制服务定义
 ├── include/nav_bridge/
 │   ├── action_executor.hpp                # 动作执行器接口，封装 stand/lie 业务流程
 │   ├── nav_bridge_base.hpp                # 桥接节点抽象基类与通用 ROS 接口定义
@@ -442,6 +441,7 @@ stateDiagram-v2
 - 控制接管依然是工程策略，不是依赖底层显式 ack
 - 动作执行器对 `CMD_STAND_UP_DOWN`、`CMD_MOTION` 这类 toggle 型命令仍保留了分阶段保活与重发机制
 - `~/set_gait` 现已改用标准 `rcl_interfaces/srv/SetParameters` 接口，支持全部 10 种步态，参数名 `gait`，支持整数或字符串输入
+- `~/charge_command` 使用标准 `rcl_interfaces/srv/SetParameters` 接口，参数名 `charge_command`，支持 `start/stop/reset/query` 或整数 `0..3`
 - `stand / lie` 的若干阶段路径是根据当前 X30 实机状态反馈逐步收敛出来的，未来若底层固件行为变化，业务路径也可能需要同步调整
 - 机器人名称字段当前常见为空字符串，这不影响主控制链路
 - 接收线程可能看到一部分未处理指令码，只要核心状态包正常即可先不视为故障
@@ -455,6 +455,7 @@ stateDiagram-v2
 | `~/stand` | `std_srvs/srv/Trigger` | 一键进入 `RL_MODE + MOUNTAIN` |
 | `~/lie` | `std_srvs/srv/Trigger` | 安全退回趴下状态 |
 | `~/set_gait` | `rcl_interfaces/srv/SetParameters` | 切换步态，支持全部 10 种步态，参数名 `gait`（整数或字符串） |
+| `~/charge_command` | `rcl_interfaces/srv/SetParameters` | 自主充电控制，参数名 `charge_command`（`start/stop/reset/query` 或整数 `0..3`） |
 | `~/release_control` | `std_srvs/srv/Trigger` | 显式停止 heartbeat 并释放控制权 |
 
 ### 14.2 订阅话题

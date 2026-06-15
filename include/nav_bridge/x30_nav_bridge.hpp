@@ -18,6 +18,8 @@
 #include "nav_bridge/robot_state_store.hpp"
 #include "nav_bridge/udp_transport.hpp"
 #include "nav_bridge/x30_protocol.hpp"
+#include <rcl_interfaces/msg/parameter.hpp>
+#include <rcl_interfaces/msg/parameter_type.hpp>
 #include <rcl_interfaces/srv/set_parameters.hpp>
 
 namespace nav_bridge {
@@ -45,8 +47,8 @@ protected:
     void handleSetGaitRequest(const std::shared_ptr<rcl_interfaces::srv::SetParameters::Request> req,
                               std::shared_ptr<rcl_interfaces::srv::SetParameters::Response> res) override;
     void handleChargeCommandRequest(
-        const std::shared_ptr<nav_bridge::srv::ChargeCommand::Request> req,
-        std::shared_ptr<nav_bridge::srv::ChargeCommand::Response> res) override;
+        const std::shared_ptr<rcl_interfaces::srv::SetParameters::Request> req,
+        std::shared_ptr<rcl_interfaces::srv::SetParameters::Response> res) override;
 
 private:
     struct ControlPulse {
@@ -56,6 +58,13 @@ private:
         bool send_query{false};
         bool send_zero_velocity{false};
         bool active{false};
+    };
+
+    struct ChargeCommandResult {
+        bool success{false};
+        uint16_t charge_state{x30_protocol::CHARGE_STATE_IDLE};
+        std::string state_name{"idle"};
+        std::string message;
     };
 
     // ===================== UDP 通信 =====================
@@ -92,6 +101,11 @@ private:
     bool switchToManualModeAfterCharge();
     bool isFailureChargeState(uint16_t state) const;
     bool isExpectedChargeStateForCommand(uint8_t command, uint16_t state) const;
+    bool parseChargeCommandParameter(const rcl_interfaces::msg::Parameter &param,
+                                     uint8_t &command,
+                                     std::string &error) const;
+    ChargeCommandResult executeChargeCommand(uint8_t command);
+    std::string encodeChargeCommandResult(const ChargeCommandResult &result) const;
     void chargeReceiveLoop();
     void chargeQueryLoop();
     void handleRcsData(const x30_protocol::RcsData &data);

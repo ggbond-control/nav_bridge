@@ -30,6 +30,38 @@ constexpr int kChargeQueryPollMs         = 1000;
 constexpr int kChargeVelSourceNavigation = 2;
 constexpr int kChargeManualModeRetryMs   = 200;
 constexpr int kChargeManualModeTimeoutMs = 20000;
+constexpr uint8_t kChargeCommandStart    = 0;
+constexpr uint8_t kChargeCommandStop     = 1;
+constexpr uint8_t kChargeCommandReset    = 2;
+constexpr uint8_t kChargeCommandQuery    = 3;
+
+std::string escapeJsonString(const std::string &input) {
+    std::string output;
+    output.reserve(input.size());
+    for (const char c : input) {
+        switch (c) {
+        case '\\':
+            output += "\\\\";
+            break;
+        case '"':
+            output += "\\\"";
+            break;
+        case '\n':
+            output += "\\n";
+            break;
+        case '\r':
+            output += "\\r";
+            break;
+        case '\t':
+            output += "\\t";
+            break;
+        default:
+            output += c;
+            break;
+        }
+    }
+    return output;
+}
 
 }  // namespace
 
@@ -148,7 +180,7 @@ bool X30NavBridge::initialize() {
         "~/release_control", std::bind(&X30NavBridge::handleReleaseControlRequest, this, _1, _2));
     set_gait_srv_ = this->create_service<rcl_interfaces::srv::SetParameters>(
         "~/set_gait", std::bind(&X30NavBridge::handleSetGaitRequest, this, _1, _2));
-    charge_command_srv_ = this->create_service<nav_bridge::srv::ChargeCommand>(
+    charge_command_srv_ = this->create_service<rcl_interfaces::srv::SetParameters>(
         "~/charge_command", std::bind(&X30NavBridge::handleChargeCommandRequest, this, _1, _2));
 
     action_executor_ = std::make_unique<ActionExecutor>(
@@ -699,13 +731,13 @@ bool X30NavBridge::isExpectedChargeStateForCommand(uint8_t command, uint16_t sta
 {
     switch (command)
     {
-    case nav_bridge::srv::ChargeCommand::Request::COMMAND_START:
+    case kChargeCommandStart:
         return state == CHARGE_STATE_DO_CHARGE_TASK || state == CHARGE_STATE_CHARGING;
-    case nav_bridge::srv::ChargeCommand::Request::COMMAND_STOP:
+    case kChargeCommandStop:
         return state == CHARGE_STATE_IDLE;
-    case nav_bridge::srv::ChargeCommand::Request::COMMAND_RESET:
+    case kChargeCommandReset:
         return state == CHARGE_STATE_IDLE;
-    case nav_bridge::srv::ChargeCommand::Request::COMMAND_QUERY:
+    case kChargeCommandQuery:
         return true;
     default:
         return false;
@@ -1381,42 +1413,135 @@ void X30NavBridge::handleSetGaitRequest(
     }
 }
 
-void X30NavBridge::handleChargeCommandRequest(const std::shared_ptr<nav_bridge::srv::ChargeCommand::Request> req, std::shared_ptr<nav_bridge::srv::ChargeCommand::Response> res)
+bool X30NavBridge::parseChargeCommandParameter(const rcl_interfaces::msg::Parameter &param,
+                                               uint8_t &command,
+                                               std::string &error) const
 {
+    if (param.name != "charge_command") {
+        error = "Unknown parameter '" + param.name + "'. Only 'charge_command' is supported.";
+        return false;
+    }
+
+    if (param.value.type == rcl_interfaces::msg::ParameterType::PARAMETER_INTEGER) {
+        const int64_t raw = param.value.integer_value;
+        if (raw >= kChargeCommandStart && raw <= kChargeCommandQuery) {
+            command = static_cast<uint8_t>(raw);
+            return true;
+        }
+        error = "Integer charge_command " + std::to_string(raw) + " out of range [0, 3].";
+        return false;
+    }
+
+    if (param.value.type == rcl_interfaces::msg::ParameterType::PARAMETER_STRING) {
+        std::string upper = param.value.string_value;
+        std::transform(upper.begin(), upper.end(), upper.begin(), [](unsigned char c) {
+            return static_cast<char>(std::toupper(c));
+        });
+
+        if (upper == "START") {
+            command = kChargeCommandStart;
+            return true;
+        }
+        if (upper == "STOP") {
+            command = kChargeCommandStop;
+            return true;
+        }
+        if (upper == "RESET") {
+            command = kChargeCommandReset;
+            return true;
+        }
+        if (upper == "QUERY") {
+            command = kChargeCommandQuery;
+            return true;
+        }
+
+        error = "Unknown charge_command '" + param.value.string_value +
+                "'. Supported: start, stop, reset, query, or integer 0..3.";
+        return false;
+    }
+
+    error = "Unsupported charge_command parameter type " +
+            std::to_string(static_cast<int>(param.value.type)) +
+            ". Use INTEGER (type=2) or STRING (type=4).";
+    return false;
+}
+
+std::string X30NavBridge::encodeChargeCommandResult(const ChargeCommandResult &result) const
+{
+    return "{\"charge_state\":" + std::to_string(result.charge_state) +
+           ",\"state_name\":\"" + escapeJsonString(result.state_name) +
+           "\",\"message\":\"" + escapeJsonString(result.message) + "\"}";
+}
+
+void X30NavBridge::handleChargeCommandRequest(
+    const std::shared_ptr<rcl_interfaces::srv::SetParameters::Request> req,
+    std::shared_ptr<rcl_interfaces::srv::SetParameters::Response> res)
+{
+    rcl_interfaces::msg::SetParametersResult result;
+
+    if (req->parameters.size() != 1) {
+        result.successful = false;
+        result.reason = "charge_command expects exactly one parameter named 'charge_command'.";
+        if (req->parameters.empty()) {
+            res->results.push_back(result);
+        } else {
+            res->results.assign(req->parameters.size(), result);
+        }
+        return;
+    }
+
+    uint8_t command = kChargeCommandStart;
+    std::string error;
+    if (!parseChargeCommandParameter(req->parameters.front(), command, error)) {
+        result.successful = false;
+        result.reason = error;
+        res->results.push_back(result);
+        return;
+    }
+
+    const ChargeCommandResult charge_result = executeChargeCommand(command);
+    result.successful = charge_result.success;
+    result.reason = encodeChargeCommandResult(charge_result);
+    res->results.push_back(result);
+}
+
+X30NavBridge::ChargeCommandResult X30NavBridge::executeChargeCommand(uint8_t command)
+{
+    ChargeCommandResult result;
     uint32_t cmd_code = CMD_CHARGE_MANAGER;
     int32_t cmd_value = CHARGE_COMMAND_START_VALUE;
 
-    switch (req->command)
+    switch (command)
     {
-    case nav_bridge::srv::ChargeCommand::Request::COMMAND_START:
+    case kChargeCommandStart:
         cmd_code = CMD_CHARGE_MANAGER;
         cmd_value = CHARGE_COMMAND_START_VALUE;
         break;
-    case nav_bridge::srv::ChargeCommand::Request::COMMAND_STOP:
+    case kChargeCommandStop:
         cmd_code = CMD_CHARGE_MANAGER;
         cmd_value = CHARGE_COMMAND_STOP_VALUE;
         break;
-    case nav_bridge::srv::ChargeCommand::Request::COMMAND_RESET:
+    case kChargeCommandReset:
         cmd_code = CMD_CHARGE_MANAGER;
         cmd_value = CHARGE_COMMAND_RESET_VALUE;
         break;
-    case nav_bridge::srv::ChargeCommand::Request::COMMAND_QUERY:
+    case kChargeCommandQuery:
         cmd_code = CMD_CHARGE_MANAGER_QUERY;
         cmd_value = CHARGE_COMMAND_QUERY_VALUE;
         break;
     default:
-        res->success = false;
-        res->charge_state = CHARGE_STATE_IDLE;
-        res->state_name = "invalid_command";
-        res->message = "Invalid charge command. Allowed: 0(start),1(stop),2(reset),3(query).";
-        return;
+        result.success = false;
+        result.charge_state = CHARGE_STATE_IDLE;
+        result.state_name = "invalid_command";
+        result.message = "Invalid charge command. Allowed: 0(start),1(stop),2(reset),3(query).";
+        return result;
     }
 
-    const bool should_wait_until_target = req->command == nav_bridge::srv::ChargeCommand::Request::COMMAND_START || req->command == nav_bridge::srv::ChargeCommand::Request::COMMAND_STOP;
+    const bool should_wait_until_target = command == kChargeCommandStart || command == kChargeCommandStop;
 
-    RCLCPP_INFO(this->get_logger(), "⚡ 收到充电服务请求 command=%u", req->command);
+    RCLCPP_INFO(this->get_logger(), "⚡ 收到充电服务请求 command=%u", static_cast<unsigned int>(command));
 
-    if (req->command == nav_bridge::srv::ChargeCommand::Request::COMMAND_START)
+    if (command == kChargeCommandStart)
     {
         auto snapshot = state_store_.snapshot();
         if (snapshot.basic_state == static_cast<uint8_t>(BasicState::RL_MODE))
@@ -1425,21 +1550,21 @@ void X30NavBridge::handleChargeCommandRequest(const std::shared_ptr<nav_bridge::
             auto exit_result = executeActionWithCmdVelSuppressed("charge_prepare_exit_rl", [this](){ return action_executor_->forceStand(); });
             if (!exit_result.success)
             {
-                res->success = false;
-                res->charge_state = CHARGE_STATE_IDLE;
-                res->state_name = "failed_to_exit_rl";
-                res->message = std::string("Failed to exit RL mode before charge START: ") + exit_result.message;
-                return;
+                result.success = false;
+                result.charge_state = CHARGE_STATE_IDLE;
+                result.state_name = "failed_to_exit_rl";
+                result.message = std::string("Failed to exit RL mode before charge START: ") + exit_result.message;
+                return result;
             }
         }
 
         if (!sendChargeVelocitySource(kChargeVelSourceNavigation))
         {
-            res->success = false;
-            res->charge_state = CHARGE_STATE_IDLE;
-            res->state_name = "vel_source_send_failed";
-            res->message = "Failed to switch velocity source to navigation before charge START.";
-            return;
+            result.success = false;
+            result.charge_state = CHARGE_STATE_IDLE;
+            result.state_name = "vel_source_send_failed";
+            result.message = "Failed to switch velocity source to navigation before charge START.";
+            return result;
         }
         RCLCPP_INFO(this->get_logger(), "⚡ START前已切换速度源到导航模式");
         std::this_thread::sleep_for(std::chrono::milliseconds(kChargePrepSettleMs));
@@ -1452,14 +1577,14 @@ void X30NavBridge::handleChargeCommandRequest(const std::shared_ptr<nav_bridge::
         before_seq = charge_response_seq_;
     }
 
-    RCLCPP_INFO(this->get_logger(), "⚡ 发送充电命令 command=%u code=0x%08X value=%d", req->command, cmd_code, cmd_value);
+    RCLCPP_INFO(this->get_logger(), "⚡ 发送充电命令 command=%u code=0x%08X value=%d", static_cast<unsigned int>(command), cmd_code, cmd_value);
     if (!sendChargeCommand(cmd_code, cmd_value))
     {
-        res->success = false;
-        res->charge_state = CHARGE_STATE_IDLE;
-        res->state_name = "send_failed";
-        res->message = "Failed to send charge command.";
-        return;
+        result.success = false;
+        result.charge_state = CHARGE_STATE_IDLE;
+        result.state_name = "send_failed";
+        result.message = "Failed to send charge command.";
+        return result;
     }
 
     uint16_t final_state = CHARGE_STATE_IDLE;
@@ -1467,48 +1592,48 @@ void X30NavBridge::handleChargeCommandRequest(const std::shared_ptr<nav_bridge::
     {
         if (!waitForChargeResponse(before_seq, final_state))
         {
-            res->success = false;
-            res->charge_state = CHARGE_STATE_IDLE;
-            res->state_name = "interrupted";
-            res->message = "Charge wait was interrupted by node shutdown.";
-            return;
+            result.success = false;
+            result.charge_state = CHARGE_STATE_IDLE;
+            result.state_name = "interrupted";
+            result.message = "Charge wait was interrupted by node shutdown.";
+            return result;
         }
 
-        res->charge_state = final_state;
-        res->state_name = chargeStateToString(final_state);
-        if (isExpectedChargeStateForCommand(req->command, final_state))
+        result.charge_state = final_state;
+        result.state_name = chargeStateToString(final_state);
+        if (isExpectedChargeStateForCommand(command, final_state))
         {
-            if (req->command == nav_bridge::srv::ChargeCommand::Request::COMMAND_STOP)
+            if (command == kChargeCommandStop)
             {
                 if (!switchToManualModeAfterCharge())
                 {
-                    res->success = false;
-                    res->message = "Charge STOP succeeded, but robot did not confirm manual mode.";
-                    return;
+                    result.success = false;
+                    result.message = "Charge STOP succeeded, but robot did not confirm manual mode.";
+                    return result;
                 }
                 RCLCPP_INFO(this->get_logger(), "⚡ STOP完成后已切换到手动模式");
             }
             RCLCPP_INFO(this->get_logger(), "✅ 充电服务 command=%u 完成: state=0x%04X(%s)",
-                        req->command, final_state, chargeStateToString(final_state));
-            res->success = true;
-            res->message = "Charge command accepted.";
-            return;
+                        static_cast<unsigned int>(command), final_state, chargeStateToString(final_state));
+            result.success = true;
+            result.message = "Charge command accepted.";
+            return result;
         }
 
         if (isFailureChargeState(final_state))
         {
             RCLCPP_WARN(this->get_logger(), "⚠️ 充电服务 command=%u 返回错误状态: 0x%04X(%s)",
-                        req->command, final_state, chargeStateToString(final_state));
-            res->success = false;
-            res->message = "Charge manager reported a failure state.";
-            return;
+                        static_cast<unsigned int>(command), final_state, chargeStateToString(final_state));
+            result.success = false;
+            result.message = "Charge manager reported a failure state.";
+            return result;
         }
 
         if (!should_wait_until_target)
         {
-            res->success = false;
-            res->message = "Charge manager responded, but state did not match the command.";
-            return;
+            result.success = false;
+            result.message = "Charge manager responded, but state did not match the command.";
+            return result;
         }
 
         std::this_thread::sleep_for(std::chrono::milliseconds(kChargeQueryPollMs));
@@ -1518,16 +1643,17 @@ void X30NavBridge::handleChargeCommandRequest(const std::shared_ptr<nav_bridge::
         }
         if (!sendChargeCommand(CMD_CHARGE_MANAGER_QUERY, CHARGE_COMMAND_QUERY_VALUE))
         {
-            res->success = false;
-            res->message = "Failed to query charge state after command.";
-            return;
+            result.success = false;
+            result.message = "Failed to query charge state after command.";
+            return result;
         }
     }
 
-    res->success = false;
-    res->charge_state = final_state;
-    res->state_name = chargeStateToString(final_state);
-    res->message = "Charge wait was interrupted.";
+    result.success = false;
+    result.charge_state = final_state;
+    result.state_name = chargeStateToString(final_state);
+    result.message = "Charge wait was interrupted.";
+    return result;
 }
 
 // ============================================================================

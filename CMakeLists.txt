@@ -10,7 +10,6 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
 # Find dependencies
 find_package(ament_cmake REQUIRED)
-find_package(rosidl_default_generators REQUIRED)
 find_package(rclcpp REQUIRED)
 find_package(sensor_msgs REQUIRED)
 find_package(nav_msgs REQUIRED)
@@ -22,10 +21,6 @@ find_package(tf2_ros REQUIRED)
 find_package(tf2_geometry_msgs REQUIRED)
 find_package(rviz_2d_overlay_msgs REQUIRED)
 find_package(rcl_interfaces REQUIRED)
-
-rosidl_generate_interfaces(${PROJECT_NAME}
-  "srv/ChargeCommand.srv"
-)
 
 # Nav bridge node executable
 add_executable(nav_bridge_node
@@ -53,11 +48,6 @@ ament_target_dependencies(nav_bridge_node
   rviz_2d_overlay_msgs
   rcl_interfaces
 )
-
-rosidl_get_typesupport_target(cpp_typesupport_target
-  ${PROJECT_NAME} "rosidl_typesupport_cpp")
-target_link_libraries(nav_bridge_node
-  ${cpp_typesupport_target})
 
 install(TARGETS nav_bridge_node
   DESTINATION lib/${PROJECT_NAME})

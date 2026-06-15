@@ -5,10 +5,11 @@
 ## 服务
 
 ```bash
-ros2 service call /nav_bridge_node/charge_command nav_bridge/srv/ChargeCommand "{command: 0}"
+ros2 service call /nav_bridge_node/charge_command rcl_interfaces/srv/SetParameters \
+"{parameters: [{name: 'charge_command', value: {type: 2, integer_value: 0}}]}"
 ```
 
-`command` 取值：
+`charge_command` 支持整数或字符串。整数取值：
 
 | 值  | 名称  | 底层 UDP             |
 | --- | ----- | -------------------- |
@@ -17,20 +18,20 @@ ros2 service call /nav_bridge_node/charge_command nav_bridge/srv/ChargeCommand "
 | `2` | RESET | `0x91910250 value=2` |
 | `3` | QUERY | `0x91910253 value=0` |
 
+字符串取值支持 `start`、`stop`、`reset`、`query`，大小写不敏感。
+
 START 前会向 `192.168.1.105:43899` 发送 `0x3101EE03 value=2`，将速度源切到导航模式；充电管理指令发送到 `192.168.1.105:3333`。
 
 如果机器人处于 RL 模式，START 会先调用现有站立动作退出 RL，再发送充电指令。
 
 ## 返回
 
-响应字段：
+响应使用 `rcl_interfaces/msg/SetParametersResult`：
 
 | 字段           | 说明                             |
 | -------------- | -------------------------------- |
-| `success`      | 是否收到符合该命令预期的充电状态 |
-| `charge_state` | 充电管理器状态码                 |
-| `state_name`   | 状态码文本                       |
-| `message`      | 结果说明                         |
+| `successful`   | 是否收到符合该命令预期的充电状态 |
+| `reason`       | JSON 文本，包含 `charge_state`、`state_name`、`message` |
 
 常见状态：
 
