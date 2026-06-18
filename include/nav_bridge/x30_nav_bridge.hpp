@@ -98,6 +98,7 @@ private:
     bool sendChargeCommand(uint32_t code, int32_t value);
     bool waitForChargeResponse(uint64_t previous_seq, uint16_t &out_state);
     bool waitForChargeResponseFor(uint64_t previous_seq, std::chrono::milliseconds timeout, uint16_t &out_state);
+    bool ensureManualMode(const char *reason);
     bool switchToManualModeAfterCharge();
     bool isFailureChargeState(uint16_t state) const;
     bool isExpectedChargeStateForCommand(uint8_t command, uint16_t state) const;

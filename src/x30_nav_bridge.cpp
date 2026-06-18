@@ -684,10 +684,16 @@ bool X30NavBridge::waitForChargeResponseFor(uint64_t previous_seq, std::chrono::
     return true;
 }
 
-bool X30NavBridge::switchToManualModeAfterCharge()
+bool X30NavBridge::ensureManualMode(const char *reason)
 {
-    auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(kChargeManualModeTimeoutMs);
+    if (!is_nav_mode_.load())
+    {
+        return true;
+    }
 
+    RCLCPP_INFO(this->get_logger(), "🔁 %s后当前仍为非手动模式，开始切回手动", reason);
+
+    auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(kChargeManualModeTimeoutMs);
     warmupControl(kControlWarmupMs, kControlWarmupPulseMs);
     while (std::chrono::steady_clock::now() < deadline)
     {
@@ -699,13 +705,25 @@ bool X30NavBridge::switchToManualModeAfterCharge()
         auto manual_cmd = makeSimpleCommand(CMD_MANUAL_MODE, 0);
         if (!motion_udp_.send(&manual_cmd, sizeof(manual_cmd)))
         {
+            RCLCPP_ERROR(this->get_logger(), "切回手动模式失败：发送指令失败");
             return false;
         }
 
         std::this_thread::sleep_for(std::chrono::milliseconds(kChargeManualModeRetryMs));
     }
 
-    return !is_nav_mode_.load();
+    if (is_nav_mode_.load())
+    {
+        RCLCPP_ERROR(this->get_logger(), "切回手动模式超时：%s", reason);
+        return false;
+    }
+
+    return true;
+}
+
+bool X30NavBridge::switchToManualModeAfterCharge()
+{
+    return ensureManualMode("充电停止");
 }
 
 bool X30NavBridge::isFailureChargeState(uint16_t state) const
@@ -1288,10 +1306,16 @@ void X30NavBridge::handleBattery(const BatterySensorData &data) {
 
 void X30NavBridge::handleStandRequest(
     const std::shared_ptr<std_srvs::srv::Trigger::Request> /*req*/,
-    std::shared_ptr<std_srvs::srv::Trigger::Response> res) {
-    auto result  = executeActionWithCmdVelSuppressed("stand", [this]() {
-        return action_executor_->stand();
-    });
+    std::shared_ptr<std_srvs::srv::Trigger::Response> res)
+{
+    auto result = executeActionWithCmdVelSuppressed("stand", [this]() {
+        auto action_result = action_executor_->stand();
+        if (action_result.success && !ensureManualMode("stand"))
+        {
+            action_result.success = false;
+            action_result.message = "Stand succeeded, but robot did not confirm manual mode.";
+        }
+        return action_result; });
     res->success = result.success;
     res->message = result.message;
 }
