@@ -202,6 +202,40 @@ ros2 service call /nav_bridge_node/set_gait rcl_interfaces/srv/SetParameters \
 
 这样可以保证"切步态后仍可继续导航发速度"，同时以结构化参数报文替代裸数字透传。
 
+补充限制：
+
+- 当机体高度为 `CRAWL` 时，`~/set_gait` 只允许切到 `WALK` 或 `SLOPE`
+
+### 3.5 `~/set_body_height`
+
+用于切换机体高度到匍匐或正常，接口类型同样为 `rcl_interfaces/srv/SetParameters`，参数名固定为 `body_height`。
+
+支持输入：
+
+- 整数：`0=CRAWL`，`2=NORMAL`
+- 字符串：`CRAWL`，`NORMAL`
+
+调用示例：
+
+```bash
+# 整数方式切换到匍匐高度
+ros2 service call /nav_bridge_node/set_body_height rcl_interfaces/srv/SetParameters \
+  "{parameters: [{name: 'body_height', value: {type: 2, integer_value: 0}}]}"
+
+# 字符串方式恢复正常高度
+ros2 service call /nav_bridge_node/set_body_height rcl_interfaces/srv/SetParameters \
+  "{parameters: [{name: 'body_height', value: {type: 4, string_value: 'NORMAL'}}]}"
+```
+
+服务执行时会：
+
+1. 检查请求中恰好包含一个 `body_height` 参数
+2. 解析 `body_height` 参数（整数值或字符串值）
+3. 检查机器人当前连接状态
+4. 如果已经处于目标高度，直接成功返回
+5. 若目标是 `CRAWL`，校验当前步态必须为 `WALK` 或 `SLOPE`
+6. 发送机体高度切换指令 `CMD_HEIGHT_SWITCH`
+7. 等待 `/robot_body_height_state` 进入目标状态
 
 ## 4. `/cmd_vel` 速度控制
 
@@ -231,6 +265,7 @@ ros2 service call /nav_bridge_node/set_gait rcl_interfaces/srv/SetParameters \
 - `~/stand`
 - `~/lie`
 - `~/set_gait`
+- `~/set_body_height`
 
 ### 4.1 速度映射
 
@@ -267,6 +302,11 @@ ros2 service call /nav_bridge_node/set_gait rcl_interfaces/srv/SetParameters \
   - 发布 `/leg_odom`
   - 可选发布 `odom -> base_link` TF
 
+- **`0x11050F08 BodyHeightState`**
+  - 机体高度状态反馈
+  - 更新 `RobotStateStore`
+  - 发布 `/robot_body_height_state`
+
 - **`0x100A ControllerSensorData`**
   - 解析 IMU 欧拉角、角速度、加速度
   - 转换为标准 `sensor_msgs/Imu`
@@ -288,6 +328,7 @@ ros2 service call /nav_bridge_node/set_gait rcl_interfaces/srv/SetParameters \
 - `/leg_odom` (`nav_msgs/msg/Odometry`)
 - `/robot_basic_state` (`std_msgs/msg/Int32`)
 - `/robot_gait_state` (`std_msgs/msg/Int32`)
+- `/robot_body_height_state` (`std_msgs/msg/Int32`)
 - `/battery/level` (`std_msgs/msg/UInt8`)
 
 ### 6.3 提供的服务
@@ -296,12 +337,14 @@ ros2 service call /nav_bridge_node/set_gait rcl_interfaces/srv/SetParameters \
 - `~/lie` (`std_srvs/srv/Trigger`)
 - `~/release_control` (`std_srvs/srv/Trigger`)
 - `~/set_gait` (`rcl_interfaces/srv/SetParameters`)
+- `~/set_body_height` (`rcl_interfaces/srv/SetParameters`)
 
 说明：
 
 - 当前业务上只保留两个目标态服务：`stand / lie`
 - `~/release_control` 用于显式停止 heartbeat 并交还控制权
 - `~/set_gait` 用于步态切换，支持全部 10 种步态（整数或字符串方式），参数名 `gait`
+- `~/set_body_height` 用于机体高度切换，支持 `0/2` 或 `CRAWL/NORMAL`，参数名 `body_height`
 - 旧版本里存在的 `motion` 与 `force_stand` 对外服务链路已移除
 - `stand` 会收敛到 `RL_MODE + MOUNTAIN`
 
@@ -421,7 +464,9 @@ stateDiagram-v2
 7. 调用一次 `~/set_gait`，将步态切到 `L_WALK`（例: `{name: 'gait', value: {type: 4, string_value: 'L_WALK'}}`）
 8. 在 `RL_MODE + L_WALK` 下发送少量 `/cmd_vel`，确认仍可转发
 9. 调用一次 `~/set_gait`，将步态切回 `MOUNTAIN`（例: `{name: 'gait', value: {type: 4, string_value: 'MOUNTAIN'}}`）
-10. 调用 `~/release_control`，确认 heartbeat 停止并交还控制权
+10. 调用一次 `~/set_body_height`，切到 `CRAWL`，确认仅在 `WALK/SLOPE` 下成功
+11. 调用一次 `~/set_body_height`，恢复到 `NORMAL`
+12. 调用 `~/release_control`，确认 heartbeat 停止并交还控制权
 
 如果现场需要分析问题，最值得重点观察的日志关键词包括：
 
@@ -441,6 +486,7 @@ stateDiagram-v2
 - 控制接管依然是工程策略，不是依赖底层显式 ack
 - 动作执行器对 `CMD_STAND_UP_DOWN`、`CMD_MOTION` 这类 toggle 型命令仍保留了分阶段保活与重发机制
 - `~/set_gait` 现已改用标准 `rcl_interfaces/srv/SetParameters` 接口，支持全部 10 种步态，参数名 `gait`，支持整数或字符串输入
+- `~/set_body_height` 使用标准 `rcl_interfaces/srv/SetParameters` 接口，参数名 `body_height`，支持 `CRAWL/NORMAL` 或整数 `0/2`
 - `~/charge_command` 使用标准 `rcl_interfaces/srv/SetParameters` 接口，参数名 `charge_command`，支持 `start/stop/reset/query` 或整数 `0..3`
 - `stand / lie` 的若干阶段路径是根据当前 X30 实机状态反馈逐步收敛出来的，未来若底层固件行为变化，业务路径也可能需要同步调整
 - 机器人名称字段当前常见为空字符串，这不影响主控制链路
@@ -455,6 +501,7 @@ stateDiagram-v2
 | `~/stand` | `std_srvs/srv/Trigger` | 一键进入 `RL_MODE + MOUNTAIN` |
 | `~/lie` | `std_srvs/srv/Trigger` | 安全退回趴下状态 |
 | `~/set_gait` | `rcl_interfaces/srv/SetParameters` | 切换步态，支持全部 10 种步态，参数名 `gait`（整数或字符串） |
+| `~/set_body_height` | `rcl_interfaces/srv/SetParameters` | 切换机体高度，参数名 `body_height`（`CRAWL/NORMAL` 或 `0/2`） |
 | `~/charge_command` | `rcl_interfaces/srv/SetParameters` | 自主充电控制，参数名 `charge_command`（`start/stop/reset/query` 或整数 `0..3`） |
 | `~/release_control` | `std_srvs/srv/Trigger` | 显式停止 heartbeat 并释放控制权 |
 
@@ -472,6 +519,7 @@ stateDiagram-v2
 | `/leg_odom` | `nav_msgs/msg/Odometry` | 足式里程计 |
 | `/robot_basic_state` | `std_msgs/msg/Int32` | 基本状态码 |
 | `/robot_gait_state` | `std_msgs/msg/Int32` | 步态状态码 |
+| `/robot_body_height_state` | `std_msgs/msg/Int32` | 机体高度状态码（`-1=CRAWL`, `0=NORMAL`） |
 | `/battery/level` | `std_msgs/msg/UInt8` | 电池百分比 |
 
 ### 14.4 状态码对照
@@ -503,6 +551,13 @@ stateDiagram-v2
 | `32` | `L_WALK` | L 行走 |
 | `33` | `MOUNTAIN` | 山地 |
 | `34` | `SILENT` | 静音 |
+
+`/robot_body_height_state` 当前使用的数值定义如下：
+
+| 数值 | 枚举名   | 含义 |
+| ---- | -------- | ---- |
+| `-1` | `CRAWL`  | 匍匐 |
+| `0`  | `NORMAL` | 正常 |
 
 ### 14.5 关键参数
 

@@ -75,6 +75,7 @@ protected:
     rclcpp::Publisher<nav_msgs::msg::Odometry>::SharedPtr odom_pub_;
     rclcpp::Publisher<std_msgs::msg::Int32>::SharedPtr robot_state_pub_;
     rclcpp::Publisher<std_msgs::msg::Int32>::SharedPtr gait_state_pub_;
+    rclcpp::Publisher<std_msgs::msg::Int32>::SharedPtr body_height_state_pub_;
     rclcpp::Publisher<std_msgs::msg::Int32>::SharedPtr charge_state_pub_;
     rclcpp::Publisher<std_msgs::msg::UInt8>::SharedPtr battery_level_pub_;
     rclcpp::Publisher<rviz_2d_overlay_msgs::msg::OverlayText>::SharedPtr battery_text_pub_;
@@ -85,6 +86,7 @@ protected:
     rclcpp::Service<std_srvs::srv::Trigger>::SharedPtr lie_srv_;
     rclcpp::Service<std_srvs::srv::Trigger>::SharedPtr release_control_srv_;
     rclcpp::Service<rcl_interfaces::srv::SetParameters>::SharedPtr set_gait_srv_;
+    rclcpp::Service<rcl_interfaces::srv::SetParameters>::SharedPtr set_body_height_srv_;
     rclcpp::Service<rcl_interfaces::srv::SetParameters>::SharedPtr charge_command_srv_;
 
     virtual void handleStandRequest(const std::shared_ptr<std_srvs::srv::Trigger::Request> req,
@@ -95,6 +97,9 @@ protected:
         const std::shared_ptr<std_srvs::srv::Trigger::Request> req,
         std::shared_ptr<std_srvs::srv::Trigger::Response> res) = 0;
     virtual void handleSetGaitRequest(
+        const std::shared_ptr<rcl_interfaces::srv::SetParameters::Request> req,
+        std::shared_ptr<rcl_interfaces::srv::SetParameters::Response> res) = 0;
+    virtual void handleSetBodyHeightRequest(
         const std::shared_ptr<rcl_interfaces::srv::SetParameters::Request> req,
         std::shared_ptr<rcl_interfaces::srv::SetParameters::Response> res) = 0;
     virtual void handleChargeCommandRequest(

@@ -22,6 +22,7 @@ constexpr int kControlWarmupMs        = 400;
 constexpr int kControlWarmupPulseMs   = 100;
 constexpr int kGaitSwitchTimeoutMs    = 8000;
 constexpr int kNonRlGaitSwitchTimeoutMs = 12000;  ///< 从 RL_MODE 切到 MPC 步态需经过 FORCE_STAND 过渡，留足时间
+constexpr int kBodyHeightSwitchTimeoutMs = 4000;
 constexpr int kCmdVelStateWaitMs      = 4000;
 constexpr int kMotionStartRetryMs     = 1500;
 constexpr int kChargePrepSettleMs        = 200;
@@ -61,6 +62,19 @@ std::string escapeJsonString(const std::string &input) {
         }
     }
     return output;
+}
+
+const char *bodyHeightStateToStr(int8_t state)
+{
+    switch (static_cast<BodyHeightState>(state))
+    {
+    case BodyHeightState::CRAWL:
+        return "匍匐";
+    case BodyHeightState::NORMAL:
+        return "正常";
+    default:
+        return "未知";
+    }
 }
 
 }  // namespace
@@ -163,6 +177,7 @@ bool X30NavBridge::initialize() {
     odom_pub_          = this->create_publisher<nav_msgs::msg::Odometry>("/leg_odom", 10);
     robot_state_pub_   = this->create_publisher<std_msgs::msg::Int32>("/robot_basic_state", 10);
     gait_state_pub_    = this->create_publisher<std_msgs::msg::Int32>("/robot_gait_state", 10);
+    body_height_state_pub_ = this->create_publisher<std_msgs::msg::Int32>("/robot_body_height_state", 10);
     charge_state_pub_  = this->create_publisher<std_msgs::msg::Int32>("/charge_manager_state", 10);
     battery_level_pub_ = this->create_publisher<std_msgs::msg::UInt8>("/battery/level", 10);
     battery_text_pub_ = this->create_publisher<rviz_2d_overlay_msgs::msg::OverlayText>("/battery_text", 10);
@@ -180,6 +195,8 @@ bool X30NavBridge::initialize() {
         "~/release_control", std::bind(&X30NavBridge::handleReleaseControlRequest, this, _1, _2));
     set_gait_srv_ = this->create_service<rcl_interfaces::srv::SetParameters>(
         "~/set_gait", std::bind(&X30NavBridge::handleSetGaitRequest, this, _1, _2));
+    set_body_height_srv_ = this->create_service<rcl_interfaces::srv::SetParameters>(
+        "~/set_body_height", std::bind(&X30NavBridge::handleSetBodyHeightRequest, this, _1, _2));
     charge_command_srv_ = this->create_service<rcl_interfaces::srv::SetParameters>(
         "~/charge_command", std::bind(&X30NavBridge::handleChargeCommandRequest, this, _1, _2));
 
@@ -396,6 +413,11 @@ bool X30NavBridge::isSupportedNavigationGait(uint8_t gait) const {
     }
 }
 
+bool X30NavBridge::isCrawlCompatibleGait(uint8_t gait) const
+{
+    return gait == static_cast<uint8_t>(GaitState::WALK) || gait == static_cast<uint8_t>(GaitState::SLOPE);
+}
+
 bool X30NavBridge::isCmdVelCompatibleState(uint8_t basic_state, uint8_t gait_state) const {
     // 按手册 1.2.3.2: 踏步状态(STEPPING)下可发轴指令控制速度, 适用于所有步态.
     // RL 类步态(L_WALK/MOUNTAIN/SILENT)切换后进入 RL_MODE, 同样允许速度转发.
@@ -436,6 +458,11 @@ ActionResult X30NavBridge::setNavigationGait(uint8_t gait) {
     auto snapshot = state_store_.snapshot();
     if (!snapshot.connected) {
         return {false, "Robot is not connected."};
+    }
+
+    if (snapshot.body_height_state == static_cast<int8_t>(BodyHeightState::CRAWL) && !isCrawlCompatibleGait(gait))
+    {
+        return {false, "只有「行走WALK」和「斜坡SLOPE」模式允许机身高度为「匍匐CRAWL」。"};
     }
 
     // 按手册 1.2.6: RL 类步态 (L_WALK/MOUNTAIN/SILENT) 切换后机器人进入 RL_MODE,
@@ -639,6 +666,64 @@ ActionResult X30NavBridge::setNavigationGait(uint8_t gait) {
     }
 
     return {true, std::string("Navigation gait switched to ") + gait_name + "."};
+}
+
+ActionResult X30NavBridge::setBodyHeight(int32_t requested_height_value)
+{
+    BodyHeightState target_state;
+    const char *target_name = "UNKNOWN";
+    switch (requested_height_value)
+    {
+    case 0:
+        target_state = BodyHeightState::CRAWL;
+        target_name = "CRAWL";
+        break;
+    case 2:
+        target_state = BodyHeightState::NORMAL;
+        target_name = "NORMAL";
+        break;
+    default:
+        return {false, "Unsupported body height value. Use 0 (CRAWL) or 2 (NORMAL)."};
+    }
+
+    const auto snapshot = state_store_.snapshot();
+    if (!snapshot.connected)
+    {
+        return {false, "Robot is not connected."};
+    }
+
+    if (snapshot.body_height_state == static_cast<int8_t>(target_state))
+    {
+        return {true, "Robot is already at the requested body height."};
+    }
+
+    if (target_state == BodyHeightState::CRAWL && !isCrawlCompatibleGait(snapshot.gait_state))
+    {
+        return {false, std::string("Crawl height is only allowed when current gait is WALK or SLOPE. Current gait=") + std::to_string(snapshot.gait_state) + "."};
+    }
+
+    RCLCPP_INFO(this->get_logger(), "📌 请求切换身体高度到 %s", target_name);
+    warmupControl(kControlWarmupMs, kControlWarmupPulseMs);
+
+    auto cmd = makeSimpleCommand(CMD_HEIGHT_SWITCH, requested_height_value);
+    if (!motion_udp_.send(&cmd, sizeof(cmd)))
+    {
+        return {false, "Failed to send body height switch command."};
+    }
+
+    RCLCPP_INFO(this->get_logger(), "发送身体高度切换指令: 0x%08X value=%d", CMD_HEIGHT_SWITCH, requested_height_value);
+
+    if (!state_store_.waitForBodyHeightState({target_state}, kBodyHeightSwitchTimeoutMs))
+    {
+        const auto final_snapshot = state_store_.snapshot();
+        RCLCPP_WARN(this->get_logger(),
+                    "⚠️ 身体高度 %s 切换超时 (basic=%u, gait=%u, body_height=%d)",
+                    target_name, final_snapshot.basic_state, final_snapshot.gait_state,
+                    final_snapshot.body_height_state);
+        return {false, std::string("Timeout waiting for body height state: ") + target_name + "."};
+    }
+
+    return {true, std::string("Body height switched to ") + target_name + "."};
 }
 
 bool X30NavBridge::sendChargeCommand(uint32_t code, int32_t value)
@@ -1003,6 +1088,20 @@ void X30NavBridge::receiveLoop() {
                 }
                 break;
             }
+            case RECV_BODY_HEIGHT:
+            {
+                if (msg.head.type == 0)
+                {
+                    int32_t body_height_state = 0;
+                    std::memcpy(&body_height_state, &msg.head.paramters_size, sizeof(body_height_state));
+                    handleBodyHeightState(body_height_state);
+                }
+                else
+                {
+                    RCLCPP_WARN_ONCE(this->get_logger(), "BodyHeightState类型不匹配: type=%u, 期望simple command(type=0)", msg.head.type);
+                }
+                break;
+            }
             default: {
                 unknown_code_count++;
                 if (unknown_code_count <= 5) {
@@ -1224,6 +1323,22 @@ void X30NavBridge::handleMotionState(const MotionStateData &data) {
                          data.leg_odom_vel[1], data.leg_odom_vel[2], data.robot_distance / 100.0);
 }
 
+void X30NavBridge::handleBodyHeightState(int32_t body_height_state)
+{
+    const int8_t height_state = static_cast<int8_t>(body_height_state);
+    MotionStateTransition transition = state_store_.updateBodyHeightState(height_state);
+
+    if (height_state != transition.previous_body_height_state)
+    {
+        RCLCPP_INFO(this->get_logger(), "🔄 身体高度: %s → %s",
+                    bodyHeightStateToStr(transition.previous_body_height_state), bodyHeightStateToStr(height_state));
+    }
+
+    auto body_height_msg = std_msgs::msg::Int32();
+    body_height_msg.data = body_height_state;
+    body_height_state_pub_->publish(body_height_msg);
+}
+
 // ============================================================================
 // 数据处理: ControllerSensorData (传感器, 0x100A)
 // ============================================================================
@@ -1431,6 +1546,98 @@ void X30NavBridge::handleSetGaitRequest(
             });
             result.successful = action_result.success;
             result.reason     = action_result.message;
+        }
+
+        res->results.push_back(result);
+    }
+}
+
+void X30NavBridge::handleSetBodyHeightRequest(
+    const std::shared_ptr<rcl_interfaces::srv::SetParameters::Request> req,
+    std::shared_ptr<rcl_interfaces::srv::SetParameters::Response> res)
+{
+
+    static const std::unordered_map<std::string, int32_t> kBodyHeightNameMap = {
+        {"CRAWL", 0},
+        {"NORMAL", 2},
+    };
+
+    if (req->parameters.size() != 1)
+    {
+        rcl_interfaces::msg::SetParametersResult result;
+        result.successful = false;
+        result.reason = "set_body_height expects exactly one parameter named 'body_height'.";
+
+        if (req->parameters.empty())
+        {
+            res->results.push_back(result);
+        }
+        else
+        {
+            res->results.assign(req->parameters.size(), result);
+        }
+        return;
+    }
+
+    for (const auto &param : req->parameters)
+    {
+        rcl_interfaces::msg::SetParametersResult result;
+
+        if (param.name != "body_height")
+        {
+            result.successful = false;
+            result.reason = "Unknown parameter '" + param.name + "'. Only 'body_height' is supported.";
+            res->results.push_back(result);
+            continue;
+        }
+
+        int32_t target_value = 0;
+        bool parse_ok = false;
+
+        if (param.value.type == rcl_interfaces::msg::ParameterType::PARAMETER_INTEGER)
+        {
+            const int64_t raw = param.value.integer_value;
+            if (raw == 0 || raw == 2)
+            {
+                target_value = static_cast<int32_t>(raw);
+                parse_ok = true;
+            }
+            else
+            {
+                result.successful = false;
+                result.reason = "Unsupported body_height integer " + std::to_string(raw) + ". Use 0 (CRAWL) or 2 (NORMAL).";
+            }
+        }
+        else if (param.value.type == rcl_interfaces::msg::ParameterType::PARAMETER_STRING)
+        {
+            std::string upper = param.value.string_value;
+            std::transform(upper.begin(), upper.end(), upper.begin(), [](unsigned char c)
+                           { return static_cast<char>(std::toupper(c)); });
+            auto it = kBodyHeightNameMap.find(upper);
+            if (it != kBodyHeightNameMap.end())
+            {
+                target_value = it->second;
+                parse_ok = true;
+            }
+            else
+            {
+                result.successful = false;
+                result.reason = "Unknown body_height name '" + param.value.string_value + "'. Supported: CRAWL, NORMAL.";
+            }
+        }
+        else
+        {
+            result.successful = false;
+            result.reason = "Unsupported parameter type " + std::to_string(static_cast<int>(param.value.type)) + ". Use INTEGER (type=2) or STRING (type=4).";
+        }
+
+        if (parse_ok)
+        {
+            auto action_result =
+                executeActionWithCmdVelSuppressed("set_body_height", [this, target_value]()
+                                                  { return setBodyHeight(target_value); });
+            result.successful = action_result.success;
+            result.reason = action_result.message;
         }
 
         res->results.push_back(result);

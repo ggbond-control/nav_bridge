@@ -46,6 +46,9 @@ protected:
         std::shared_ptr<std_srvs::srv::Trigger::Response> res) override;
     void handleSetGaitRequest(const std::shared_ptr<rcl_interfaces::srv::SetParameters::Request> req,
                               std::shared_ptr<rcl_interfaces::srv::SetParameters::Response> res) override;
+    void handleSetBodyHeightRequest(
+        const std::shared_ptr<rcl_interfaces::srv::SetParameters::Request> req,
+        std::shared_ptr<rcl_interfaces::srv::SetParameters::Response> res) override;
     void handleChargeCommandRequest(
         const std::shared_ptr<rcl_interfaces::srv::SetParameters::Request> req,
         std::shared_ptr<rcl_interfaces::srv::SetParameters::Response> res) override;
@@ -91,9 +94,11 @@ private:
     bool isCmdVelSuppressed() const;
     bool isCmdVelForwardingAllowed() const;
     bool isSupportedNavigationGait(uint8_t gait) const;
+    bool isCrawlCompatibleGait(uint8_t gait) const;
     bool isCmdVelCompatibleState(uint8_t basic_state, uint8_t gait_state) const;
     bool waitForCmdVelCompatibleState(int timeout_ms) const;
     ActionResult setNavigationGait(uint8_t gait);
+    ActionResult setBodyHeight(int32_t requested_height_value);
     bool sendChargeVelocitySource(int32_t source);
     bool sendChargeCommand(uint32_t code, int32_t value);
     bool waitForChargeResponse(uint64_t previous_seq, uint16_t &out_state);
@@ -111,6 +116,7 @@ private:
     void chargeQueryLoop();
     void handleRcsData(const x30_protocol::RcsData &data);
     void handleMotionState(const x30_protocol::MotionStateData &data);
+    void handleBodyHeightState(int32_t body_height_state);
     void handleControllerSensor(const x30_protocol::ControllerSensorData &data);
     void handleBattery(const x30_protocol::BatterySensorData &data);
 

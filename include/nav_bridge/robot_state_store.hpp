@@ -18,6 +18,7 @@ namespace nav_bridge {
 struct StateSnapshot {
     uint8_t basic_state{0};
     uint8_t gait_state{0};
+    int8_t body_height_state{0};
     bool connected{false};
     bool rcs_received{false};
     std::chrono::steady_clock::time_point last_receive_time{
@@ -27,8 +28,10 @@ struct StateSnapshot {
 struct MotionStateTransition {
     uint8_t previous_basic_state{0};
     uint8_t previous_gait_state{0};
+    int8_t previous_body_height_state{0};
     uint8_t current_basic_state{0};
     uint8_t current_gait_state{0};
+    int8_t current_body_height_state{0};
 };
 
 class RobotStateStore {
@@ -38,10 +41,26 @@ public:
         MotionStateTransition transition;
         transition.previous_basic_state = basic_state_;
         transition.previous_gait_state  = gait_state_;
+        transition.previous_body_height_state = body_height_state_;
         basic_state_                    = basic_state;
         gait_state_                     = gait_state;
         transition.current_basic_state  = basic_state_;
         transition.current_gait_state   = gait_state_;
+        transition.current_body_height_state = body_height_state_;
+        cv_.notify_all();
+        return transition;
+    }
+
+    MotionStateTransition updateBodyHeightState(int8_t body_height_state) {
+        std::lock_guard<std::mutex> lock(mutex_);
+        MotionStateTransition transition;
+        transition.previous_basic_state = basic_state_;
+        transition.previous_gait_state  = gait_state_;
+        transition.previous_body_height_state = body_height_state_;
+        body_height_state_ = body_height_state;
+        transition.current_basic_state  = basic_state_;
+        transition.current_gait_state   = gait_state_;
+        transition.current_body_height_state = body_height_state_;
         cv_.notify_all();
         return transition;
     }
@@ -66,7 +85,7 @@ public:
     StateSnapshot snapshot() const {
         std::lock_guard<std::mutex> lock(mutex_);
         return StateSnapshot{
-            basic_state_, gait_state_, connected_.load(), rcs_received_,
+            basic_state_, gait_state_, body_height_state_, connected_.load(), rcs_received_,
             last_receive_time_.load()};
     }
 
@@ -78,6 +97,11 @@ public:
     uint8_t gaitState() const {
         std::lock_guard<std::mutex> lock(mutex_);
         return gait_state_;
+    }
+
+    int8_t bodyHeightState() const {
+        std::lock_guard<std::mutex> lock(mutex_);
+        return body_height_state_;
     }
 
     bool markRcsReceived() {
@@ -122,11 +146,30 @@ public:
         return cv_.wait_for(lock, std::chrono::milliseconds(timeout_ms), matches);
     }
 
+    bool waitForBodyHeightState(const std::vector<x30_protocol::BodyHeightState> &targets, int timeout_ms)
+    {
+        auto matches = [this, &targets]()
+        {
+            for (const auto &target : targets)
+            {
+                if (body_height_state_ == static_cast<int8_t>(target))
+                {
+                    return true;
+                }
+            }
+            return false;
+        };
+
+        std::unique_lock<std::mutex> lock(mutex_);
+        return cv_.wait_for(lock, std::chrono::milliseconds(timeout_ms), matches);
+    }
+
 private:
     mutable std::mutex mutex_;
     mutable std::condition_variable cv_;
     uint8_t basic_state_{0};
     uint8_t gait_state_{0};
+    int8_t body_height_state_{0};
     bool rcs_received_{false};
     std::atomic<bool> connected_{false};
     std::atomic<std::chrono::steady_clock::time_point> last_receive_time_{
