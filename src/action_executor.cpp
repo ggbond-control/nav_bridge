@@ -16,7 +16,7 @@ constexpr int kControlWarmupMs          = 400;
 constexpr int kControlWarmupPulseMs     = 100;
 constexpr int kSingleCommandTimeoutMs   = 5000;
 constexpr int kGaitSwitchTimeoutMs      = 5000;
-constexpr int kStandMountainTimeoutMs   = 12000;
+constexpr int kStandTargetGaitTimeoutMs = 12000;
 constexpr int kSteppingEntryTimeoutMs   = 4000;
 constexpr int kStandStartMotionTimeoutMs = 8000;
 constexpr int kStandStartMotionResendMs  = 3000;
@@ -33,6 +33,38 @@ constexpr int kLieStandSettlePollMs     = 100;
 constexpr int kLieStopMotionTimeoutMs   = 8000;
 constexpr int kLieStopMotionResendMs    = 3000;
 constexpr int kMaxCommandAttempts       = 2;
+
+bool isStandTargetGait(int gait) {
+    return gait == static_cast<int>(GaitState::L_WALK) ||
+           gait == static_cast<int>(GaitState::MOUNTAIN) ||
+           gait == static_cast<int>(GaitState::SILENT) ||
+           gait == static_cast<int>(GaitState::L_STAIR);
+}
+
+bool standTargetGaitCommand(int gait, uint32_t &command, const char *&gait_name) {
+    switch (static_cast<GaitState>(gait)) {
+        case GaitState::L_WALK:
+            command = CMD_GAIT_L_WALK;
+            gait_name = "L_WALK";
+            return true;
+        case GaitState::MOUNTAIN:
+            command = CMD_GAIT_MOUNTAIN;
+            gait_name = "MOUNTAIN";
+            return true;
+        case GaitState::SILENT:
+            command = CMD_GAIT_SILENT;
+            gait_name = "SILENT";
+            return true;
+        case GaitState::L_STAIR:
+            command = CMD_GAIT_L_STAIR;
+            gait_name = "L_STAIR";
+            return true;
+        default:
+            command = 0;
+            gait_name = "UNKNOWN";
+            return false;
+    }
+}
 
 }  // namespace
 
@@ -332,8 +364,15 @@ ActionResult ActionExecutor::lieDown() {
     return {ok, ok ? "Robot has lied down." : "Timeout waiting for robot to lie down."};
 }
 
-ActionResult ActionExecutor::stand() {
+ActionResult ActionExecutor::stand(int target_gait) {
     RCLCPP_DEBUG(logger_, "🚀 收到 stand 指令, 开始执行启动序列...");
+
+    uint32_t target_gait_command = 0;
+    const char *target_gait_name = "UNKNOWN";
+    if (!isStandTargetGait(target_gait) ||
+        !standTargetGaitCommand(target_gait, target_gait_command, target_gait_name)) {
+        return {false, "Stand target gait must be one of L_WALK(32), MOUNTAIN(33), SILENT(34), or L_STAIR(36)."};
+    }
 
     uint8_t state = state_store_.basicState();
     uint8_t gait  = state_store_.gaitState();
@@ -402,11 +441,11 @@ ActionResult ActionExecutor::stand() {
     state = state_store_.basicState();
     gait  = state_store_.gaitState();
     if (state == static_cast<uint8_t>(BasicState::RL_MODE) &&
-        gait == static_cast<uint8_t>(GaitState::MOUNTAIN)) {
-        RCLCPP_DEBUG(logger_, "✅ [3/4] 已在RL模式+山地步态, 跳过");
+        gait == static_cast<uint8_t>(target_gait)) {
+        RCLCPP_DEBUG(logger_, "✅ [3/4] 已在RL模式+目标步态%s, 跳过", target_gait_name);
     } else {
         if (state == static_cast<uint8_t>(BasicState::FORCE_STAND)) {
-            RCLCPP_DEBUG(logger_, "📌 [3/4] 当前为力控站立, 先进入踏步再切换山地...");
+            RCLCPP_DEBUG(logger_, "📌 [3/4] 当前为力控站立, 先进入踏步再切换%s...", target_gait_name);
             if (!sendToggleCommandWithRetries(CMD_MOTION, {BasicState::STEPPING},
                                               kStandStartMotionTimeoutMs,
                                               kStandStartMotionResendMs,
@@ -414,37 +453,38 @@ ActionResult ActionExecutor::stand() {
                                               kControlWarmupMs)) {
                 auto final_snap = state_store_.snapshot();
                 RCLCPP_ERROR(logger_,
-                             "❌ Stand 失败: 力控站立未进入踏步 (basic=%u, gait=%u)",
-                             final_snap.basic_state, final_snap.gait_state);
-                return {false, "Stand failed: timeout entering stepping before mountain gait."};
+                              "❌ Stand 失败: 力控站立未进入踏步 (basic=%u, gait=%u)",
+                              final_snap.basic_state, final_snap.gait_state);
+                return {false, "Stand failed: timeout entering stepping before target gait."};
             }
             state = state_store_.basicState();
             gait  = state_store_.gaitState();
-            RCLCPP_DEBUG(logger_, "✅ [3/4] 已进入踏步, 准备切换山地 (state=%d, gait=%d)",
-                        state, gait);
+            RCLCPP_DEBUG(logger_, "✅ [3/4] 已进入踏步, 准备切换%s (state=%d, gait=%d)",
+                         target_gait_name, state, gait);
         }
 
-        RCLCPP_DEBUG(logger_, "📌 [3/4] 切换山地步态 (state=%d, gait=%d)...", state, gait);
+        RCLCPP_DEBUG(logger_, "📌 [3/4] 切换目标步态%s (state=%d, gait=%d)...",
+                     target_gait_name, state, gait);
         ensureControlTakeover(kControlWarmupMs, kControlWarmupPulseMs);
-        command_sender_(CMD_GAIT_MOUNTAIN);
+        command_sender_(target_gait_command);
 
         if (!state_store_.waitForState(
-                [](uint8_t basic_state, uint8_t gait_state) {
+                [target_gait](uint8_t basic_state, uint8_t gait_state) {
                     return basic_state == static_cast<uint8_t>(BasicState::RL_MODE) &&
-                           gait_state == static_cast<uint8_t>(GaitState::MOUNTAIN);
+                           gait_state == static_cast<uint8_t>(target_gait);
                 },
-                kStandMountainTimeoutMs)) {
+                kStandTargetGaitTimeoutMs)) {
             auto final_snap = state_store_.snapshot();
             RCLCPP_ERROR(logger_,
-                         "❌ Stand 失败: 未进入RL模式+山地步态 (basic=%u, gait=%u)",
-                         final_snap.basic_state, final_snap.gait_state);
-            return {false, "Stand failed: timeout waiting for RL_MODE + MOUNTAIN."};
+                         "❌ Stand 失败: 未进入RL模式+目标步态%s (basic=%u, gait=%u)",
+                         target_gait_name, final_snap.basic_state, final_snap.gait_state);
+            return {false, std::string("Stand failed: timeout waiting for RL_MODE + ") + target_gait_name + "."};
         }
-        RCLCPP_DEBUG(logger_, "✅ [3/4] 山地步态+RL模式 就绪");
+        RCLCPP_DEBUG(logger_, "✅ [3/4] %s+RL模式 就绪", target_gait_name);
     }
 
-    RCLCPP_DEBUG(logger_, "🎉 Stand 序列完成! 机器人已就绪 (RL模式)");
-    return {true, "Robot is standing in RL mode with mountain gait."};
+    RCLCPP_DEBUG(logger_, "🎉 Stand 序列完成! 机器人已就绪 (RL模式+%s)", target_gait_name);
+    return {true, std::string("Robot is standing in RL mode with ") + target_gait_name + " gait."};
 }
 
 }  // namespace nav_bridge

@@ -81,6 +81,7 @@ constexpr uint32_t CMD_GAIT_STAIR45_ACC = 0x2101040B;  ///< 45°楼梯(累积帧
 constexpr uint32_t CMD_GAIT_MOUNTAIN    = 0x21010421;  ///< 山地步态
 constexpr uint32_t CMD_GAIT_L_WALK      = 0x21010420;  ///< L行走步态
 constexpr uint32_t CMD_GAIT_SILENT      = 0x21010422;  ///< 静音步态
+constexpr uint32_t CMD_GAIT_L_STAIR     = 0x21010424;  ///< L楼梯步态
 constexpr uint32_t CMD_GAIT_RUN         = 0x31010307;  ///< 跑步步态
 
 // --- 其他 ---
@@ -299,6 +300,7 @@ enum class GaitState : uint8_t {
     L_WALK      = 32,
     MOUNTAIN    = 33,
     SILENT      = 34,
+    L_STAIR     = 36,
 };
 
 enum class BodyHeightState : int8_t {
@@ -339,6 +341,8 @@ inline GaitSpeedLimit getGaitSpeedLimit(uint8_t gait) {
         case GaitState::RUN:
             return {0.6f, 0.25f, 0.4f, 0.5f};
         case GaitState::SILENT:
+            return {1.0f, 1.0f, 0.8f, 1.2f};
+        case GaitState::L_STAIR:
             return {1.0f, 1.0f, 0.8f, 1.2f};
         default:
             return {0.5f, 0.3f, 0.2f, 0.5f};

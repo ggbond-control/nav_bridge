@@ -17,6 +17,7 @@ nav_bridge_node:
     charge_state_query_interval_ms: 1000 # 自主充电状态查询周期(ms)
     charge_state_query_timeout_ms: 1500  # 自主充电状态查询等待响应超时(ms)
     startup_acquire_control: true    # 节点启动后是否立即接管并持续发送 heartbeat
+    stand_target_gait: 33            # /stand 最终目标步态: 32=L_WALK, 33=MOUNTAIN, 34=SILENT, 36=L_STAIR
 
     # === Frame IDs ===
     imu_frame_id: "imu_link"

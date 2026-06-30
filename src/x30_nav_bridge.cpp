@@ -100,6 +100,7 @@ X30NavBridge::X30NavBridge(const rclcpp::NodeOptions &options)
     this->declare_parameter("charge_state_query_interval_ms", 1000);
     this->declare_parameter("charge_state_query_timeout_ms", 1500);
     this->declare_parameter("startup_acquire_control", true);
+    this->declare_parameter("stand_target_gait", static_cast<int>(GaitState::MOUNTAIN));
     this->declare_parameter("imu_frame_id", std::string("imu_link"));
     this->declare_parameter("odom_frame_id", std::string("odom"));
     this->declare_parameter("base_frame_id", std::string("base_link"));
@@ -120,6 +121,7 @@ X30NavBridge::X30NavBridge(const rclcpp::NodeOptions &options)
     charge_state_query_interval_ms_ = this->get_parameter("charge_state_query_interval_ms").as_int();
     charge_state_query_timeout_ms_  = this->get_parameter("charge_state_query_timeout_ms").as_int();
     startup_acquire_control_ = this->get_parameter("startup_acquire_control").as_bool();
+    stand_target_gait_ = this->get_parameter("stand_target_gait").as_int();
     imu_frame_id_          = this->get_parameter("imu_frame_id").as_string();
     odom_frame_id_         = this->get_parameter("odom_frame_id").as_string();
     base_frame_id_         = this->get_parameter("base_frame_id").as_string();
@@ -407,6 +409,7 @@ bool X30NavBridge::isSupportedNavigationGait(uint8_t gait) const {
         case GaitState::L_WALK:
         case GaitState::MOUNTAIN:
         case GaitState::SILENT:
+        case GaitState::L_STAIR:
             return true;
         default:
             return false;
@@ -418,9 +421,17 @@ bool X30NavBridge::isCrawlCompatibleGait(uint8_t gait) const
     return gait == static_cast<uint8_t>(GaitState::WALK) || gait == static_cast<uint8_t>(GaitState::SLOPE);
 }
 
+bool X30NavBridge::isBodyHeightSwitchAllowedGait(uint8_t gait) const
+{
+    return gait != static_cast<uint8_t>(GaitState::L_WALK) &&
+           gait != static_cast<uint8_t>(GaitState::MOUNTAIN) &&
+           gait != static_cast<uint8_t>(GaitState::SILENT) &&
+           gait != static_cast<uint8_t>(GaitState::L_STAIR);
+}
+
 bool X30NavBridge::isCmdVelCompatibleState(uint8_t basic_state, uint8_t gait_state) const {
     // 按手册 1.2.3.2: 踏步状态(STEPPING)下可发轴指令控制速度, 适用于所有步态.
-    // RL 类步态(L_WALK/MOUNTAIN/SILENT)切换后进入 RL_MODE, 同样允许速度转发.
+    // RL 类步态(L_WALK/MOUNTAIN/SILENT/L_STAIR)切换后进入 RL_MODE, 同样允许速度转发.
     if (basic_state == static_cast<uint8_t>(BasicState::STEPPING) &&
         isSupportedNavigationGait(gait_state)) {
         return true;
@@ -428,7 +439,8 @@ bool X30NavBridge::isCmdVelCompatibleState(uint8_t basic_state, uint8_t gait_sta
     auto is_rl_gait = [](uint8_t g) {
         return g == static_cast<uint8_t>(GaitState::L_WALK) ||
                g == static_cast<uint8_t>(GaitState::MOUNTAIN) ||
-               g == static_cast<uint8_t>(GaitState::SILENT);
+               g == static_cast<uint8_t>(GaitState::SILENT) ||
+               g == static_cast<uint8_t>(GaitState::L_STAIR);
     };
     return basic_state == static_cast<uint8_t>(BasicState::RL_MODE) && is_rl_gait(gait_state);
 }
@@ -465,12 +477,13 @@ ActionResult X30NavBridge::setNavigationGait(uint8_t gait) {
         return {false, "只有「行走WALK」和「斜坡SLOPE」模式允许机身高度为「匍匐CRAWL」。"};
     }
 
-    // 按手册 1.2.6: RL 类步态 (L_WALK/MOUNTAIN/SILENT) 切换后机器人进入 RL_MODE,
+    // 按手册 1.2.6: RL 类步态 (L_WALK/MOUNTAIN/SILENT/L_STAIR) 切换后机器人进入 RL_MODE,
     // 普通步态 (WALK/SLOPE/OBSTACLE/STAIR*) 切换后机器人处于 STEPPING, 不会进入 RL_MODE.
     auto isRlGait = [](uint8_t g) {
         return g == static_cast<uint8_t>(GaitState::L_WALK) ||
                g == static_cast<uint8_t>(GaitState::MOUNTAIN) ||
-               g == static_cast<uint8_t>(GaitState::SILENT);
+               g == static_cast<uint8_t>(GaitState::SILENT) ||
+               g == static_cast<uint8_t>(GaitState::L_STAIR);
     };
 
     const bool starts_from_force_stand =
@@ -531,6 +544,10 @@ ActionResult X30NavBridge::setNavigationGait(uint8_t gait) {
         case GaitState::SILENT:
             command   = CMD_GAIT_SILENT;
             gait_name = "SILENT";
+            break;
+        case GaitState::L_STAIR:
+            command   = CMD_GAIT_L_STAIR;
+            gait_name = "L_STAIR";
             break;
         default:
             return {false, "Unsupported navigation gait."};
@@ -700,6 +717,10 @@ ActionResult X30NavBridge::setBodyHeight(int32_t requested_height_value)
     if (target_state == BodyHeightState::CRAWL && !isCrawlCompatibleGait(snapshot.gait_state))
     {
         return {false, std::string("Crawl height is only allowed when current gait is WALK or SLOPE. Current gait=") + std::to_string(snapshot.gait_state) + "."};
+    }
+    if (!isBodyHeightSwitchAllowedGait(snapshot.gait_state))
+    {
+        return {false, "Body height switch is not supported in L_WALK, MOUNTAIN, SILENT, or L_STAIR gait."};
     }
 
     RCLCPP_DEBUG(this->get_logger(), "📌 请求切换身体高度到 %s", target_name);
@@ -1216,6 +1237,8 @@ static const char *gaitStateToStr(uint8_t state) {
             return "山地";
         case GaitState::SILENT:
             return "静音";
+        case GaitState::L_STAIR:
+            return "L楼梯";
         default:
             return "未知";
     }
@@ -1426,7 +1449,7 @@ void X30NavBridge::handleStandRequest(
     std::shared_ptr<std_srvs::srv::Trigger::Response> res)
 {
     auto result = executeActionWithCmdVelSuppressed("stand", [this]() {
-        auto action_result = action_executor_->stand();
+        auto action_result = action_executor_->stand(stand_target_gait_);
         if (action_result.success && !ensureManualMode("stand"))
         {
             action_result.success = false;
@@ -1436,7 +1459,7 @@ void X30NavBridge::handleStandRequest(
     res->success = result.success;
     res->message = result.message;
     if (result.success) {
-        RCLCPP_INFO(this->get_logger(), "Stand 完成: 机器人已进入可导航状态");
+        RCLCPP_INFO(this->get_logger(), "Stand 完成: %s", result.message.c_str());
     }
 }
 
@@ -1486,6 +1509,7 @@ void X30NavBridge::handleSetGaitRequest(
         {"L_WALK",      static_cast<uint8_t>(GaitState::L_WALK)},
         {"MOUNTAIN",    static_cast<uint8_t>(GaitState::MOUNTAIN)},
         {"SILENT",      static_cast<uint8_t>(GaitState::SILENT)},
+        {"L_STAIR",     static_cast<uint8_t>(GaitState::L_STAIR)},
     };
 
     if (req->parameters.size() != 1) {
@@ -1539,7 +1563,7 @@ void X30NavBridge::handleSetGaitRequest(
                 result.successful = false;
                 result.reason     = "Unknown gait name '" + param.value.string_value +
                                     "'. Supported: WALK, OBSTACLE, SLOPE, RUN, STAIR_SOLID, "
-                                    "STAIR_ACC, STAIR45_ACC, L_WALK, MOUNTAIN, SILENT.";
+                                    "STAIR_ACC, STAIR45_ACC, L_WALK, MOUNTAIN, SILENT, L_STAIR.";
             }
         } else {
             result.successful = false;

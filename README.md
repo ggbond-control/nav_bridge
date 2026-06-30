@@ -107,27 +107,27 @@ X30 并不是“发一条动作指令就一定立刻执行”的设备。对于�
 
 `stand` 是当前最核心的业务服务，用于把机器人从静态或异常态拉到可导航工作态。
 
-当前实现的目标不是“机械地执行固定脚本”，而是把机器人**收敛到 `RL_MODE + MOUNTAIN`**。  
+当前实现的目标不是“机械地执行固定脚本”，而是把机器人**收敛到 `RL_MODE + stand_target_gait`**。默认目标步态为 `MOUNTAIN(33)`，可在 `config/x30_params.yaml` 中改为 `L_STAIR(36)` 等受支持的 RL 类目标步态。
 在当前代码和实机表现下，主要流程通常是：
 
 1. 如果在 `SOFT_ESTOP`，先恢复到 `LYING_DOWN`
 2. 若在 `LYING_DOWN / GOING_DOWN`，执行起立
 3. 若起立后处于 `INITIAL_STAND`，切入力控站立
 4. 若处于 `FORCE_STAND`，先发送 `CMD_MOTION` 进入踏步
-5. 切换山地步态 `CMD_GAIT_MOUNTAIN`
-6. 等待进入 `RL_MODE + MOUNTAIN`
+5. 切换配置指定的最终步态，默认山地步态 `CMD_GAIT_MOUNTAIN`
+6. 等待进入 `RL_MODE + stand_target_gait`
 
 需要注意的是：
 
 - `stand` 内部仍然保留了针对 toggle 型命令的接管预热和重试逻辑
 - 若底层状态反馈比预期更慢，服务会按当前状态继续等待或重试，而不是假定机器人一定线性流转
-- 切换山地步态时底层可能短暂经过普通步态或力控站立等中间状态，`stand` 只以最终 `RL_MODE + MOUNTAIN` 作为成功条件
+- 切换目标步态时底层可能短暂经过普通步态或力控站立等中间状态，`stand` 只以最终 `RL_MODE + stand_target_gait` 作为成功条件
 - 文档中描述的是当前代码下的主路径，真正行为仍以实机状态反馈为准
 
 成功后，机器人应当处于：
 
 - 基本状态：`RL_MODE`
-- 步态状态：`MOUNTAIN`
+- 步态状态：`stand_target_gait`，默认 `MOUNTAIN`
 
 此时可以接受 `/cmd_vel` 导航速度输入。
 
@@ -155,13 +155,13 @@ X30 并不是“发一条动作指令就一定立刻执行”的设备。对于�
 
 用于在踏步状态（`STEPPING`）、力控站立状态（`FORCE_STAND`）或 RL 模式（`RL_MODE`）下切换步态模型。从 `FORCE_STAND` 启动时，服务会先发送开始运动指令进入踏步状态，再发送目标步态指令。
 
-> **注意：** 切换到 RL 类步态（`L_WALK`/`MOUNTAIN`/`SILENT`）后，机器人将进入 `RL_MODE`；
+> **注意：** 切换到 RL 类步态（`L_WALK`/`MOUNTAIN`/`SILENT`/`L_STAIR`）后，机器人将进入 `RL_MODE`；
 > 切换到普通步态（`WALK`/`SLOPE`/`OBSTACLE`/`STAIR*`）后，机器人处于 `STEPPING` 状态。
 > 两种情况下均支持 `/cmd_vel` 速度转发。
 
 接口类型已更改为 ROS2 标准 `rcl_interfaces/srv/SetParameters`，通过设置参数名 `gait` 来指定目标步态。虽然接口类型来自 `SetParameters`，但本服务是一个有副作用的步态切换动作，一次请求只接受一个 `gait` 参数；空参数、多个参数或非 `gait` 参数都会被拒绝，不会执行步态切换。
 
-支持全部 10 种步态：
+支持全部 11 种步态：
 
 | 整数值 | 字符串名称 | 步态 |
 | --- | --- | --- |
@@ -175,6 +175,7 @@ X30 并不是“发一条动作指令就一定立刻执行”的设备。对于�
 | `32` | `L_WALK` | L 行走 |
 | `33` | `MOUNTAIN` | 山地 |
 | `34` | `SILENT` | 静音 |
+| `36` | `L_STAIR` | L 楼梯 |
 
 调用示例：
 
@@ -234,8 +235,9 @@ ros2 service call /nav_bridge_node/set_body_height rcl_interfaces/srv/SetParamet
 3. 检查机器人当前连接状态
 4. 如果已经处于目标高度，直接成功返回
 5. 若目标是 `CRAWL`，校验当前步态必须为 `WALK` 或 `SLOPE`
-6. 发送机体高度切换指令 `CMD_HEIGHT_SWITCH`
-7. 等待 `/robot_body_height_state` 进入目标状态
+6. 若当前为 RL 类步态（`L_WALK/MOUNTAIN/SILENT/L_STAIR`），拒绝切换机体高度
+7. 发送机体高度切换指令 `CMD_HEIGHT_SWITCH`
+8. 等待 `/robot_body_height_state` 进入目标状态
 
 ## 4. `/cmd_vel` 速度控制
 
@@ -257,8 +259,8 @@ ros2 service call /nav_bridge_node/set_body_height rcl_interfaces/srv/SetParamet
 
 当前允许 `/cmd_vel` 转发的状态窗口为（与手册 1.2.3.2 一致）：
 
-- `STEPPING + 任意受支持步态`（WALK/OBSTACLE/SLOPE/RUN/STAIR*/L_WALK/MOUNTAIN/SILENT）
-- `RL_MODE + RL 类步态`（L_WALK/MOUNTAIN/SILENT）
+- `STEPPING + 任意受支持步态`（WALK/OBSTACLE/SLOPE/RUN/STAIR*/L_WALK/MOUNTAIN/SILENT/L_STAIR）
+- `RL_MODE + RL 类步态`（L_WALK/MOUNTAIN/SILENT/L_STAIR）
 
 同时，在以下服务执行期间会临时暂停 `/cmd_vel` UDP 转发，以避免动作控制链和速度控制链互相打架：
 
@@ -343,10 +345,10 @@ ros2 service call /nav_bridge_node/set_body_height rcl_interfaces/srv/SetParamet
 
 - 当前业务上只保留两个目标态服务：`stand / lie`
 - `~/release_control` 用于显式停止 heartbeat 并交还控制权
-- `~/set_gait` 用于步态切换，支持全部 10 种步态（整数或字符串方式），参数名 `gait`
+- `~/set_gait` 用于步态切换，支持全部 11 种步态（整数或字符串方式），参数名 `gait`
 - `~/set_body_height` 用于机体高度切换，支持 `0/2` 或 `CRAWL/NORMAL`，参数名 `body_height`
 - 旧版本里存在的 `motion` 与 `force_stand` 对外服务链路已移除
-- `stand` 会收敛到 `RL_MODE + MOUNTAIN`
+- `stand` 会收敛到 `RL_MODE + stand_target_gait`，默认 `MOUNTAIN`
 
 ## 7. 配置参数
 
@@ -361,6 +363,7 @@ ros2 service call /nav_bridge_node/set_body_height rcl_interfaces/srv/SetParamet
 - `cmd_vel_rate_hz`
 - `cmd_vel_timeout_ms`
 - `startup_acquire_control`
+- `stand_target_gait`
 - `imu_frame_id`
 - `odom_frame_id`
 - `base_frame_id`
@@ -424,7 +427,7 @@ stateDiagram-v2
     LYING_DOWN --> INITIAL_STAND: ~/stand
     INITIAL_STAND --> FORCE_STAND: ~/stand
     FORCE_STAND --> STEPPING: ~/stand 先开始运动
-    STEPPING --> RL_MODE: ~/stand + 山地步态
+    STEPPING --> RL_MODE: ~/stand + 配置目标步态
 
     RL_MODE --> GOING_DOWN: ~/lie 可直接进入趴下链
     FORCE_STAND --> GOING_DOWN: ~/lie
@@ -435,7 +438,7 @@ stateDiagram-v2
 
 如果按 `stand` 的完整顺序理解，可以简化为：
 
-`SOFT_ESTOP/LYING_DOWN -> INITIAL_STAND -> FORCE_STAND -> STEPPING -> RL_MODE + MOUNTAIN`
+`SOFT_ESTOP/LYING_DOWN -> INITIAL_STAND -> FORCE_STAND -> STEPPING -> RL_MODE + stand_target_gait`
 
 如果按 `lie` 的完整顺序理解，可以简化为：
 
@@ -447,7 +450,7 @@ stateDiagram-v2
 
 - 第一次上电或节点刚启动后，如果启用了 `startup_acquire_control`，节点会立即持有控制权
 - 如果刚释放控制权又立刻调用动作服务，允许系统先完成接管预热，不要连续高频猛点服务
-- `~/stand` 的目标不是“仅仅站起来”，而是最终进入 `RL_MODE + MOUNTAIN`
+- `~/stand` 的目标不是“仅仅站起来”，而是最终进入 `RL_MODE + stand_target_gait`
 - `~/lie` 在 `RL_MODE` 下不简单复用 `stand` 的停止运动逻辑，而是优先进入“趴下链”
 - 如果启动时已接管控制权，`/cmd_vel` 长时间静默只会归零速度，不会自动释放控制权
 - 若日志中看到“保持接管并继续重发命令”，说明系统正在处理 toggle 型命令阶段的保守重试，不一定代表逻辑故障
@@ -457,7 +460,7 @@ stateDiagram-v2
 
 1. 启动节点，确认已收到状态包
 2. 调用一次 `~/stand`
-3. 在 `RL_MODE + MOUNTAIN` 下发送少量 `/cmd_vel`
+3. 在 `RL_MODE + stand_target_gait` 下发送少量 `/cmd_vel`
 4. 停止 `/cmd_vel`，确认速度归零但控制权仍保持
 5. 调用 `~/lie`
 6. 再次调用 `~/stand`
@@ -493,7 +496,7 @@ stateDiagram-v2
 - 当前只桥接运动主机 `192.168.1.103:43893`，`percept_udp_` 仍未接入业务流程
 - 控制接管依然是工程策略，不是依赖底层显式 ack
 - 动作执行器对 `CMD_STAND_UP_DOWN`、`CMD_MOTION` 这类 toggle 型命令仍保留了分阶段保活与重发机制
-- `~/set_gait` 现已改用标准 `rcl_interfaces/srv/SetParameters` 接口，支持全部 10 种步态，参数名 `gait`，支持整数或字符串输入
+- `~/set_gait` 现已改用标准 `rcl_interfaces/srv/SetParameters` 接口，支持全部 11 种步态，参数名 `gait`，支持整数或字符串输入
 - `~/set_body_height` 使用标准 `rcl_interfaces/srv/SetParameters` 接口，参数名 `body_height`，支持 `CRAWL/NORMAL` 或整数 `0/2`
 - `~/charge_command` 使用标准 `rcl_interfaces/srv/SetParameters` 接口，参数名 `charge_command`，支持 `start/stop/reset/query` 或整数 `0..3`
 - `stand / lie` 的若干阶段路径是根据当前 X30 实机状态反馈逐步收敛出来的，未来若底层固件行为变化，业务路径也可能需要同步调整
@@ -506,9 +509,9 @@ stateDiagram-v2
 
 | 服务名 | 类型 | 作用 |
 | --- | --- | --- |
-| `~/stand` | `std_srvs/srv/Trigger` | 一键进入 `RL_MODE + MOUNTAIN` |
+| `~/stand` | `std_srvs/srv/Trigger` | 一键进入 `RL_MODE + stand_target_gait` |
 | `~/lie` | `std_srvs/srv/Trigger` | 安全退回趴下状态 |
-| `~/set_gait` | `rcl_interfaces/srv/SetParameters` | 切换步态，支持全部 10 种步态，参数名 `gait`（整数或字符串） |
+| `~/set_gait` | `rcl_interfaces/srv/SetParameters` | 切换步态，支持全部 11 种步态，参数名 `gait`（整数或字符串） |
 | `~/set_body_height` | `rcl_interfaces/srv/SetParameters` | 切换机体高度，参数名 `body_height`（`CRAWL/NORMAL` 或 `0/2`） |
 | `~/charge_command` | `rcl_interfaces/srv/SetParameters` | 自主充电控制，参数名 `charge_command`（`start/stop/reset/query` 或整数 `0..3`） |
 | `~/release_control` | `std_srvs/srv/Trigger` | 显式停止 heartbeat 并释放控制权 |
@@ -559,6 +562,7 @@ stateDiagram-v2
 | `32` | `L_WALK` | L 行走 |
 | `33` | `MOUNTAIN` | 山地 |
 | `34` | `SILENT` | 静音 |
+| `36` | `L_STAIR` | L 楼梯 |
 
 `/robot_body_height_state` 当前使用的数值定义如下：
 
@@ -578,6 +582,7 @@ stateDiagram-v2
 | `cmd_vel_rate_hz` | `50` | 速度轴指令发送频率 |
 | `cmd_vel_timeout_ms` | `5000` | `/cmd_vel` 速度输入保鲜时间，超时后自动发零速度 |
 | `startup_acquire_control` | `true` | 节点启动后是否立即接管并持续保持 heartbeat |
+| `stand_target_gait` | `33` | `~/stand` 最终目标步态，`32=L_WALK`，`33=MOUNTAIN`，`34=SILENT`，`36=L_STAIR` |
 | `imu_frame_id` | `imu_link` | IMU frame |
 | `odom_frame_id` | `odom` | 里程计 frame |
 | `base_frame_id` | `base_link` | 机器人本体 frame |

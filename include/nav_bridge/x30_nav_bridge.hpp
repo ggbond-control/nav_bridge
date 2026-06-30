@@ -95,6 +95,7 @@ private:
     bool isCmdVelForwardingAllowed() const;
     bool isSupportedNavigationGait(uint8_t gait) const;
     bool isCrawlCompatibleGait(uint8_t gait) const;
+    bool isBodyHeightSwitchAllowedGait(uint8_t gait) const;
     bool isCmdVelCompatibleState(uint8_t basic_state, uint8_t gait_state) const;
     bool waitForCmdVelCompatibleState(int timeout_ms) const;
     ActionResult setNavigationGait(uint8_t gait);
@@ -138,6 +139,7 @@ private:
     int charge_state_query_interval_ms_;
     int charge_state_query_timeout_ms_;
     bool startup_acquire_control_;
+    int stand_target_gait_;
 
     // ===================== 控制权 & 心跳 =====================
     mutable std::mutex control_mutex_;

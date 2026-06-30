@@ -28,7 +28,7 @@ public:
     ActionExecutor(rclcpp::Logger logger, RobotStateStore &state_store,
                    ControlWarmup control_warmup, CommandSender command_sender);
 
-    ActionResult stand();
+    ActionResult stand(int target_gait);
     ActionResult forceStand();
     ActionResult lieDown();
 
