@@ -337,6 +337,7 @@ ros2 service call /nav_bridge_node/set_body_height rcl_interfaces/srv/SetParamet
 
 - `~/stand` (`std_srvs/srv/Trigger`)
 - `~/lie` (`std_srvs/srv/Trigger`)
+- `~/soft_estop` (`std_srvs/srv/Trigger`)
 - `~/release_control` (`std_srvs/srv/Trigger`)
 - `~/set_gait` (`rcl_interfaces/srv/SetParameters`)
 - `~/set_body_height` (`rcl_interfaces/srv/SetParameters`)
@@ -344,6 +345,7 @@ ros2 service call /nav_bridge_node/set_body_height rcl_interfaces/srv/SetParamet
 说明：
 
 - 当前业务上只保留两个目标态服务：`stand / lie`
+- `~/soft_estop` 会直接发送软急停指令 `0x21010C0E`，用于让机器人立刻趴下并进入关节保护状态
 - `~/release_control` 用于显式停止 heartbeat 并交还控制权
 - `~/set_gait` 用于步态切换，支持全部 11 种步态（整数或字符串方式），参数名 `gait`
 - `~/set_body_height` 用于机体高度切换，支持 `0/2` 或 `CRAWL/NORMAL`，参数名 `body_height`
@@ -511,6 +513,7 @@ stateDiagram-v2
 | --- | --- | --- |
 | `~/stand` | `std_srvs/srv/Trigger` | 一键进入 `RL_MODE + stand_target_gait` |
 | `~/lie` | `std_srvs/srv/Trigger` | 安全退回趴下状态 |
+| `~/soft_estop` | `std_srvs/srv/Trigger` | 发送软急停指令，让机器人进入关节保护状态 |
 | `~/set_gait` | `rcl_interfaces/srv/SetParameters` | 切换步态，支持全部 11 种步态，参数名 `gait`（整数或字符串） |
 | `~/set_body_height` | `rcl_interfaces/srv/SetParameters` | 切换机体高度，参数名 `body_height`（`CRAWL/NORMAL` 或 `0/2`） |
 | `~/charge_command` | `rcl_interfaces/srv/SetParameters` | 自主充电控制，参数名 `charge_command`（`start/stop/reset/query` 或整数 `0..3`） |

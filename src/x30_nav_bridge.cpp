@@ -193,6 +193,8 @@ bool X30NavBridge::initialize() {
         "~/stand", std::bind(&X30NavBridge::handleStandRequest, this, _1, _2));
     lie_srv_ = this->create_service<std_srvs::srv::Trigger>(
         "~/lie", std::bind(&X30NavBridge::handleLieRequest, this, _1, _2));
+    soft_estop_srv_ = this->create_service<std_srvs::srv::Trigger>(
+        "~/soft_estop", std::bind(&X30NavBridge::handleSoftEstopRequest, this, _1, _2));
     release_control_srv_ = this->create_service<std_srvs::srv::Trigger>(
         "~/release_control", std::bind(&X30NavBridge::handleReleaseControlRequest, this, _1, _2));
     set_gait_srv_ = this->create_service<rcl_interfaces::srv::SetParameters>(
@@ -1474,6 +1476,19 @@ void X30NavBridge::handleLieRequest(
     if (result.success) {
         RCLCPP_INFO(this->get_logger(), "Lie 完成: 机器人已趴下");
     }
+}
+
+void X30NavBridge::handleSoftEstopRequest(
+    const std::shared_ptr<std_srvs::srv::Trigger::Request> /*req*/,
+    std::shared_ptr<std_srvs::srv::Trigger::Response> res) {
+    auto result = executeActionWithCmdVelSuppressed("soft_estop", [this]() {
+        warmupControl(kControlWarmupMs, kControlWarmupPulseMs);
+        sendGaitCommand(CMD_SOFT_ESTOP);
+        RCLCPP_WARN(this->get_logger(), "软急停指令已发送: 0x%08X", CMD_SOFT_ESTOP);
+        return ActionResult{true, "Soft estop command sent."};
+    });
+    res->success = result.success;
+    res->message = result.message;
 }
 
 void X30NavBridge::handleReleaseControlRequest(
