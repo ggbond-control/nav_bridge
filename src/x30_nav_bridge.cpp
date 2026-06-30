@@ -136,21 +136,21 @@ X30NavBridge::~X30NavBridge() {
 // ============================================================================
 
 bool X30NavBridge::initialize() {
-    RCLCPP_INFO(this->get_logger(), "=== 绝影X30 Nav Bridge 初始化 ===");
-    RCLCPP_INFO(this->get_logger(), "运动主机: %s:%d", motion_host_ip_.c_str(), motion_host_port_);
-    RCLCPP_INFO(this->get_logger(), "本地接收端口: %d", local_recv_port_);
-    RCLCPP_INFO(this->get_logger(), "自主充电请求: %s:%d (local:%d)",
+    RCLCPP_DEBUG(this->get_logger(), "=== 绝影X30 Nav Bridge 初始化 ===");
+    RCLCPP_DEBUG(this->get_logger(), "运动主机: %s:%d", motion_host_ip_.c_str(), motion_host_port_);
+    RCLCPP_DEBUG(this->get_logger(), "本地接收端口: %d", local_recv_port_);
+    RCLCPP_DEBUG(this->get_logger(), "自主充电请求: %s:%d (local:%d)",
                 charge_host_ip_.c_str(), charge_host_port_, charge_local_port_);
-    RCLCPP_INFO(this->get_logger(), "自主充电START前速度源: %s:%d code=0x%08X value=%d(导航)",
+    RCLCPP_DEBUG(this->get_logger(), "自主充电START前速度源: %s:%d code=0x%08X value=%d(导航)",
                 charge_host_ip_.c_str(), charge_config_port_, CMD_VEL_SOURCE, kChargeVelSourceNavigation);
-    RCLCPP_INFO(this->get_logger(), "自主充电命令: START(0x%08X,%d) STOP(0x%08X,%d) RESET(0x%08X,%d) QUERY(0x%08X,%d)",
+    RCLCPP_DEBUG(this->get_logger(), "自主充电命令: START(0x%08X,%d) STOP(0x%08X,%d) RESET(0x%08X,%d) QUERY(0x%08X,%d)",
                 CMD_CHARGE_MANAGER, CHARGE_COMMAND_START_VALUE, CMD_CHARGE_MANAGER,
                 CHARGE_COMMAND_STOP_VALUE, CMD_CHARGE_MANAGER, CHARGE_COMMAND_RESET_VALUE,
                 CMD_CHARGE_MANAGER_QUERY, CHARGE_COMMAND_QUERY_VALUE);
-    RCLCPP_INFO(this->get_logger(), "自主充电服务会持续等待充电管理器进入目标状态或返回错误状态");
+    RCLCPP_DEBUG(this->get_logger(), "自主充电服务会持续等待充电管理器进入目标状态或返回错误状态");
 
     // 打印结构体大小，方便调试协议对齐
-    RCLCPP_INFO(this->get_logger(),
+    RCLCPP_DEBUG(this->get_logger(),
                 "协议结构体大小: CommandHead=%zu, RcsData=%zu, MotionStateData=%zu, "
                 "ControllerSensorData=%zu, BatterySensorData=%zu",
                 sizeof(CommandHead), sizeof(RcsData), sizeof(MotionStateData),
@@ -209,7 +209,7 @@ bool X30NavBridge::initialize() {
         acquireControl();
         RCLCPP_INFO(this->get_logger(), "启动时已自动接管控制权，heartbeat 将持续保持");
     } else {
-        RCLCPP_INFO(this->get_logger(), "启动时不自动接管控制权，等待上层显式接管");
+        RCLCPP_DEBUG(this->get_logger(), "启动时不自动接管控制权，等待上层显式接管");
     }
 
     // 3. 启动统一控制定时器 (速度发送 + 心跳 + 超时检测)
@@ -233,7 +233,7 @@ bool X30NavBridge::initialize() {
 void X30NavBridge::shutdown() {
     if (!running_.load()) return;  // 防止重复关闭
 
-    RCLCPP_INFO(this->get_logger(), "Nav Bridge 关闭中...");
+    RCLCPP_DEBUG(this->get_logger(), "Nav Bridge 关闭中...");
 
     running_ = false;
     charge_state_cv_.notify_all();
@@ -262,7 +262,7 @@ void X30NavBridge::shutdown() {
     motion_udp_.close();
     percept_udp_.close();
 
-    RCLCPP_INFO(this->get_logger(), "Nav Bridge 已关闭");
+    RCLCPP_DEBUG(this->get_logger(), "Nav Bridge 已关闭");
 }
 
 // ============================================================================
@@ -296,7 +296,7 @@ void X30NavBridge::sendVelocityCommand(double vx, double vy, double vyaw) {
 void X30NavBridge::sendGaitCommand(uint32_t gait_cmd_code) {
     auto cmd = makeSimpleCommand(gait_cmd_code, 0);
     motion_udp_.send(&cmd, sizeof(cmd));
-    RCLCPP_INFO(this->get_logger(), "发送控制指令: 0x%08X", gait_cmd_code);
+    RCLCPP_DEBUG(this->get_logger(), "发送控制指令: 0x%08X", gait_cmd_code);
 }
 
 // ============================================================================
@@ -312,7 +312,7 @@ void X30NavBridge::applyControlActions(const ControlPulse &actions) {
     if (actions.send_query) {
         auto query = makeSimpleCommand(CMD_QUERY_103, 0);
         motion_udp_.send(&query, sizeof(query));
-        RCLCPP_INFO(this->get_logger(), "心跳已启动, 并已发送连接确认查询(0x21020001)");
+        RCLCPP_DEBUG(this->get_logger(), "心跳已启动, 并已发送连接确认查询(0x21020001)");
     }
 
     if (actions.send_zero_velocity) {
@@ -374,7 +374,7 @@ ActionResult X30NavBridge::executeActionWithCmdVelSuppressed(
 void X30NavBridge::enterCmdVelSuppression(const char *action_name) {
     int previous_depth = cmd_vel_suppression_depth_.fetch_add(1);
     if (previous_depth == 0) {
-        RCLCPP_INFO(this->get_logger(), "⏸️ %s 执行期间暂停转发 /cmd_vel UDP 轴指令", action_name);
+        RCLCPP_DEBUG(this->get_logger(), "⏸️ %s 执行期间暂停转发 /cmd_vel UDP 轴指令", action_name);
     }
 }
 
@@ -387,7 +387,7 @@ void X30NavBridge::exitCmdVelSuppression(const char *action_name) {
     }
 
     if (previous_depth == 1) {
-        RCLCPP_INFO(this->get_logger(), "▶️ %s 执行结束，恢复 /cmd_vel UDP 轴指令转发", action_name);
+        RCLCPP_DEBUG(this->get_logger(), "▶️ %s 执行结束，恢复 /cmd_vel UDP 轴指令转发", action_name);
     }
 }
 
@@ -536,7 +536,7 @@ ActionResult X30NavBridge::setNavigationGait(uint8_t gait) {
             return {false, "Unsupported navigation gait."};
     }
 
-    RCLCPP_INFO(this->get_logger(), "📌 请求切换步态到 %s(%u)", gait_name, gait);
+    RCLCPP_DEBUG(this->get_logger(), "📌 请求切换步态到 %s(%u)", gait_name, gait);
     warmupControl(kControlWarmupMs, kControlWarmupPulseMs);
 
     if (starts_from_force_stand) {
@@ -554,7 +554,7 @@ ActionResult X30NavBridge::setNavigationGait(uint8_t gait) {
 
             if (snap.basic_state == static_cast<uint8_t>(BasicState::FORCE_STAND)) {
                 ++motion_retry_count;
-                RCLCPP_INFO(this->get_logger(),
+                RCLCPP_DEBUG(this->get_logger(),
                             "⏳ 步态 %s 从力控站立启动, 先发送开始运动指令 (attempt=%d)...",
                             gait_name, motion_retry_count);
                 sendGaitCommand(CMD_MOTION);
@@ -585,7 +585,7 @@ ActionResult X30NavBridge::setNavigationGait(uint8_t gait) {
 
         auto snap = state_store_.snapshot();
         if (!isRlGait(gait) && snap.gait_state == gait) {
-            RCLCPP_INFO(this->get_logger(), "✅ 机器人已进入踏步状态, 步态: %s", gait_name);
+            RCLCPP_DEBUG(this->get_logger(), "✅ 机器人已进入踏步状态, 步态: %s", gait_name);
             return {true, std::string("Navigation gait switched to ") + gait_name + "."};
         }
     }
@@ -634,7 +634,7 @@ ActionResult X30NavBridge::setNavigationGait(uint8_t gait) {
 
             if (snap.basic_state == static_cast<uint8_t>(BasicState::FORCE_STAND)) {
                 ++motion_retry_count;
-                RCLCPP_INFO(this->get_logger(),
+                RCLCPP_DEBUG(this->get_logger(),
                             "⏳ 步态已切换到 %s, 机器人处于力控站立, 发送开始运动指令 (attempt=%d)...",
                             gait_name, motion_retry_count);
                 sendGaitCommand(CMD_MOTION);
@@ -662,7 +662,7 @@ ActionResult X30NavBridge::setNavigationGait(uint8_t gait) {
             return {false, std::string("Gait switched to ") + gait_name +
                               ", but robot did not enter STEPPING in time."};
         }
-        RCLCPP_INFO(this->get_logger(), "✅ 机器人已进入踏步状态, 步态: %s", gait_name);
+        RCLCPP_DEBUG(this->get_logger(), "✅ 机器人已进入踏步状态, 步态: %s", gait_name);
     }
 
     return {true, std::string("Navigation gait switched to ") + gait_name + "."};
@@ -702,7 +702,7 @@ ActionResult X30NavBridge::setBodyHeight(int32_t requested_height_value)
         return {false, std::string("Crawl height is only allowed when current gait is WALK or SLOPE. Current gait=") + std::to_string(snapshot.gait_state) + "."};
     }
 
-    RCLCPP_INFO(this->get_logger(), "📌 请求切换身体高度到 %s", target_name);
+    RCLCPP_DEBUG(this->get_logger(), "📌 请求切换身体高度到 %s", target_name);
     warmupControl(kControlWarmupMs, kControlWarmupPulseMs);
 
     auto cmd = makeSimpleCommand(CMD_HEIGHT_SWITCH, requested_height_value);
@@ -711,7 +711,7 @@ ActionResult X30NavBridge::setBodyHeight(int32_t requested_height_value)
         return {false, "Failed to send body height switch command."};
     }
 
-    RCLCPP_INFO(this->get_logger(), "发送身体高度切换指令: 0x%08X value=%d", CMD_HEIGHT_SWITCH, requested_height_value);
+    RCLCPP_DEBUG(this->get_logger(), "发送身体高度切换指令: 0x%08X value=%d", CMD_HEIGHT_SWITCH, requested_height_value);
 
     if (!state_store_.waitForBodyHeightState({target_state}, kBodyHeightSwitchTimeoutMs))
     {
@@ -776,7 +776,7 @@ bool X30NavBridge::ensureManualMode(const char *reason)
         return true;
     }
 
-    RCLCPP_INFO(this->get_logger(), "🔁 %s后当前仍为非手动模式，开始切回手动", reason);
+    RCLCPP_DEBUG(this->get_logger(), "🔁 %s后当前仍为非手动模式，开始切回手动", reason);
 
     auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(kChargeManualModeTimeoutMs);
     warmupControl(kControlWarmupMs, kControlWarmupPulseMs);
@@ -784,6 +784,7 @@ bool X30NavBridge::ensureManualMode(const char *reason)
     {
         if (!is_nav_mode_.load())
         {
+            RCLCPP_INFO(this->get_logger(), "%s后已切回手动模式", reason);
             return true;
         }
 
@@ -803,6 +804,7 @@ bool X30NavBridge::ensureManualMode(const char *reason)
         return false;
     }
 
+    RCLCPP_INFO(this->get_logger(), "%s后已切回手动模式", reason);
     return true;
 }
 
@@ -978,15 +980,15 @@ void X30NavBridge::sendCmdVelTick() {
     }
 
     if (actions.session_started) {
-        RCLCPP_INFO(this->get_logger(), "🤖 控制会话激活, 执行控制权获取...");
-        RCLCPP_INFO(this->get_logger(), "🤖 控制权获取完成, 开始自主控制");
+        RCLCPP_DEBUG(this->get_logger(), "🤖 控制会话激活, 执行控制权获取...");
+        RCLCPP_DEBUG(this->get_logger(), "🤖 控制权获取完成, 开始自主控制");
     }
 
     if (!isCmdVelForwardingAllowed()) {
         auto snapshot = state_store_.snapshot();
-        RCLCPP_INFO_THROTTLE(this->get_logger(), *this->get_clock(), 2000,
-                             "⏸️ 当前状态(basic=%u, gait=%u)不允许转发 /cmd_vel UDP 轴指令",
-                             snapshot.basic_state, snapshot.gait_state);
+        RCLCPP_DEBUG_THROTTLE(this->get_logger(), *this->get_clock(), 2000,
+                              "⏸️ 当前状态(basic=%u, gait=%u)不允许转发 /cmd_vel UDP 轴指令",
+                              snapshot.basic_state, snapshot.gait_state);
         return;
     }
 
@@ -1006,7 +1008,7 @@ void X30NavBridge::sendCmdVelTick() {
 // ============================================================================
 
 void X30NavBridge::receiveLoop() {
-    RCLCPP_INFO(this->get_logger(), "接收线程启动");
+    RCLCPP_DEBUG(this->get_logger(), "接收线程启动");
 
     CommandMessage msg;
     uint64_t total_recv_count   = 0;
@@ -1114,7 +1116,7 @@ void X30NavBridge::receiveLoop() {
         }
     }
 
-    RCLCPP_INFO(this->get_logger(), "接收线程退出 (共接收 %lu 包, %lu 未知指令码)",
+    RCLCPP_DEBUG(this->get_logger(), "接收线程退出 (共接收 %lu 包, %lu 未知指令码)",
                 total_recv_count, unknown_code_count);
 }
 
@@ -1135,13 +1137,13 @@ void X30NavBridge::handleRcsData(const RcsData &data)
     int previous_logged_mode = last_logged_nav_mode_.exchange(mode_value);
     if (previous_logged_mode >= 0 && previous_logged_mode != mode_value)
     {
-        RCLCPP_INFO(this->get_logger(), "🔄 控制模式: %s → %s", previous_logged_mode ? "非手动" : "手动", is_nav_mode ? "非手动" : "手动");
+        RCLCPP_DEBUG(this->get_logger(), "🔄 控制模式: %s → %s", previous_logged_mode ? "非手动" : "手动", is_nav_mode ? "非手动" : "手动");
     }
 
     // 首次收到 RcsData 时打印机器人名称
     if (state_store_.markRcsReceived()) {
-        RCLCPP_INFO(this->get_logger(), "🐕 机器人名称: %.*s", 15, data.robot_name);
-        RCLCPP_INFO(this->get_logger(), "   控制模式: %s, 累计里程: %.1f m, 累计运行: %ld s",
+        RCLCPP_DEBUG(this->get_logger(), "🐕 机器人名称: %.*s", 15, data.robot_name);
+        RCLCPP_DEBUG(this->get_logger(), "   控制模式: %s, 累计里程: %.1f m, 累计运行: %ld s",
                     data.rcs_state_list.is_nav_mode ? "非手动" : "手动", data.total_mileage / 100.0, data.total_run_time);
     }
 
@@ -1226,11 +1228,11 @@ void X30NavBridge::handleMotionState(const MotionStateData &data) {
 
     // 状态变化时打印日志
     if (data.basic_state != transition.previous_basic_state) {
-        RCLCPP_INFO(this->get_logger(), "🔄 基本状态: %s → %s", basicStateToStr(transition.previous_basic_state),
+        RCLCPP_DEBUG(this->get_logger(), "🔄 基本状态: %s → %s", basicStateToStr(transition.previous_basic_state),
                     basicStateToStr(data.basic_state));
     }
     if (data.gait_state != transition.previous_gait_state) {
-        RCLCPP_INFO(this->get_logger(), "🔄 步态: %s → %s", gaitStateToStr(transition.previous_gait_state),
+        RCLCPP_DEBUG(this->get_logger(), "🔄 步态: %s → %s", gaitStateToStr(transition.previous_gait_state),
                     gaitStateToStr(data.gait_state));
     }
 
@@ -1314,13 +1316,13 @@ void X30NavBridge::handleMotionState(const MotionStateData &data) {
     }
 
     // 周期性诊断日志 (每10秒)
-    RCLCPP_INFO_THROTTLE(this->get_logger(), *this->get_clock(), 10000,
-                         "📊 状态=%s 步态=%s | 位置=(%.2f, %.2f) yaw=%.1f° | 速度=(%.2f, %.2f) "
-                         "vyaw=%.2f | 里程=%.1fm",
-                         basicStateToStr(data.basic_state), gaitStateToStr(data.gait_state),
-                         data.leg_odom_pos[0], data.leg_odom_pos[1],
-                         data.leg_odom_pos[2] * 180.0 / M_PI, data.leg_odom_vel[0],
-                         data.leg_odom_vel[1], data.leg_odom_vel[2], data.robot_distance / 100.0);
+    RCLCPP_DEBUG_THROTTLE(this->get_logger(), *this->get_clock(), 10000,
+                          "📊 状态=%s 步态=%s | 位置=(%.2f, %.2f) yaw=%.1f° | 速度=(%.2f, %.2f) "
+                          "vyaw=%.2f | 里程=%.1fm",
+                          basicStateToStr(data.basic_state), gaitStateToStr(data.gait_state),
+                          data.leg_odom_pos[0], data.leg_odom_pos[1],
+                          data.leg_odom_pos[2] * 180.0 / M_PI, data.leg_odom_vel[0],
+                          data.leg_odom_vel[1], data.leg_odom_vel[2], data.robot_distance / 100.0);
 }
 
 void X30NavBridge::handleBodyHeightState(int32_t body_height_state)
@@ -1330,7 +1332,7 @@ void X30NavBridge::handleBodyHeightState(int32_t body_height_state)
 
     if (height_state != transition.previous_body_height_state)
     {
-        RCLCPP_INFO(this->get_logger(), "🔄 身体高度: %s → %s",
+        RCLCPP_DEBUG(this->get_logger(), "🔄 身体高度: %s → %s",
                     bodyHeightStateToStr(transition.previous_body_height_state), bodyHeightStateToStr(height_state));
     }
 
@@ -1411,8 +1413,8 @@ void X30NavBridge::handleBattery(const BatterySensorData &data) {
     battery_text_msg.text = "电量：" + std::to_string(data.battery_level) + "%";
     battery_text_pub_->publish(battery_text_msg);
 
-    RCLCPP_INFO_THROTTLE(this->get_logger(), *this->get_clock(), 30000, "🔋 电池: %d%%, 电压: %dV",
-                         data.battery_level, data.voltage);
+    RCLCPP_DEBUG_THROTTLE(this->get_logger(), *this->get_clock(), 30000, "🔋 电池: %d%%, 电压: %dV",
+                          data.battery_level, data.voltage);
 }
 
 // ============================================================================
@@ -1433,6 +1435,9 @@ void X30NavBridge::handleStandRequest(
         return action_result; });
     res->success = result.success;
     res->message = result.message;
+    if (result.success) {
+        RCLCPP_INFO(this->get_logger(), "Stand 完成: 机器人已进入可导航状态");
+    }
 }
 
 void X30NavBridge::handleLieRequest(
@@ -1443,12 +1448,15 @@ void X30NavBridge::handleLieRequest(
     });
     res->success = result.success;
     res->message = result.message;
+    if (result.success) {
+        RCLCPP_INFO(this->get_logger(), "Lie 完成: 机器人已趴下");
+    }
 }
 
 void X30NavBridge::handleReleaseControlRequest(
     const std::shared_ptr<std_srvs::srv::Trigger::Request> /*req*/,
     std::shared_ptr<std_srvs::srv::Trigger::Response> res) {
-    RCLCPP_INFO(this->get_logger(), "🛑 收到 release_control 请求，准备释放控制权");
+    RCLCPP_DEBUG(this->get_logger(), "🛑 收到 release_control 请求，准备释放控制权");
     bool released = releaseControlOwnership();
     sendVelocityCommand(0.0, 0.0, 0.0);
     if (released) {
@@ -1456,7 +1464,7 @@ void X30NavBridge::handleReleaseControlRequest(
         res->success = true;
         res->message = "Control released and heartbeat stopped.";
     } else {
-        RCLCPP_INFO(this->get_logger(), "🛑 当前本就未持有可释放的控制会话");
+        RCLCPP_DEBUG(this->get_logger(), "🛑 当前本就未持有可释放的控制会话");
         res->success = true;
         res->message = "No active control session to release.";
     }
@@ -1546,6 +1554,9 @@ void X30NavBridge::handleSetGaitRequest(
             });
             result.successful = action_result.success;
             result.reason     = action_result.message;
+            if (action_result.success) {
+                RCLCPP_INFO(this->get_logger(), "步态切换完成: %s", action_result.message.c_str());
+            }
         }
 
         res->results.push_back(result);
@@ -1638,6 +1649,9 @@ void X30NavBridge::handleSetBodyHeightRequest(
                                                   { return setBodyHeight(target_value); });
             result.successful = action_result.success;
             result.reason = action_result.message;
+            if (action_result.success) {
+                RCLCPP_INFO(this->get_logger(), "身体高度切换完成: %s", action_result.message.c_str());
+            }
         }
 
         res->results.push_back(result);
@@ -1770,14 +1784,14 @@ X30NavBridge::ChargeCommandResult X30NavBridge::executeChargeCommand(uint8_t com
 
     const bool should_wait_until_target = command == kChargeCommandStart || command == kChargeCommandStop;
 
-    RCLCPP_INFO(this->get_logger(), "⚡ 收到充电服务请求 command=%u", static_cast<unsigned int>(command));
+    RCLCPP_DEBUG(this->get_logger(), "⚡ 收到充电服务请求 command=%u", static_cast<unsigned int>(command));
 
     if (command == kChargeCommandStart)
     {
         auto snapshot = state_store_.snapshot();
         if (snapshot.basic_state == static_cast<uint8_t>(BasicState::RL_MODE))
         {
-            RCLCPP_INFO(this->get_logger(), "⚡ START前检测到RL_MODE，先自动切换到可充电状态");
+            RCLCPP_DEBUG(this->get_logger(), "⚡ START前检测到RL_MODE，先自动切换到可充电状态");
             auto exit_result = executeActionWithCmdVelSuppressed("charge_prepare_exit_rl", [this](){ return action_executor_->forceStand(); });
             if (!exit_result.success)
             {
@@ -1797,7 +1811,7 @@ X30NavBridge::ChargeCommandResult X30NavBridge::executeChargeCommand(uint8_t com
             result.message = "Failed to switch velocity source to navigation before charge START.";
             return result;
         }
-        RCLCPP_INFO(this->get_logger(), "⚡ START前已切换速度源到导航模式");
+        RCLCPP_DEBUG(this->get_logger(), "⚡ START前已切换速度源到导航模式");
         std::this_thread::sleep_for(std::chrono::milliseconds(kChargePrepSettleMs));
     }
 
@@ -1808,7 +1822,7 @@ X30NavBridge::ChargeCommandResult X30NavBridge::executeChargeCommand(uint8_t com
         before_seq = charge_response_seq_;
     }
 
-    RCLCPP_INFO(this->get_logger(), "⚡ 发送充电命令 command=%u code=0x%08X value=%d", static_cast<unsigned int>(command), cmd_code, cmd_value);
+    RCLCPP_DEBUG(this->get_logger(), "⚡ 发送充电命令 command=%u code=0x%08X value=%d", static_cast<unsigned int>(command), cmd_code, cmd_value);
     if (!sendChargeCommand(cmd_code, cmd_value))
     {
         result.success = false;
