@@ -14,6 +14,7 @@
 #include <rcl_interfaces/srv/set_parameters.hpp>
 #include <rviz_2d_overlay_msgs/msg/overlay_text.hpp>
 #include <sensor_msgs/msg/imu.hpp>
+#include <std_msgs/msg/float32.hpp>
 #include <std_msgs/msg/int32.hpp>
 #include <std_msgs/msg/u_int8.hpp>
 #include <std_srvs/srv/trigger.hpp>
@@ -77,7 +78,10 @@ protected:
     rclcpp::Publisher<std_msgs::msg::Int32>::SharedPtr gait_state_pub_;
     rclcpp::Publisher<std_msgs::msg::Int32>::SharedPtr body_height_state_pub_;
     rclcpp::Publisher<std_msgs::msg::Int32>::SharedPtr charge_state_pub_;
+    rclcpp::Publisher<std_msgs::msg::Float32>::SharedPtr robot_sum_odom_pub_;
+    rclcpp::Publisher<std_msgs::msg::Float32>::SharedPtr robot_speed_pub_;
     rclcpp::Publisher<std_msgs::msg::UInt8>::SharedPtr battery_level_pub_;
+    rclcpp::Publisher<std_msgs::msg::Int32>::SharedPtr battery_cycles_pub_;
     rclcpp::Publisher<rviz_2d_overlay_msgs::msg::OverlayText>::SharedPtr battery_text_pub_;
 
     // ===================== ROS2 服务接口 =====================

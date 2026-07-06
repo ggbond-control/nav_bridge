@@ -295,6 +295,7 @@ ros2 service call /nav_bridge_node/set_body_height rcl_interfaces/srv/SetParamet
   - 机器人运行状态
   - 用于日志打印和错误告警
   - 首次收到时打印机器人名称、控制模式、累计里程与运行时间
+  - 发布累计里程 `/robot_sum_odom`，单位 km
 
 - **`0x1009 MotionStateData`**
   - 当前最关键的状态反馈
@@ -302,6 +303,7 @@ ros2 service call /nav_bridge_node/set_body_height rcl_interfaces/srv/SetParamet
   - 更新内部 `RobotState`
   - 发布 `/robot_basic_state` 与 `/robot_gait_state`
   - 发布 `/leg_odom`
+  - 发布前向移动速度 `/robot_speed`，单位 m/s
   - 可选发布 `odom -> base_link` TF
 
 - **`0x11050F08 BodyHeightState`**
@@ -316,6 +318,7 @@ ros2 service call /nav_bridge_node/set_body_height rcl_interfaces/srv/SetParamet
 
 - **`0x21050F0A BatterySensorData`**
   - 发布电池电量百分比 `/battery/level`
+  - 发布电池循环次数 `/battery/cycles`
 
 ## 6. ROS2 接口
 
@@ -331,7 +334,10 @@ ros2 service call /nav_bridge_node/set_body_height rcl_interfaces/srv/SetParamet
 - `/robot_basic_state` (`std_msgs/msg/Int32`)
 - `/robot_gait_state` (`std_msgs/msg/Int32`)
 - `/robot_body_height_state` (`std_msgs/msg/Int32`)
+- `/robot_sum_odom` (`std_msgs/msg/Float32`)
+- `/robot_speed` (`std_msgs/msg/Float32`)
 - `/battery/level` (`std_msgs/msg/UInt8`)
+- `/battery/cycles` (`std_msgs/msg/Int32`)
 
 ### 6.3 提供的服务
 
@@ -534,7 +540,10 @@ stateDiagram-v2
 | `/robot_basic_state` | `std_msgs/msg/Int32` | 基本状态码 |
 | `/robot_gait_state` | `std_msgs/msg/Int32` | 步态状态码 |
 | `/robot_body_height_state` | `std_msgs/msg/Int32` | 机体高度状态码（`-1=CRAWL`, `0=NORMAL`） |
+| `/robot_sum_odom` | `std_msgs/msg/Float32` | 累计里程，单位 km |
+| `/robot_speed` | `std_msgs/msg/Float32` | 机器人前向移动速度，单位 m/s |
 | `/battery/level` | `std_msgs/msg/UInt8` | 电池百分比 |
+| `/battery/cycles` | `std_msgs/msg/Int32` | 电池当前循环次数 |
 
 ### 14.4 状态码对照
 

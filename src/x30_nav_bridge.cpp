@@ -181,7 +181,10 @@ bool X30NavBridge::initialize() {
     gait_state_pub_    = this->create_publisher<std_msgs::msg::Int32>("/robot_gait_state", 10);
     body_height_state_pub_ = this->create_publisher<std_msgs::msg::Int32>("/robot_body_height_state", 10);
     charge_state_pub_  = this->create_publisher<std_msgs::msg::Int32>("/charge_manager_state", 10);
+    robot_sum_odom_pub_ = this->create_publisher<std_msgs::msg::Float32>("/robot_sum_odom", 10);
+    robot_speed_pub_ = this->create_publisher<std_msgs::msg::Float32>("/robot_speed", 10);
     battery_level_pub_ = this->create_publisher<std_msgs::msg::UInt8>("/battery/level", 10);
+    battery_cycles_pub_ = this->create_publisher<std_msgs::msg::Int32>("/battery/cycles", 10);
     battery_text_pub_ = this->create_publisher<rviz_2d_overlay_msgs::msg::OverlayText>("/battery_text", 10);
 
     if (publish_tf_) {
@@ -1163,6 +1166,10 @@ void X30NavBridge::handleRcsData(const RcsData &data)
         RCLCPP_DEBUG(this->get_logger(), "🔄 控制模式: %s → %s", previous_logged_mode ? "非手动" : "手动", is_nav_mode ? "非手动" : "手动");
     }
 
+    auto sum_odom_msg = std_msgs::msg::Float32();
+    sum_odom_msg.data = static_cast<float>(data.total_mileage) / 100000.0f;
+    robot_sum_odom_pub_->publish(sum_odom_msg);
+
     // 首次收到 RcsData 时打印机器人名称
     if (state_store_.markRcsReceived()) {
         RCLCPP_DEBUG(this->get_logger(), "🐕 机器人名称: %.*s", 15, data.robot_name);
@@ -1327,6 +1334,10 @@ void X30NavBridge::handleMotionState(const MotionStateData &data) {
 
     odom_pub_->publish(odom_msg);
 
+    auto speed_msg = std_msgs::msg::Float32();
+    speed_msg.data = data.leg_odom_vel[0];
+    robot_speed_pub_->publish(speed_msg);
+
     // 发布 TF: odom → base_link
     if (publish_tf_ && tf_broadcaster_) {
         geometry_msgs::msg::TransformStamped tf;
@@ -1415,6 +1426,10 @@ void X30NavBridge::handleBattery(const BatterySensorData &data) {
     auto msg = std_msgs::msg::UInt8();
     msg.data = data.battery_level;
     battery_level_pub_->publish(msg);
+
+    auto cycles_msg = std_msgs::msg::Int32();
+    cycles_msg.data = data.cycles;
+    battery_cycles_pub_->publish(cycles_msg);
 
     auto battery_text_msg = rviz_2d_overlay_msgs::msg::OverlayText();
     battery_text_msg.action = 0;
