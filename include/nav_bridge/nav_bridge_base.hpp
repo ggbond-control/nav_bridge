@@ -9,6 +9,8 @@
 #include <chrono>
 #include <functional>
 #include <geometry_msgs/msg/twist.hpp>
+#include <diagnostic_msgs/msg/diagnostic_array.hpp>
+#include <diagnostic_msgs/msg/diagnostic_status.hpp>
 #include <nav_msgs/msg/odometry.hpp>
 #include <rclcpp/rclcpp.hpp>
 #include <rcl_interfaces/srv/set_parameters.hpp>
@@ -83,6 +85,7 @@ protected:
     rclcpp::Publisher<std_msgs::msg::UInt8>::SharedPtr battery_level_pub_;
     rclcpp::Publisher<std_msgs::msg::Int32>::SharedPtr battery_cycles_pub_;
     rclcpp::Publisher<rviz_2d_overlay_msgs::msg::OverlayText>::SharedPtr battery_text_pub_;
+    rclcpp::Publisher<diagnostic_msgs::msg::DiagnosticArray>::SharedPtr ros_heartbeat_pub_;
 
     // ===================== ROS2 服务接口 =====================
     // -- 服务端 --
@@ -120,6 +123,7 @@ protected:
     // ===================== 定时器 =====================
     rclcpp::TimerBase::SharedPtr receive_timer_;
     rclcpp::TimerBase::SharedPtr cmd_vel_timer_;  ///< 轴指令定频发送
+    rclcpp::TimerBase::SharedPtr ros_heartbeat_timer_;
 
     // ===================== 状态 =====================
     std::atomic<RobotState> robot_state_{RobotState::DISCONNECTED};
@@ -127,6 +131,7 @@ protected:
     // ===================== cmd_vel 回调 =====================
     void cmdVelCallback(const geometry_msgs::msg::Twist::SharedPtr msg);
     virtual void onControlInputUpdated() {}
+    void publishRosHeartbeat();
 
     // 缓存最新的速度指令
     std::atomic<double> target_vx_{0.0};
@@ -142,6 +147,8 @@ protected:
     std::string odom_frame_id_{"odom"};
     std::string base_frame_id_{"base_link"};
     bool publish_tf_{true};
+    std::string ros_heartbeat_topic_{"/inspection_task_hub/heartbeat/nav_bridge"};
+    double ros_heartbeat_rate_hz_{1.0};
 };
 
 }  // namespace nav_bridge

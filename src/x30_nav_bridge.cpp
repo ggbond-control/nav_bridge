@@ -105,6 +105,8 @@ X30NavBridge::X30NavBridge(const rclcpp::NodeOptions &options)
     this->declare_parameter("odom_frame_id", std::string("odom"));
     this->declare_parameter("base_frame_id", std::string("base_link"));
     this->declare_parameter("publish_tf", true);
+    this->declare_parameter("ros_heartbeat_topic", std::string("/inspection_task_hub/heartbeat/nav_bridge"));
+    this->declare_parameter("ros_heartbeat_rate_hz", 1.0);
 
     // 读取参数
     motion_host_ip_        = this->get_parameter("motion_host_ip").as_string();
@@ -126,6 +128,8 @@ X30NavBridge::X30NavBridge(const rclcpp::NodeOptions &options)
     odom_frame_id_         = this->get_parameter("odom_frame_id").as_string();
     base_frame_id_         = this->get_parameter("base_frame_id").as_string();
     publish_tf_            = this->get_parameter("publish_tf").as_bool();
+    ros_heartbeat_topic_   = this->get_parameter("ros_heartbeat_topic").as_string();
+    ros_heartbeat_rate_hz_ = this->get_parameter("ros_heartbeat_rate_hz").as_double();
 
 }
 
@@ -186,6 +190,17 @@ bool X30NavBridge::initialize() {
     battery_level_pub_ = this->create_publisher<std_msgs::msg::UInt8>("/battery/level", 10);
     battery_cycles_pub_ = this->create_publisher<std_msgs::msg::Int32>("/battery/cycles", 10);
     battery_text_pub_ = this->create_publisher<rviz_2d_overlay_msgs::msg::OverlayText>("/battery_text", 10);
+    if (!ros_heartbeat_topic_.empty() && ros_heartbeat_rate_hz_ > 0.0) {
+        ros_heartbeat_pub_ = this->create_publisher<diagnostic_msgs::msg::DiagnosticArray>(
+            ros_heartbeat_topic_, 10);
+        const auto heartbeat_period = std::chrono::duration<double>(1.0 / ros_heartbeat_rate_hz_);
+        const auto heartbeat_period_ms = std::max(
+            std::chrono::milliseconds(1),
+            std::chrono::duration_cast<std::chrono::milliseconds>(heartbeat_period));
+        ros_heartbeat_timer_ = this->create_wall_timer(
+            heartbeat_period_ms,
+            [this]() { this->publishRosHeartbeat(); });
+    }
 
     if (publish_tf_) {
         tf_broadcaster_ = std::make_unique<tf2_ros::TransformBroadcaster>(*this);
@@ -1972,5 +1987,23 @@ void NavBridgeBase::cmdVelCallback(const geometry_msgs::msg::Twist::SharedPtr ms
 
 NavBridgeBase::NavBridgeBase(const std::string &node_name, const rclcpp::NodeOptions &options)
     : rclcpp::Node(node_name, options) {}
+
+void NavBridgeBase::publishRosHeartbeat() {
+    if (!ros_heartbeat_pub_) {
+        return;
+    }
+
+    diagnostic_msgs::msg::DiagnosticArray msg;
+    msg.header.stamp = this->now();
+
+    diagnostic_msgs::msg::DiagnosticStatus status;
+    status.name = this->get_name();
+    status.hardware_id = "nav_bridge";
+    status.level = diagnostic_msgs::msg::DiagnosticStatus::OK;
+    status.message = "ok";
+    msg.status.push_back(status);
+
+    ros_heartbeat_pub_->publish(msg);
+}
 
 }  // namespace nav_bridge

@@ -11,6 +11,8 @@ nav_bridge_node:
 
     # === 定时器 ===
     heartbeat_interval_ms: 200       # 持有控制权期间的心跳周期 (ms)
+    ros_heartbeat_topic: "/inspection_task_hub/heartbeat/nav_bridge" # ROS侧节点存活心跳
+    ros_heartbeat_rate_hz: 1.0       # ROS侧节点存活心跳频率
     cmd_vel_rate_hz: 50              # 轴指令下发频率 (规格书要求50Hz)
     cmd_vel_timeout_ms: 5000         # /cmd_vel 速度输入保鲜时间, 超时后自动发零速度但不释放控制权 (ms)
     enable_charge_state_query: true      # 是否周期查询并发布/charge_manager_state
