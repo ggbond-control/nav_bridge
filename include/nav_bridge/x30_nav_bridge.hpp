@@ -80,6 +80,7 @@ private:
     std::thread recv_thread_;
     std::thread charge_recv_thread_;
     std::thread charge_query_thread_;
+    std::thread control_heartbeat_thread_;
     std::atomic<bool> running_{false};
     void receiveLoop();
 
@@ -87,6 +88,7 @@ private:
     void applyControlActions(const ControlPulse &actions);
     void acquireControl();
     bool releaseControlOwnership();
+    bool hasActiveControlSession() const;
     void warmupControl(int warmup_ms, int pulse_ms);
     bool isControlInputFresh(std::chrono::steady_clock::time_point now) const;
     ControlPulse evaluateControlPulse(std::chrono::steady_clock::time_point now, bool force_heartbeat);
@@ -125,6 +127,7 @@ private:
     void handleBattery(const x30_protocol::BatterySensorData &data);
 
     // ===================== 定频发送轴指令 =====================
+    void controlHeartbeatLoop();
     void sendCmdVelTick();
 
     // ===================== 参数 =====================

@@ -234,8 +234,10 @@ bool X30NavBridge::initialize() {
         RCLCPP_DEBUG(this->get_logger(), "启动时不自动接管控制权，等待上层显式接管");
     }
 
-    // 3. 启动统一控制定时器 (速度发送 + 心跳 + 超时检测)
+    // 3. 启动控制保活线程和速度定时器。心跳不能依赖 ROS 执行器，
+    // 否则动作服务同步等待状态反馈时会中断控制权保活。
     running_ = true;
+    control_heartbeat_thread_ = std::thread(&X30NavBridge::controlHeartbeatLoop, this);
     int cmd_period_ms = 1000 / cmd_vel_rate_hz_;
     cmd_vel_timer_    = this->create_wall_timer(std::chrono::milliseconds(cmd_period_ms),
                                                 [this]() { this->sendCmdVelTick(); });
@@ -259,6 +261,9 @@ void X30NavBridge::shutdown() {
 
     running_ = false;
     charge_state_cv_.notify_all();
+    if (control_heartbeat_thread_.joinable()) {
+        control_heartbeat_thread_.join();
+    }
     if (recv_thread_.joinable()) {
         recv_thread_.join();
     }
@@ -328,12 +333,22 @@ void X30NavBridge::sendGaitCommand(uint32_t gait_cmd_code) {
 void X30NavBridge::applyControlActions(const ControlPulse &actions) {
     if (actions.send_heartbeat) {
         auto hb = makeSimpleCommand(CMD_HEARTBEAT, 0);
-        motion_udp_.send(&hb, sizeof(hb));
+        if (!motion_udp_.send(&hb, sizeof(hb))) {
+            std::lock_guard<std::mutex> lock(control_mutex_);
+            last_heartbeat_sent_ = std::chrono::steady_clock::time_point::min();
+            RCLCPP_WARN_THROTTLE(this->get_logger(), *this->get_clock(), 5000,
+                                 "控制心跳发送失败");
+        }
     }
 
     if (actions.send_query) {
         auto query = makeSimpleCommand(CMD_QUERY_103, 0);
-        motion_udp_.send(&query, sizeof(query));
+        if (!motion_udp_.send(&query, sizeof(query))) {
+            std::lock_guard<std::mutex> lock(control_mutex_);
+            control_query_sent_ = false;
+            RCLCPP_WARN(this->get_logger(), "控制会话查询发送失败");
+            return;
+        }
         RCLCPP_DEBUG(this->get_logger(), "心跳已启动, 并已发送连接确认查询(0x21020001)");
     }
 
@@ -355,6 +370,11 @@ bool X30NavBridge::releaseControlOwnership() {
     control_query_sent_       = false;
     last_heartbeat_sent_      = std::chrono::steady_clock::time_point::min();
     return had_control;
+}
+
+bool X30NavBridge::hasActiveControlSession() const {
+    std::lock_guard<std::mutex> lock(control_mutex_);
+    return control_latched_ && control_session_started_;
 }
 
 void X30NavBridge::warmupControl(int warmup_ms, int pulse_ms) {
@@ -1014,18 +1034,7 @@ void X30NavBridge::sendCmdVelTick() {
         }
     }
 
-    ControlPulse actions = evaluateControlPulse(now, false);
-    applyControlActions(actions);
-    if (!actions.active) {
-        return;
-    }
-
-    if (actions.session_started) {
-        RCLCPP_DEBUG(this->get_logger(), "🤖 控制会话激活, 执行控制权获取...");
-        RCLCPP_DEBUG(this->get_logger(), "🤖 控制权获取完成, 开始自主控制");
-    }
-
-    if (!isCmdVelForwardingAllowed()) {
+    if (!hasActiveControlSession() || !isCmdVelForwardingAllowed()) {
         auto snapshot = state_store_.snapshot();
         RCLCPP_DEBUG_THROTTLE(this->get_logger(), *this->get_clock(), 2000,
                               "⏸️ 当前状态(basic=%u, gait=%u)不允许转发 /cmd_vel UDP 轴指令",
@@ -1042,6 +1051,25 @@ void X30NavBridge::sendCmdVelTick() {
         vyaw = target_vyaw_.load();
     }
     sendVelocityCommand(vx, vy, vyaw);
+}
+
+void X30NavBridge::controlHeartbeatLoop() {
+    // Poll more often than the configured heartbeat period so due heartbeats are
+    // sent promptly, while evaluateControlPulse enforces the actual interval.
+    const int poll_ms = std::max(10, std::min(100, heartbeat_interval_ms_ / 2));
+    const auto poll_interval = std::chrono::milliseconds(poll_ms);
+
+    while (running_) {
+        const auto actions = evaluateControlPulse(std::chrono::steady_clock::now(), false);
+        applyControlActions(actions);
+
+        if (actions.session_started) {
+            RCLCPP_DEBUG(this->get_logger(), "🤖 控制会话激活, 执行控制权获取...");
+            RCLCPP_DEBUG(this->get_logger(), "🤖 控制权获取完成, 开始自主控制");
+        }
+
+        std::this_thread::sleep_for(poll_interval);
+    }
 }
 
 // ============================================================================
@@ -1187,8 +1215,8 @@ void X30NavBridge::handleRcsData(const RcsData &data)
 
     // 首次收到 RcsData 时打印机器人名称
     if (state_store_.markRcsReceived()) {
-        RCLCPP_DEBUG(this->get_logger(), "🐕 机器人名称: %.*s", 15, data.robot_name);
-        RCLCPP_DEBUG(this->get_logger(), "   控制模式: %s, 累计里程: %.1f m, 累计运行: %ld s",
+        RCLCPP_INFO(this->get_logger(), "🐕 机器人名称: %.*s", 15, data.robot_name);
+        RCLCPP_INFO(this->get_logger(), "   控制模式: %s, 累计里程: %.1f m, 累计运行: %ld s",
                     data.rcs_state_list.is_nav_mode ? "非手动" : "手动", data.total_mileage / 100.0, data.total_run_time);
     }
 
@@ -1199,7 +1227,7 @@ void X30NavBridge::handleRcsData(const RcsData &data)
                                  "⚠️ 电池低电量警告!");
         }
         if (data.error_state_bit.imu_error) {
-            RCLCPP_ERROR_THROTTLE(this->get_logger(), *this->get_clock(), 5000, "❌ IMU 更新超时!");
+            RCLCPP_ERROR_THROTTLE(this->get_logger(), *this->get_clock(), 60000, "❌ IMU 更新超时!");
         }
         if (data.error_state_bit.driver_error) {
             RCLCPP_ERROR_THROTTLE(this->get_logger(), *this->get_clock(), 5000, "❌ 驱动器故障!");
