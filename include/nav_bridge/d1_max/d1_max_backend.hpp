@@ -1,0 +1,67 @@
+#pragma once
+
+#include <memory>
+#include <mutex>
+#include <string>
+#include <system_error>
+
+#include "nav_bridge/robot_backend.hpp"
+
+namespace robot_sdk {
+class SDKClient;
+class IDataCallback;
+class IControlCallback;
+}  // namespace robot_sdk
+
+namespace nav_bridge {
+
+class D1MaxBackend final : public RobotBackend {
+public:
+    D1MaxBackend(std::string host_ip, int host_port, bool auto_reconnect,
+                 int connect_timeout_ms, int reconnect_interval_ms);
+    ~D1MaxBackend() override;
+
+    BackendResult connect() override;
+    BackendResult disconnect() override;
+    BackendResult takeControl() override;
+    BackendResult releaseControl() override;
+    BackendResult move(double vx, double vy, double vyaw) override;
+    BackendResult stand() override;
+    BackendResult lie() override;
+    BackendResult softEstop(bool enabled) override;
+    BackendResult setMode(int mode) override;
+    BackendResult setSpeed(int speed_level) override;
+    BackendState state() const override;
+    void setStateCallback(StateCallback callback) override;
+    void setImuCallback(ImuCallback callback) override;
+    void setOdometryCallback(OdometryCallback callback) override;
+    void setJointCallback(JointCallback callback) override;
+    void setFaultCallback(FaultCallback callback) override;
+
+private:
+    class DataCallback;
+    class ControlCallback;
+
+    BackendResult fromError(const std::error_code &ec) const;
+    void updateState(const BackendState &state);
+
+    std::string host_ip_;
+    int host_port_{8082};
+    bool auto_reconnect_{true};
+    int connect_timeout_ms_{5000};
+    int reconnect_interval_ms_{2000};
+
+    std::unique_ptr<robot_sdk::SDKClient> client_;
+    std::shared_ptr<DataCallback> data_callback_;
+    std::shared_ptr<ControlCallback> control_callback_;
+
+    mutable std::mutex mutex_;
+    BackendState state_;
+    StateCallback state_callback_;
+    ImuCallback imu_callback_;
+    OdometryCallback odom_callback_;
+    JointCallback joint_callback_;
+    FaultCallback fault_callback_;
+};
+
+}  // namespace nav_bridge

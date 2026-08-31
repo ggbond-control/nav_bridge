@@ -1,0 +1,9 @@
+d1_max_nav_bridge_node:
+  ros__parameters:
+    d1_host_ip: "192.168.234.1"
+    d1_host_port: 8082
+    auto_reconnect: true
+    connect_timeout_ms: 5000
+    reconnect_interval_ms: 2000
+    cmd_vel_rate_hz: 50
+    cmd_vel_timeout_ms: 500

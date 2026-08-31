@@ -1,0 +1,3 @@
+# Select the robot implementation used by nav_bridge.launch.py.
+# Supported values: x30, d1_max
+robot_type: x30

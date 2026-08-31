@@ -397,7 +397,7 @@ nav_bridge/
 ├── config/
 │   └── x30_params.yaml                    # 默认运行参数
 ├── launch/
-│   └── nav_bridge.launch.py               # 启动 nav_bridge_node 并加载参数
+│   └── nav_bridge.launch.py               # 按 YAML 选择并启动 X30/D1 节点
 ├── srv/
 ├── include/nav_bridge/
 │   ├── action_executor.hpp                # 动作执行器接口，封装 stand/lie 业务流程
@@ -408,7 +408,7 @@ nav_bridge/
 │   └── x30_protocol.hpp                   # X30 协议常量、状态枚举、报文结构与工具函数
 └── src/
     ├── action_executor.cpp                # 动作执行器实现
-    ├── nav_bridge_node.cpp                # ROS2 节点入口
+    ├── x30_nav_bridge_node.cpp            # X30 ROS2 节点入口
     ├── udp_transport.cpp                  # UDP 传输封装实现
     └── x30_nav_bridge.cpp                 # X30 桥接节点主实现
 ```

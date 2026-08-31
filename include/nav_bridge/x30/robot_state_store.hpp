@@ -11,7 +11,7 @@
 #include <mutex>
 #include <vector>
 
-#include "nav_bridge/x30_protocol.hpp"
+#include "nav_bridge/x30/x30_protocol.hpp"
 
 namespace nav_bridge {
 

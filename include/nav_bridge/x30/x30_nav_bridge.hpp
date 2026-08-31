@@ -12,25 +12,46 @@
 #include <string>
 #include <thread>
 #include <vector>
+#include <utility>
 
-#include "nav_bridge/action_executor.hpp"
-#include "nav_bridge/nav_bridge_base.hpp"
-#include "nav_bridge/robot_state_store.hpp"
-#include "nav_bridge/udp_transport.hpp"
-#include "nav_bridge/x30_protocol.hpp"
+#include "nav_bridge/x30/action_executor.hpp"
+#include "nav_bridge/x30/nav_bridge_base.hpp"
+#include "nav_bridge/robot_backend.hpp"
+#include "nav_bridge/x30/robot_state_store.hpp"
+#include "nav_bridge/x30/udp_transport.hpp"
+#include "nav_bridge/x30/x30_protocol.hpp"
 #include <rcl_interfaces/msg/parameter.hpp>
 #include <rcl_interfaces/msg/parameter_type.hpp>
 #include <rcl_interfaces/srv/set_parameters.hpp>
 
 namespace nav_bridge {
 
-class X30NavBridge : public NavBridgeBase {
+class X30NavBridge : public NavBridgeBase, public RobotBackend {
 public:
     explicit X30NavBridge(const rclcpp::NodeOptions &options = rclcpp::NodeOptions());
     ~X30NavBridge() override;
 
     bool initialize() override;
     void shutdown() override;
+
+    // RobotBackend compatibility surface. The existing ROS handlers remain
+    // available while X30-specific internals are migrated behind this API.
+    BackendResult connect() override;
+    BackendResult disconnect() override;
+    BackendResult takeControl() override;
+    BackendResult releaseControl() override;
+    BackendResult move(double vx, double vy, double vyaw) override;
+    BackendResult stand() override;
+    BackendResult lie() override;
+    BackendResult softEstop(bool enabled) override;
+    BackendResult setMode(int mode) override { return {false, "X30 mode API is not mapped."}; }
+    BackendResult setSpeed(int speed_level) override { return {false, "X30 speed-level API is not mapped."}; }
+    BackendState state() const override;
+    void setStateCallback(StateCallback callback) override;
+    void setImuCallback(ImuCallback callback) override { imu_callback_ = std::move(callback); }
+    void setOdometryCallback(OdometryCallback callback) override { odom_callback_ = std::move(callback); }
+    void setJointCallback(JointCallback callback) override { joint_callback_ = std::move(callback); }
+    void setFaultCallback(FaultCallback callback) override { fault_callback_ = std::move(callback); }
 
 protected:
     void sendVelocityCommand(double vx, double vy, double vyaw) override;
@@ -80,7 +101,6 @@ private:
     std::thread recv_thread_;
     std::thread charge_recv_thread_;
     std::thread charge_query_thread_;
-    std::thread control_heartbeat_thread_;
     std::atomic<bool> running_{false};
     void receiveLoop();
 
@@ -88,7 +108,6 @@ private:
     void applyControlActions(const ControlPulse &actions);
     void acquireControl();
     bool releaseControlOwnership();
-    bool hasActiveControlSession() const;
     void warmupControl(int warmup_ms, int pulse_ms);
     bool isControlInputFresh(std::chrono::steady_clock::time_point now) const;
     ControlPulse evaluateControlPulse(std::chrono::steady_clock::time_point now, bool force_heartbeat);
@@ -127,7 +146,6 @@ private:
     void handleBattery(const x30_protocol::BatterySensorData &data);
 
     // ===================== 定频发送轴指令 =====================
-    void controlHeartbeatLoop();
     void sendCmdVelTick();
 
     // ===================== 参数 =====================
@@ -166,6 +184,11 @@ private:
     // ===================== 业务模块 =====================
     RobotStateStore state_store_;
     std::unique_ptr<ActionExecutor> action_executor_;
+    StateCallback backend_state_callback_;
+    ImuCallback imu_callback_;
+    OdometryCallback odom_callback_;
+    JointCallback joint_callback_;
+    FaultCallback fault_callback_;
 };
 
 }  // namespace nav_bridge

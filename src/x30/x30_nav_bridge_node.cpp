@@ -1,11 +1,11 @@
-/// @file nav_bridge_node.cpp
+/// @file x30_nav_bridge_node.cpp
 /// @brief Nav Bridge 节点入口
 
 #include <csignal>
 #include <memory>
 #include <rclcpp/rclcpp.hpp>
 
-#include "nav_bridge/x30_nav_bridge.hpp"
+#include "nav_bridge/x30/x30_nav_bridge.hpp"
 
 std::shared_ptr<nav_bridge::X30NavBridge> g_node = nullptr;
 

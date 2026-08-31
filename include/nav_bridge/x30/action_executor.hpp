@@ -10,8 +10,8 @@
 
 #include <rclcpp/rclcpp.hpp>
 
-#include "nav_bridge/robot_state_store.hpp"
-#include "nav_bridge/x30_protocol.hpp"
+#include "nav_bridge/x30/robot_state_store.hpp"
+#include "nav_bridge/x30/x30_protocol.hpp"
 
 namespace nav_bridge {
 
@@ -42,7 +42,6 @@ private:
     bool sendSingleCommandAndWait(uint32_t command,
                                   const std::vector<x30_protocol::BasicState> &targets,
                                   int timeout_ms, const char *phase_name, int warmup_ms);
-    bool recoverSoftEstopToLyingDown();
     bool waitForBasicState(const std::vector<x30_protocol::BasicState> &targets, int timeout_ms);
     bool waitForGaitState(const std::vector<x30_protocol::GaitState> &targets, int timeout_ms);
 

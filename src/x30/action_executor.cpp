@@ -1,7 +1,7 @@
 /// @file action_executor.cpp
 /// @brief 动作执行器实现
 
-#include "nav_bridge/action_executor.hpp"
+#include "nav_bridge/x30/action_executor.hpp"
 
 #include <algorithm>
 #include <thread>
@@ -15,7 +15,6 @@ namespace {
 constexpr int kControlWarmupMs          = 400;
 constexpr int kControlWarmupPulseMs     = 100;
 constexpr int kSingleCommandTimeoutMs   = 5000;
-constexpr int kSoftEstopRecoveryMaxAttempts = 3;
 constexpr int kGaitSwitchTimeoutMs      = 5000;
 constexpr int kStandTargetGaitTimeoutMs = 12000;
 constexpr int kSteppingEntryTimeoutMs   = 4000;
@@ -106,38 +105,6 @@ bool ActionExecutor::sendSingleCommandAndWait(uint32_t command,
     return false;
 }
 
-bool ActionExecutor::recoverSoftEstopToLyingDown() {
-    for (int attempt = 1; attempt <= kSoftEstopRecoveryMaxAttempts; ++attempt) {
-        ensureControlTakeover(kControlWarmupMs, kControlWarmupPulseMs);
-        command_sender_(CMD_STAND_UP_DOWN);
-
-        if (waitForBasicState({BasicState::LYING_DOWN}, kSingleCommandTimeoutMs)) {
-            return true;
-        }
-
-        const auto state = static_cast<BasicState>(state_store_.basicState());
-        if (state == BasicState::GOING_DOWN) {
-            RCLCPP_DEBUG(logger_,
-                         "软急停恢复指令已使机器人进入趴下中，继续等待最终趴下状态");
-            return waitForBasicState({BasicState::LYING_DOWN}, kSingleCommandTimeoutMs);
-        }
-
-        if (state != BasicState::SOFT_ESTOP) {
-            RCLCPP_WARN(logger_, "软急停恢复后进入非预期状态=%u，不再重发 toggle 指令",
-                        static_cast<uint8_t>(state));
-            return false;
-        }
-
-        if (attempt < kSoftEstopRecoveryMaxAttempts) {
-            RCLCPP_WARN(logger_,
-                        "软急停恢复第 %d 次后 5 秒内仍处于 SOFT_ESTOP，准备重试恢复指令",
-                        attempt);
-        }
-    }
-
-    return false;
-}
-
 bool ActionExecutor::sendToggleCommandWithRetries(uint32_t command,
                                                   const std::vector<BasicState> &targets,
                                                   int overall_timeout_ms,
@@ -194,7 +161,9 @@ ActionResult ActionExecutor::forceStand() {
 
     if (state == static_cast<uint8_t>(BasicState::SOFT_ESTOP)) {
         RCLCPP_DEBUG(logger_, "⚠️ 机器人在软急停状态, 先恢复到贴下...");
-        if (!recoverSoftEstopToLyingDown()) {
+        if (!sendSingleCommandAndWait(CMD_STAND_UP_DOWN, {BasicState::LYING_DOWN},
+                                      kSingleCommandTimeoutMs, "软急停恢复",
+                                      kControlWarmupMs)) {
             RCLCPP_WARN(logger_, "⚠️ 从软急停恢复贴下超时");
             return {false, "Timeout recovering from soft estop to lying down."};
         }
@@ -294,7 +263,9 @@ ActionResult ActionExecutor::lieDown() {
 
     if (state == static_cast<uint8_t>(BasicState::SOFT_ESTOP)) {
         RCLCPP_DEBUG(logger_, "⏳ 从软急停恢复趴下...");
-        bool ok = recoverSoftEstopToLyingDown();
+        bool ok = sendSingleCommandAndWait(CMD_STAND_UP_DOWN, {BasicState::LYING_DOWN},
+                                           kSingleCommandTimeoutMs, "软急停恢复趴下",
+                                           kControlWarmupMs);
         if (ok) {
             RCLCPP_DEBUG(logger_, "✅ 趴下完成");
         } else {
@@ -408,7 +379,9 @@ ActionResult ActionExecutor::stand(int target_gait) {
 
     if (state == static_cast<uint8_t>(BasicState::SOFT_ESTOP)) {
         RCLCPP_DEBUG(logger_, "📌 [0/5] 机器人在软急停状态, 先恢复到贴下...");
-        if (!recoverSoftEstopToLyingDown()) {
+        if (!sendSingleCommandAndWait(CMD_STAND_UP_DOWN, {BasicState::LYING_DOWN},
+                                      kSingleCommandTimeoutMs, "stand: 软急停恢复",
+                                      kControlWarmupMs)) {
             RCLCPP_ERROR(logger_, "❌ Stand 失败: 从软急停恢复超时");
             return {false, "Stand failed: timeout recovering from soft estop."};
         }

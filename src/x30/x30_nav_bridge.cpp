@@ -1,7 +1,7 @@
 /// @file x30_nav_bridge.cpp
 /// @brief 绝影X30导航桥接实现 — UDP模拟手柄轴指令, 接收IMU/里程计/状态数据
 
-#include "nav_bridge/x30_nav_bridge.hpp"
+#include "nav_bridge/x30/x30_nav_bridge.hpp"
 
 #include <tf2/LinearMath/Quaternion.h>
 
@@ -105,8 +105,6 @@ X30NavBridge::X30NavBridge(const rclcpp::NodeOptions &options)
     this->declare_parameter("odom_frame_id", std::string("odom"));
     this->declare_parameter("base_frame_id", std::string("base_link"));
     this->declare_parameter("publish_tf", true);
-    this->declare_parameter("ros_heartbeat_topic", std::string("/inspection_task_hub/heartbeat/nav_bridge"));
-    this->declare_parameter("ros_heartbeat_rate_hz", 1.0);
 
     // 读取参数
     motion_host_ip_        = this->get_parameter("motion_host_ip").as_string();
@@ -128,13 +126,71 @@ X30NavBridge::X30NavBridge(const rclcpp::NodeOptions &options)
     odom_frame_id_         = this->get_parameter("odom_frame_id").as_string();
     base_frame_id_         = this->get_parameter("base_frame_id").as_string();
     publish_tf_            = this->get_parameter("publish_tf").as_bool();
-    ros_heartbeat_topic_   = this->get_parameter("ros_heartbeat_topic").as_string();
-    ros_heartbeat_rate_hz_ = this->get_parameter("ros_heartbeat_rate_hz").as_double();
 
 }
 
 X30NavBridge::~X30NavBridge() {
     shutdown();
+}
+
+BackendResult X30NavBridge::connect() {
+    return initialize() ? BackendResult{true, "X30 backend initialized."}
+                         : BackendResult{false, "Failed to initialize X30 backend."};
+}
+
+BackendResult X30NavBridge::disconnect() {
+    shutdown();
+    return {true, "X30 backend disconnected."};
+}
+
+BackendResult X30NavBridge::takeControl() {
+    acquireControl();
+    return {true, "X30 control ownership latched."};
+}
+
+BackendResult X30NavBridge::releaseControl() {
+    return releaseControlOwnership()
+               ? BackendResult{true, "X30 control ownership released."}
+               : BackendResult{false, "Failed to release X30 control ownership."};
+}
+
+BackendResult X30NavBridge::move(double vx, double vy, double vyaw) {
+    sendVelocityCommand(vx, vy, vyaw);
+    return {true, "X30 velocity command accepted."};
+}
+
+BackendResult X30NavBridge::stand() {
+    if (!action_executor_) return {false, "X30 action executor is not initialized."};
+    const auto result = action_executor_->stand(stand_target_gait_);
+    return {result.success, result.message};
+}
+
+BackendResult X30NavBridge::lie() {
+    if (!action_executor_) return {false, "X30 action executor is not initialized."};
+    const auto result = action_executor_->lieDown();
+    return {result.success, result.message};
+}
+
+BackendResult X30NavBridge::softEstop(bool enabled) {
+    if (!enabled) return {false, "X30 protocol only exposes soft-estop activation."};
+    auto cmd = makeSimpleCommand(CMD_SOFT_ESTOP, 0);
+    return motion_udp_.send(&cmd, sizeof(cmd))
+               ? BackendResult{true, "X30 soft-estop command sent."}
+               : BackendResult{false, "Failed to send X30 soft-estop command."};
+}
+
+BackendState X30NavBridge::state() const {
+    const auto snapshot = state_store_.snapshot();
+    BackendState result;
+    result.connected = snapshot.connected;
+    result.control_owned = control_latched_;
+    result.motion_state = static_cast<BackendMotionState>(robot_state_.load());
+    result.mode = snapshot.gait_state;
+    return result;
+}
+
+void X30NavBridge::setStateCallback(StateCallback callback) {
+    backend_state_callback_ = std::move(callback);
 }
 
 // ============================================================================
@@ -185,22 +241,8 @@ bool X30NavBridge::initialize() {
     gait_state_pub_    = this->create_publisher<std_msgs::msg::Int32>("/robot_gait_state", 10);
     body_height_state_pub_ = this->create_publisher<std_msgs::msg::Int32>("/robot_body_height_state", 10);
     charge_state_pub_  = this->create_publisher<std_msgs::msg::Int32>("/charge_manager_state", 10);
-    robot_sum_odom_pub_ = this->create_publisher<std_msgs::msg::Float32>("/robot_sum_odom", 10);
-    robot_speed_pub_ = this->create_publisher<std_msgs::msg::Float32>("/robot_speed", 10);
     battery_level_pub_ = this->create_publisher<std_msgs::msg::UInt8>("/battery/level", 10);
-    battery_cycles_pub_ = this->create_publisher<std_msgs::msg::Int32>("/battery/cycles", 10);
     battery_text_pub_ = this->create_publisher<rviz_2d_overlay_msgs::msg::OverlayText>("/battery_text", 10);
-    if (!ros_heartbeat_topic_.empty() && ros_heartbeat_rate_hz_ > 0.0) {
-        ros_heartbeat_pub_ = this->create_publisher<diagnostic_msgs::msg::DiagnosticArray>(
-            ros_heartbeat_topic_, 10);
-        const auto heartbeat_period = std::chrono::duration<double>(1.0 / ros_heartbeat_rate_hz_);
-        const auto heartbeat_period_ms = std::max(
-            std::chrono::milliseconds(1),
-            std::chrono::duration_cast<std::chrono::milliseconds>(heartbeat_period));
-        ros_heartbeat_timer_ = this->create_wall_timer(
-            heartbeat_period_ms,
-            [this]() { this->publishRosHeartbeat(); });
-    }
 
     if (publish_tf_) {
         tf_broadcaster_ = std::make_unique<tf2_ros::TransformBroadcaster>(*this);
@@ -234,10 +276,8 @@ bool X30NavBridge::initialize() {
         RCLCPP_DEBUG(this->get_logger(), "启动时不自动接管控制权，等待上层显式接管");
     }
 
-    // 3. 启动控制保活线程和速度定时器。心跳不能依赖 ROS 执行器，
-    // 否则动作服务同步等待状态反馈时会中断控制权保活。
+    // 3. 启动统一控制定时器 (速度发送 + 心跳 + 超时检测)
     running_ = true;
-    control_heartbeat_thread_ = std::thread(&X30NavBridge::controlHeartbeatLoop, this);
     int cmd_period_ms = 1000 / cmd_vel_rate_hz_;
     cmd_vel_timer_    = this->create_wall_timer(std::chrono::milliseconds(cmd_period_ms),
                                                 [this]() { this->sendCmdVelTick(); });
@@ -261,9 +301,6 @@ void X30NavBridge::shutdown() {
 
     running_ = false;
     charge_state_cv_.notify_all();
-    if (control_heartbeat_thread_.joinable()) {
-        control_heartbeat_thread_.join();
-    }
     if (recv_thread_.joinable()) {
         recv_thread_.join();
     }
@@ -333,22 +370,12 @@ void X30NavBridge::sendGaitCommand(uint32_t gait_cmd_code) {
 void X30NavBridge::applyControlActions(const ControlPulse &actions) {
     if (actions.send_heartbeat) {
         auto hb = makeSimpleCommand(CMD_HEARTBEAT, 0);
-        if (!motion_udp_.send(&hb, sizeof(hb))) {
-            std::lock_guard<std::mutex> lock(control_mutex_);
-            last_heartbeat_sent_ = std::chrono::steady_clock::time_point::min();
-            RCLCPP_WARN_THROTTLE(this->get_logger(), *this->get_clock(), 5000,
-                                 "控制心跳发送失败");
-        }
+        motion_udp_.send(&hb, sizeof(hb));
     }
 
     if (actions.send_query) {
         auto query = makeSimpleCommand(CMD_QUERY_103, 0);
-        if (!motion_udp_.send(&query, sizeof(query))) {
-            std::lock_guard<std::mutex> lock(control_mutex_);
-            control_query_sent_ = false;
-            RCLCPP_WARN(this->get_logger(), "控制会话查询发送失败");
-            return;
-        }
+        motion_udp_.send(&query, sizeof(query));
         RCLCPP_DEBUG(this->get_logger(), "心跳已启动, 并已发送连接确认查询(0x21020001)");
     }
 
@@ -370,11 +397,6 @@ bool X30NavBridge::releaseControlOwnership() {
     control_query_sent_       = false;
     last_heartbeat_sent_      = std::chrono::steady_clock::time_point::min();
     return had_control;
-}
-
-bool X30NavBridge::hasActiveControlSession() const {
-    std::lock_guard<std::mutex> lock(control_mutex_);
-    return control_latched_ && control_session_started_;
 }
 
 void X30NavBridge::warmupControl(int warmup_ms, int pulse_ms) {
@@ -1034,7 +1056,18 @@ void X30NavBridge::sendCmdVelTick() {
         }
     }
 
-    if (!hasActiveControlSession() || !isCmdVelForwardingAllowed()) {
+    ControlPulse actions = evaluateControlPulse(now, false);
+    applyControlActions(actions);
+    if (!actions.active) {
+        return;
+    }
+
+    if (actions.session_started) {
+        RCLCPP_DEBUG(this->get_logger(), "🤖 控制会话激活, 执行控制权获取...");
+        RCLCPP_DEBUG(this->get_logger(), "🤖 控制权获取完成, 开始自主控制");
+    }
+
+    if (!isCmdVelForwardingAllowed()) {
         auto snapshot = state_store_.snapshot();
         RCLCPP_DEBUG_THROTTLE(this->get_logger(), *this->get_clock(), 2000,
                               "⏸️ 当前状态(basic=%u, gait=%u)不允许转发 /cmd_vel UDP 轴指令",
@@ -1051,25 +1084,6 @@ void X30NavBridge::sendCmdVelTick() {
         vyaw = target_vyaw_.load();
     }
     sendVelocityCommand(vx, vy, vyaw);
-}
-
-void X30NavBridge::controlHeartbeatLoop() {
-    // Poll more often than the configured heartbeat period so due heartbeats are
-    // sent promptly, while evaluateControlPulse enforces the actual interval.
-    const int poll_ms = std::max(10, std::min(100, heartbeat_interval_ms_ / 2));
-    const auto poll_interval = std::chrono::milliseconds(poll_ms);
-
-    while (running_) {
-        const auto actions = evaluateControlPulse(std::chrono::steady_clock::now(), false);
-        applyControlActions(actions);
-
-        if (actions.session_started) {
-            RCLCPP_DEBUG(this->get_logger(), "🤖 控制会话激活, 执行控制权获取...");
-            RCLCPP_DEBUG(this->get_logger(), "🤖 控制权获取完成, 开始自主控制");
-        }
-
-        std::this_thread::sleep_for(poll_interval);
-    }
 }
 
 // ============================================================================
@@ -1209,14 +1223,10 @@ void X30NavBridge::handleRcsData(const RcsData &data)
         RCLCPP_DEBUG(this->get_logger(), "🔄 控制模式: %s → %s", previous_logged_mode ? "非手动" : "手动", is_nav_mode ? "非手动" : "手动");
     }
 
-    auto sum_odom_msg = std_msgs::msg::Float32();
-    sum_odom_msg.data = static_cast<float>(data.total_mileage) / 100000.0f;
-    robot_sum_odom_pub_->publish(sum_odom_msg);
-
     // 首次收到 RcsData 时打印机器人名称
     if (state_store_.markRcsReceived()) {
-        RCLCPP_INFO(this->get_logger(), "🐕 机器人名称: %.*s", 15, data.robot_name);
-        RCLCPP_INFO(this->get_logger(), "   控制模式: %s, 累计里程: %.1f m, 累计运行: %ld s",
+        RCLCPP_DEBUG(this->get_logger(), "🐕 机器人名称: %.*s", 15, data.robot_name);
+        RCLCPP_DEBUG(this->get_logger(), "   控制模式: %s, 累计里程: %.1f m, 累计运行: %ld s",
                     data.rcs_state_list.is_nav_mode ? "非手动" : "手动", data.total_mileage / 100.0, data.total_run_time);
     }
 
@@ -1227,7 +1237,7 @@ void X30NavBridge::handleRcsData(const RcsData &data)
                                  "⚠️ 电池低电量警告!");
         }
         if (data.error_state_bit.imu_error) {
-            RCLCPP_ERROR_THROTTLE(this->get_logger(), *this->get_clock(), 60000, "❌ IMU 更新超时!");
+            RCLCPP_ERROR_THROTTLE(this->get_logger(), *this->get_clock(), 5000, "❌ IMU 更新超时!");
         }
         if (data.error_state_bit.driver_error) {
             RCLCPP_ERROR_THROTTLE(this->get_logger(), *this->get_clock(), 5000, "❌ 驱动器故障!");
@@ -1377,10 +1387,6 @@ void X30NavBridge::handleMotionState(const MotionStateData &data) {
 
     odom_pub_->publish(odom_msg);
 
-    auto speed_msg = std_msgs::msg::Float32();
-    speed_msg.data = data.leg_odom_vel[0];
-    robot_speed_pub_->publish(speed_msg);
-
     // 发布 TF: odom → base_link
     if (publish_tf_ && tf_broadcaster_) {
         geometry_msgs::msg::TransformStamped tf;
@@ -1469,10 +1475,6 @@ void X30NavBridge::handleBattery(const BatterySensorData &data) {
     auto msg = std_msgs::msg::UInt8();
     msg.data = data.battery_level;
     battery_level_pub_->publish(msg);
-
-    auto cycles_msg = std_msgs::msg::Int32();
-    cycles_msg.data = data.cycles;
-    battery_cycles_pub_->publish(cycles_msg);
 
     auto battery_text_msg = rviz_2d_overlay_msgs::msg::OverlayText();
     battery_text_msg.action = 0;
@@ -2015,23 +2017,5 @@ void NavBridgeBase::cmdVelCallback(const geometry_msgs::msg::Twist::SharedPtr ms
 
 NavBridgeBase::NavBridgeBase(const std::string &node_name, const rclcpp::NodeOptions &options)
     : rclcpp::Node(node_name, options) {}
-
-void NavBridgeBase::publishRosHeartbeat() {
-    if (!ros_heartbeat_pub_) {
-        return;
-    }
-
-    diagnostic_msgs::msg::DiagnosticArray msg;
-    msg.header.stamp = this->now();
-
-    diagnostic_msgs::msg::DiagnosticStatus status;
-    status.name = this->get_name();
-    status.hardware_id = "nav_bridge";
-    status.level = diagnostic_msgs::msg::DiagnosticStatus::OK;
-    status.message = "ok";
-    msg.status.push_back(status);
-
-    ros_heartbeat_pub_->publish(msg);
-}
 
 }  // namespace nav_bridge
