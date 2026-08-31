@@ -19,7 +19,10 @@ find_package(std_srvs REQUIRED)
 find_package(tf2 REQUIRED)
 find_package(tf2_ros REQUIRED)
 find_package(tf2_geometry_msgs REQUIRED)
-find_package(rviz_2d_overlay_msgs REQUIRED)
+option(NAV_BRIDGE_BUILD_X30 "Build the legacy X30 node" ON)
+if(NAV_BRIDGE_BUILD_X30)
+  find_package(rviz_2d_overlay_msgs REQUIRED)
+endif()
 find_package(rcl_interfaces REQUIRED)
 find_package(Threads REQUIRED)
 find_package(Python3 REQUIRED COMPONENTS Interpreter)
@@ -32,6 +35,7 @@ set(D1_MAX_SDK_ROOT "${CMAKE_CURRENT_SOURCE_DIR}/third_party/robot_sdk"
     CACHE PATH "Vendored D1 Max RobotSDK root")
 
 # Nav bridge node executable
+if(NAV_BRIDGE_BUILD_X30)
 add_executable(x30_nav_bridge_node
   src/x30/x30_nav_bridge_node.cpp
   src/x30/action_executor.cpp
@@ -57,6 +61,10 @@ ament_target_dependencies(x30_nav_bridge_node
   rviz_2d_overlay_msgs
   rcl_interfaces
 )
+
+install(TARGETS x30_nav_bridge_node
+  DESTINATION lib/${PROJECT_NAME})
+endif()
 
 if(NAV_BRIDGE_BUILD_D1_MAX)
   if(CMAKE_SYSTEM_PROCESSOR MATCHES "aarch64|arm64|ARM64")
@@ -100,9 +108,6 @@ if(NAV_BRIDGE_BUILD_D1_MAX)
     DESTINATION lib
     RENAME librobot_sdk.so.0.2.1)
 endif()
-
-install(TARGETS x30_nav_bridge_node
-  DESTINATION lib/${PROJECT_NAME})
 
 install(DIRECTORY include/
   DESTINATION include)

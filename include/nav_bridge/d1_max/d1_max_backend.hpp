@@ -1,6 +1,7 @@
 #pragma once
 
 #include <memory>
+#include <condition_variable>
 #include <mutex>
 #include <string>
 #include <system_error>
@@ -27,10 +28,13 @@ public:
     BackendResult releaseControl() override;
     BackendResult move(double vx, double vy, double vyaw) override;
     BackendResult stand() override;
+    BackendResult setGait(int gait);
     BackendResult lie() override;
     BackendResult softEstop(bool enabled) override;
     BackendResult setMode(int mode) override;
     BackendResult setSpeed(int speed_level) override;
+    bool velocityCommandAllowed() const;
+    int bodyHeightState() const;
     BackendState state() const override;
     void setStateCallback(StateCallback callback) override;
     void setImuCallback(ImuCallback callback) override;
@@ -62,6 +66,10 @@ private:
     OdometryCallback odom_callback_;
     JointCallback joint_callback_;
     FaultCallback fault_callback_;
+    int imu_configured_hz_{0};
+    int motion_status_{0};
+    int navigation_gait_{33};
+    std::condition_variable motion_cv_;
 };
 
 }  // namespace nav_bridge

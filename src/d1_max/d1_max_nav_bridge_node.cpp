@@ -1,8 +1,11 @@
 #include <algorithm>
+#include <atomic>
 #include <chrono>
 #include <cmath>
 #include <csignal>
 #include <memory>
+#include <cctype>
+#include <map>
 #include <mutex>
 
 #include <geometry_msgs/msg/twist.hpp>
@@ -69,14 +72,21 @@ public:
 
         cmd_vel_sub_ = create_subscription<geometry_msgs::msg::Twist>(
             "/cmd_vel", 10, [this](const geometry_msgs::msg::Twist::SharedPtr msg) {
-                std::lock_guard<std::mutex> lock(command_mutex_);
-                vx_ = msg->linear.x;
-                vy_ = msg->linear.y;
-                vyaw_ = msg->angular.z;
-                last_cmd_time_ = std::chrono::steady_clock::now();
-                if (!state().control_owned) backend_->takeControl();
+                {
+                    std::lock_guard<std::mutex> lock(command_mutex_);
+                    vx_ = msg->linear.x;
+                    vy_ = msg->linear.y;
+                    vyaw_ = msg->angular.z;
+                    last_cmd_time_ = std::chrono::steady_clock::now();
+                }
+                if (!state().control_owned && !action_in_progress_.load()) {
+                    backend_->takeControl();
+                }
             });
         basic_state_pub_ = create_publisher<std_msgs::msg::Int32>("/robot_basic_state", 10);
+        gait_state_pub_ = create_publisher<std_msgs::msg::Int32>("/robot_gait_state", 10);
+        body_height_state_pub_ = create_publisher<std_msgs::msg::Int32>("/robot_body_height_state", 10);
+        charge_state_pub_ = create_publisher<std_msgs::msg::Int32>("/charge_manager_state", 10);
         battery_pub_ = create_publisher<std_msgs::msg::UInt8>("/battery/level", 10);
         imu_pub_ = create_publisher<sensor_msgs::msg::Imu>("/imu/data", 10);
         odom_pub_ = create_publisher<nav_msgs::msg::Odometry>("/leg_odom", 10);
@@ -86,35 +96,62 @@ public:
         stand_srv_ = create_service<std_srvs::srv::Trigger>(
             "~/stand", [this](const std::shared_ptr<std_srvs::srv::Trigger::Request> /*request*/,
                                std::shared_ptr<std_srvs::srv::Trigger::Response> response) {
-                fillResponse(response, backend_->stand());
+                action_in_progress_.store(true);
+                const auto result = backend_->stand();
+                action_in_progress_.store(false);
+                fillResponse(response, result);
             });
         lie_srv_ = create_service<std_srvs::srv::Trigger>(
             "~/lie", [this](const std::shared_ptr<std_srvs::srv::Trigger::Request> /*request*/,
                              std::shared_ptr<std_srvs::srv::Trigger::Response> response) {
-                fillResponse(response, backend_->lie());
+                action_in_progress_.store(true);
+                const auto result = backend_->lie();
+                action_in_progress_.store(false);
+                fillResponse(response, result);
             });
         estop_srv_ = create_service<std_srvs::srv::Trigger>(
             "~/soft_estop", [this](const std::shared_ptr<std_srvs::srv::Trigger::Request> /*request*/,
                                    std::shared_ptr<std_srvs::srv::Trigger::Response> response) {
-                fillResponse(response, backend_->softEstop(true));
+                action_in_progress_.store(true);
+                const auto result = backend_->softEstop(true);
+                action_in_progress_.store(false);
+                fillResponse(response, result);
             });
         release_srv_ = create_service<std_srvs::srv::Trigger>(
             "~/release_control", [this](const std::shared_ptr<std_srvs::srv::Trigger::Request> /*request*/,
                                          std::shared_ptr<std_srvs::srv::Trigger::Response> response) {
-                fillResponse(response, backend_->releaseControl());
+                action_in_progress_.store(true);
+                const auto result = backend_->releaseControl();
+                action_in_progress_.store(false);
+                fillResponse(response, result);
             });
-        mode_srv_ = create_service<rcl_interfaces::srv::SetParameters>(
-            "~/set_mode", [this](const std::shared_ptr<rcl_interfaces::srv::SetParameters::Request> request,
+        gait_srv_ = create_service<rcl_interfaces::srv::SetParameters>(
+            "~/set_gait", [this](const std::shared_ptr<rcl_interfaces::srv::SetParameters::Request> request,
                                   std::shared_ptr<rcl_interfaces::srv::SetParameters::Response> response) {
                 rcl_interfaces::msg::SetParametersResult result;
-                if (request->parameters.size() != 1 || request->parameters[0].name != "mode" ||
-                    request->parameters[0].value.type != rcl_interfaces::msg::ParameterType::PARAMETER_INTEGER) {
-                    result.successful = false; result.reason = "Expected one integer parameter named mode (1=GENERAL,2=IN_PLACE,3=STAIR).";
+                if (request->parameters.size() != 1 || request->parameters[0].name != "gait") {
+                    result.successful = false; result.reason = "Expected one parameter named gait.";
                 } else {
-                    const int mode = static_cast<int>(request->parameters[0].value.integer_value);
-                    const auto backend_result = (mode == 1 || mode == 2 || mode == 3)
-                                                     ? backend_->setMode(mode)
-                                                     : BackendResult{false, "Mode must be 1, 2 or 3."};
+                    int gait = -1;
+                    const auto &value = request->parameters[0].value;
+                    if (value.type == rcl_interfaces::msg::ParameterType::PARAMETER_INTEGER) {
+                        gait = static_cast<int>(value.integer_value);
+                    } else if (value.type == rcl_interfaces::msg::ParameterType::PARAMETER_STRING) {
+                        std::string name = value.string_value;
+                        std::transform(name.begin(), name.end(), name.begin(),
+                                       [](unsigned char c) { return static_cast<char>(std::toupper(c)); });
+                        static const std::map<std::string, int> names = {
+                            {"WALK", 0}, {"RUN", 3}, {"STAIR_SOLID", 6}, {"STAIR_ACC", 7},
+                            {"STAIR45_ACC", 8}, {"L_WALK", 32}, {"MOUNTAIN", 33},
+                            {"SILENT", 34}, {"L_STAIR", 36}, {"STAIR", 6}};
+                        const auto it = names.find(name);
+                        if (it != names.end()) gait = it->second;
+                    }
+                    action_in_progress_.store(true);
+                    const auto backend_result = gait >= 0
+                                                     ? backend_->setGait(gait)
+                                                     : BackendResult{false, "Unsupported D1 gait name or value."};
+                    action_in_progress_.store(false);
                     result.successful = backend_result.success; result.reason = backend_result.message;
                 }
                 response->results.push_back(result);
@@ -128,12 +165,30 @@ public:
                     result.successful = false; result.reason = "Expected one integer parameter named speed (1=SLOW,2=MEDIUM,3=HIGH).";
                 } else {
                     const int speed = static_cast<int>(request->parameters[0].value.integer_value);
+                    action_in_progress_.store(true);
                     const auto backend_result = (speed == 1 || speed == 2 || speed == 3)
                                                      ? backend_->setSpeed(speed)
                                                      : BackendResult{false, "Speed must be 1, 2 or 3."};
+                    action_in_progress_.store(false);
                     result.successful = backend_result.success; result.reason = backend_result.message;
                 }
                 response->results.push_back(result);
+            });
+        body_height_srv_ = create_service<rcl_interfaces::srv::SetParameters>(
+            "~/set_body_height", [this](const std::shared_ptr<rcl_interfaces::srv::SetParameters::Request> request,
+                                          std::shared_ptr<rcl_interfaces::srv::SetParameters::Response> response) {
+                rcl_interfaces::msg::SetParametersResult result;
+                result.successful = false;
+                result.reason = "D1 Max body height switching is not supported yet.";
+                response->results.assign(std::max<std::size_t>(1, request->parameters.size()), result);
+            });
+        charge_command_srv_ = create_service<rcl_interfaces::srv::SetParameters>(
+            "~/charge_command", [this](const std::shared_ptr<rcl_interfaces::srv::SetParameters::Request> request,
+                                         std::shared_ptr<rcl_interfaces::srv::SetParameters::Response> response) {
+                rcl_interfaces::msg::SetParametersResult result;
+                result.successful = false;
+                result.reason = "D1 Max charging is not supported.";
+                response->results.assign(std::max<std::size_t>(1, request->parameters.size()), result);
             });
 
         const auto period = std::chrono::milliseconds(1000 / std::max(1, cmd_vel_rate_hz_));
@@ -171,21 +226,34 @@ private:
             std::lock_guard<std::mutex> lock(command_mutex_);
             vx = vx_; vy = vy_; vyaw = vyaw_; last = last_cmd_time_;
         }
-        if (!state().control_owned) return;
-        const auto age = std::chrono::duration_cast<std::chrono::milliseconds>(current - last).count();
-        if (age > cmd_vel_timeout_ms_) vx = vy = vyaw = 0.0;
-        const auto result = backend_->move(vx, vy, vyaw);
-        if (!result.success) {
-            RCLCPP_WARN_THROTTLE(get_logger(), *get_clock(), 5000,
-                                 "D1 Max Move failed: %s", result.message.c_str());
-        }
         const auto current_state = state();
+        if (current_state.control_owned) {
+            const auto age = std::chrono::duration_cast<std::chrono::milliseconds>(current - last).count();
+            if (action_in_progress_.load() || !backend_->velocityCommandAllowed() || age > cmd_vel_timeout_ms_) {
+                vx = vy = vyaw = 0.0;
+            }
+            const auto result = backend_->move(vx, vy, vyaw);
+            if (!result.success) {
+                RCLCPP_WARN_THROTTLE(get_logger(), *get_clock(), 5000,
+                                     "D1 Max Move failed: %s", result.message.c_str());
+            }
+        }
+        const auto published_state = state();
         std_msgs::msg::Int32 state_msg;
-        state_msg.data = static_cast<int32_t>(current_state.motion_state);
+        state_msg.data = static_cast<int32_t>(published_state.motion_state);
         basic_state_pub_->publish(state_msg);
-        if (current_state.battery_percent >= 0.0) {
+        std_msgs::msg::Int32 gait_msg;
+        gait_msg.data = static_cast<int32_t>(published_state.mode);
+        gait_state_pub_->publish(gait_msg);
+        std_msgs::msg::Int32 body_height_msg;
+        body_height_msg.data = backend_->bodyHeightState();
+        body_height_state_pub_->publish(body_height_msg);
+        std_msgs::msg::Int32 charge_msg;
+        charge_msg.data = -1;  // D1 charging is not supported.
+        charge_state_pub_->publish(charge_msg);
+        if (published_state.battery_percent >= 0.0) {
             std_msgs::msg::UInt8 battery_msg;
-            battery_msg.data = static_cast<uint8_t>(std::clamp(current_state.battery_percent, 0.0, 100.0));
+            battery_msg.data = static_cast<uint8_t>(std::clamp(published_state.battery_percent, 0.0, 100.0));
             battery_pub_->publish(battery_msg);
         }
     }
@@ -203,15 +271,20 @@ private:
     std::mutex command_mutex_;
     double vx_{0.0}, vy_{0.0}, vyaw_{0.0};
     std::chrono::steady_clock::time_point last_cmd_time_{std::chrono::steady_clock::time_point::min()};
+    std::atomic<bool> action_in_progress_{false};
     rclcpp::Subscription<geometry_msgs::msg::Twist>::SharedPtr cmd_vel_sub_;
     rclcpp::Publisher<std_msgs::msg::Int32>::SharedPtr basic_state_pub_;
+    rclcpp::Publisher<std_msgs::msg::Int32>::SharedPtr gait_state_pub_;
+    rclcpp::Publisher<std_msgs::msg::Int32>::SharedPtr body_height_state_pub_;
+    rclcpp::Publisher<std_msgs::msg::Int32>::SharedPtr charge_state_pub_;
     rclcpp::Publisher<std_msgs::msg::UInt8>::SharedPtr battery_pub_;
     rclcpp::Publisher<sensor_msgs::msg::Imu>::SharedPtr imu_pub_;
     rclcpp::Publisher<nav_msgs::msg::Odometry>::SharedPtr odom_pub_;
     rclcpp::Publisher<sensor_msgs::msg::JointState>::SharedPtr joint_pub_;
     rclcpp::Publisher<std_msgs::msg::String>::SharedPtr fault_pub_;
     rclcpp::Service<std_srvs::srv::Trigger>::SharedPtr stand_srv_, lie_srv_, estop_srv_, release_srv_;
-    rclcpp::Service<rcl_interfaces::srv::SetParameters>::SharedPtr mode_srv_, speed_srv_;
+    rclcpp::Service<rcl_interfaces::srv::SetParameters>::SharedPtr gait_srv_, speed_srv_;
+    rclcpp::Service<rcl_interfaces::srv::SetParameters>::SharedPtr body_height_srv_, charge_command_srv_;
     rclcpp::TimerBase::SharedPtr timer_;
 };
 
