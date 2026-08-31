@@ -33,6 +33,12 @@ public:
         reconnect_interval_ms_ = declare_parameter<int>("reconnect_interval_ms", 2000);
         cmd_vel_rate_hz_ = declare_parameter<int>("cmd_vel_rate_hz", 50);
         cmd_vel_timeout_ms_ = declare_parameter<int>("cmd_vel_timeout_ms", 500);
+        imu_source_ = declare_parameter<std::string>("imu_source", "imu_driver");
+        imu_driver_topic_ = declare_parameter<std::string>("imu_driver_topic", "/imu_driver/imu_central");
+        if (imu_source_ != "imu_driver" && imu_source_ != "sdk") {
+            RCLCPP_WARN(get_logger(), "Unknown imu_source '%s', using imu_driver.", imu_source_.c_str());
+            imu_source_ = "imu_driver";
+        }
 
         backend_ = std::make_unique<D1MaxBackend>(host_ip_, host_port_, auto_reconnect_,
                                                   connect_timeout_ms_, reconnect_interval_ms_);
@@ -41,6 +47,7 @@ public:
             state_ = state;
         });
         backend_->setImuCallback([this](const BackendImu &data) {
+            if (imu_source_ != "sdk") return;
             sensor_msgs::msg::Imu msg;
             msg.header.stamp = now(); msg.header.frame_id = "imu_link";
             msg.linear_acceleration.x = data.ax; msg.linear_acceleration.y = data.ay; msg.linear_acceleration.z = data.az;
@@ -89,6 +96,11 @@ public:
         charge_state_pub_ = create_publisher<std_msgs::msg::Int32>("/charge_manager_state", 10);
         battery_pub_ = create_publisher<std_msgs::msg::UInt8>("/battery/level", 10);
         imu_pub_ = create_publisher<sensor_msgs::msg::Imu>("/imu/data", 10);
+        imu_driver_sub_ = create_subscription<sensor_msgs::msg::Imu>(
+            imu_driver_topic_, rclcpp::SensorDataQoS(),
+            [this](const sensor_msgs::msg::Imu::SharedPtr msg) {
+                if (imu_source_ == "imu_driver") imu_pub_->publish(*msg);
+            });
         odom_pub_ = create_publisher<nav_msgs::msg::Odometry>("/leg_odom", 10);
         joint_pub_ = create_publisher<sensor_msgs::msg::JointState>("/joint_states", 10);
         fault_pub_ = create_publisher<std_msgs::msg::String>("/robot_fault", 10);
@@ -266,6 +278,8 @@ private:
     int reconnect_interval_ms_{2000};
     int cmd_vel_rate_hz_{50};
     int cmd_vel_timeout_ms_{500};
+    std::string imu_source_{"imu_driver"};
+    std::string imu_driver_topic_{"/imu_driver/imu_central"};
     mutable std::mutex state_mutex_;
     BackendState state_;
     std::mutex command_mutex_;
@@ -273,6 +287,7 @@ private:
     std::chrono::steady_clock::time_point last_cmd_time_{std::chrono::steady_clock::time_point::min()};
     std::atomic<bool> action_in_progress_{false};
     rclcpp::Subscription<geometry_msgs::msg::Twist>::SharedPtr cmd_vel_sub_;
+    rclcpp::Subscription<sensor_msgs::msg::Imu>::SharedPtr imu_driver_sub_;
     rclcpp::Publisher<std_msgs::msg::Int32>::SharedPtr basic_state_pub_;
     rclcpp::Publisher<std_msgs::msg::Int32>::SharedPtr gait_state_pub_;
     rclcpp::Publisher<std_msgs::msg::Int32>::SharedPtr body_height_state_pub_;

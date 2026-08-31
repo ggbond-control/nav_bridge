@@ -10,3 +10,6 @@ nav_bridge_node:
     reconnect_interval_ms: 2000
     cmd_vel_rate_hz: 50
     cmd_vel_timeout_ms: 500
+    # Prefer the navigation host's 200 Hz IMU driver; SDK remains available as a fallback.
+    imu_source: "imu_driver"
+    imu_driver_topic: "/imu_driver/imu_central"
