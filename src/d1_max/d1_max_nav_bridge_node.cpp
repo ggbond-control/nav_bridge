@@ -41,7 +41,8 @@ public:
         }
 
         backend_ = std::make_unique<D1MaxBackend>(host_ip_, host_port_, auto_reconnect_,
-                                                  connect_timeout_ms_, reconnect_interval_ms_);
+                                                  connect_timeout_ms_, reconnect_interval_ms_,
+                                                  imu_source_ == "sdk");
         backend_->setStateCallback([this](const BackendState &state) {
             std::lock_guard<std::mutex> lock(state_mutex_);
             state_ = state;
@@ -95,12 +96,12 @@ public:
         body_height_state_pub_ = create_publisher<std_msgs::msg::Int32>("/robot_body_height_state", 10);
         charge_state_pub_ = create_publisher<std_msgs::msg::Int32>("/charge_manager_state", 10);
         battery_pub_ = create_publisher<std_msgs::msg::UInt8>("/battery/level", 10);
-        imu_pub_ = create_publisher<sensor_msgs::msg::Imu>("/imu/data", 10);
-        imu_driver_sub_ = create_subscription<sensor_msgs::msg::Imu>(
-            imu_driver_topic_, rclcpp::SensorDataQoS(),
-            [this](const sensor_msgs::msg::Imu::SharedPtr msg) {
-                if (imu_source_ == "imu_driver") imu_pub_->publish(*msg);
-            });
+        imu_pub_ = create_publisher<sensor_msgs::msg::Imu>("/imu/data", rclcpp::SensorDataQoS());
+        if (imu_source_ == "imu_driver") {
+            imu_driver_sub_ = create_subscription<sensor_msgs::msg::Imu>(
+                imu_driver_topic_, rclcpp::SensorDataQoS(),
+                [this](const sensor_msgs::msg::Imu::SharedPtr msg) { imu_pub_->publish(*msg); });
+        }
         odom_pub_ = create_publisher<nav_msgs::msg::Odometry>("/leg_odom", 10);
         joint_pub_ = create_publisher<sensor_msgs::msg::JointState>("/joint_states", 10);
         fault_pub_ = create_publisher<std_msgs::msg::String>("/robot_fault", 10);

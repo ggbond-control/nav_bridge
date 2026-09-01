@@ -19,7 +19,8 @@ namespace nav_bridge {
 class D1MaxBackend final : public RobotBackend {
 public:
     D1MaxBackend(std::string host_ip, int host_port, bool auto_reconnect,
-                 int connect_timeout_ms, int reconnect_interval_ms);
+                 int connect_timeout_ms, int reconnect_interval_ms,
+                 bool enable_sdk_imu);
     ~D1MaxBackend() override;
 
     BackendResult connect() override;
@@ -54,6 +55,7 @@ private:
     bool auto_reconnect_{true};
     int connect_timeout_ms_{5000};
     int reconnect_interval_ms_{2000};
+    bool enable_sdk_imu_{false};
 
     std::unique_ptr<robot_sdk::SDKClient> client_;
     std::shared_ptr<DataCallback> data_callback_;

@@ -5,8 +5,6 @@
 #include <system_error>
 #include <thread>
 #include <chrono>
-#include <atomic>
-#include <iostream>
 
 #include "robot_sdk/sdk_callback.hpp"
 #include "robot_sdk/sdk_client.hpp"
@@ -65,16 +63,6 @@ public:
     }
 
     void OnImuData(const robot_sdk::ImuData &data) override {
-        static std::atomic<uint64_t> count{0};
-        static const auto start = std::chrono::steady_clock::now();
-        const auto n = ++count;
-        if (n == 1 || n % 100 == 0) {
-            const auto elapsed = std::chrono::duration<double>(std::chrono::steady_clock::now() - start).count();
-            std::cerr << "[D1 SDK] IMU callback count=" << n
-                      << " elapsed=" << elapsed << " s rate="
-                      << (elapsed > 0.0 ? static_cast<double>(n) / elapsed : 0.0)
-                      << " Hz" << std::endl;
-        }
         BackendImu sample{data.acc_x, data.acc_y, data.acc_z, data.gyro_x, data.gyro_y,
                           data.gyro_z, data.quat_x, data.quat_y, data.quat_z, data.quat_w};
         ImuCallback callback;
@@ -142,7 +130,7 @@ public:
         // callback implemented so the response is not silently discarded.
         std::lock_guard<std::mutex> lock(owner_.mutex_);
         owner_.imu_configured_hz_ = freq;
-        std::cerr << "[D1 SDK] IMU configuration acknowledged: " << freq << " Hz" << std::endl;
+        (void)freq;
     }
 
 private:
@@ -150,9 +138,11 @@ private:
 };
 
 D1MaxBackend::D1MaxBackend(std::string host_ip, int host_port, bool auto_reconnect,
-                           int connect_timeout_ms, int reconnect_interval_ms)
+                           int connect_timeout_ms, int reconnect_interval_ms,
+                           bool enable_sdk_imu)
     : host_ip_(std::move(host_ip)), host_port_(host_port), auto_reconnect_(auto_reconnect),
-      connect_timeout_ms_(connect_timeout_ms), reconnect_interval_ms_(reconnect_interval_ms) {
+      connect_timeout_ms_(connect_timeout_ms), reconnect_interval_ms_(reconnect_interval_ms),
+      enable_sdk_imu_(enable_sdk_imu) {
     robot_sdk::ConnectionConfig config;
     config.auto_reconnect = auto_reconnect_;
     config.connect_timeout_ms = connect_timeout_ms_;
@@ -187,12 +177,14 @@ BackendResult D1MaxBackend::connect() {
         // SDK examples configure sensors after the connection callback; mirror
         // that ordering and use synchronous writes so failures are observable.
         std::this_thread::sleep_for(std::chrono::milliseconds(100));
-        ec = client_->SetImuConfig(100, connect_timeout_ms_);
-        if (ec) {
-            auto state = this->state();
-            state.connected = false;
-            updateState(state);
-            return fromError(ec);
+        if (enable_sdk_imu_) {
+            ec = client_->SetImuConfig(100, connect_timeout_ms_);
+            if (ec) {
+                auto state = this->state();
+                state.connected = false;
+                updateState(state);
+                return fromError(ec);
+            }
         }
         client_->SetMcConfig(true);
         client_->SetSpeedReportConfig(true, 50);
