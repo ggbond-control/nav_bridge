@@ -416,6 +416,11 @@ BackendResult D1MaxBackend::lie() {
         if (!wait.success) return wait;
     }
 
+    // Crawl status marks the requested posture, but the controller may still
+    // be settling the body and legs. Keep the robot in crawl mode for a full
+    // stabilization window before issuing the lie-down action.
+    std::this_thread::sleep_for(std::chrono::seconds(2));
+
     auto result = fromError(client_->LieDown(connect_timeout_ms_));
     if (!result.success) return result;
     auto wait = wait_or_report({lie_down}, "lie-down completion");
