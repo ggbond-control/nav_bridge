@@ -199,9 +199,42 @@ public:
             "~/charge_command", [this](const std::shared_ptr<rcl_interfaces::srv::SetParameters::Request> request,
                                          std::shared_ptr<rcl_interfaces::srv::SetParameters::Response> response) {
                 rcl_interfaces::msg::SetParametersResult result;
-                result.successful = false;
-                result.reason = "D1 Max charging is not supported.";
-                response->results.assign(std::max<std::size_t>(1, request->parameters.size()), result);
+                if (request->parameters.size() != 1 || request->parameters[0].name != "charge_command") {
+                    result.successful = false;
+                    result.reason = "Expected one parameter named charge_command (0=START, 1=STOP, 3=QUERY, 4=UNDOCK_START, 5=UNDOCK_STOP).";
+                    response->results.assign(std::max<std::size_t>(1, request->parameters.size()), result);
+                    return;
+                }
+                int command = -1;
+                const auto &value = request->parameters[0].value;
+                if (value.type == rcl_interfaces::msg::ParameterType::PARAMETER_INTEGER) {
+                    command = static_cast<int>(value.integer_value);
+                } else if (value.type == rcl_interfaces::msg::ParameterType::PARAMETER_STRING) {
+                    std::string name = value.string_value;
+                    std::transform(name.begin(), name.end(), name.begin(),
+                                   [](unsigned char c) { return static_cast<char>(std::toupper(c)); });
+                    if (name == "START") command = 0;
+                    else if (name == "STOP") command = 1;
+                    else if (name == "QUERY") command = 3;
+                    else if (name == "UNDOCK_START") command = 4;
+                    else if (name == "UNDOCK_STOP") command = 5;
+                }
+                if (command == 3) {
+                    result.successful = true;
+                    result.reason = "D1 charge state=" + std::to_string(backend_->chargeState());
+                } else {
+                    action_in_progress_.store(true);
+                    BackendResult backend_result;
+                    if (command == 0) backend_result = backend_->startRecharge();
+                    else if (command == 1) backend_result = backend_->stopRecharge();
+                    else if (command == 4) backend_result = backend_->startUndock();
+                    else if (command == 5) backend_result = backend_->stopUndock();
+                    else backend_result = {false, "Unsupported D1 charge command. Use 0=START, 1=STOP, 3=QUERY, 4=UNDOCK_START, 5=UNDOCK_STOP."};
+                    action_in_progress_.store(false);
+                    result.successful = backend_result.success;
+                    result.reason = backend_result.message;
+                }
+                response->results.push_back(result);
             });
 
         const auto period = std::chrono::milliseconds(1000 / std::max(1, cmd_vel_rate_hz_));
@@ -242,7 +275,8 @@ private:
         const auto current_state = state();
         if (current_state.control_owned) {
             const auto age = std::chrono::duration_cast<std::chrono::milliseconds>(current - last).count();
-            if (action_in_progress_.load() || !backend_->velocityCommandAllowed() || age > cmd_vel_timeout_ms_) {
+            if (action_in_progress_.load() || backend_->chargeState() != 0 ||
+                !backend_->velocityCommandAllowed() || age > cmd_vel_timeout_ms_) {
                 vx = vy = vyaw = 0.0;
             }
             const auto result = backend_->move(vx, vy, vyaw);
@@ -262,7 +296,7 @@ private:
         body_height_msg.data = backend_->bodyHeightState();
         body_height_state_pub_->publish(body_height_msg);
         std_msgs::msg::Int32 charge_msg;
-        charge_msg.data = -1;  // D1 charging is not supported.
+        charge_msg.data = backend_->chargeState();
         charge_state_pub_->publish(charge_msg);
         if (published_state.battery_percent >= 0.0) {
             std_msgs::msg::UInt8 battery_msg;

@@ -36,6 +36,11 @@ public:
     BackendResult setSpeed(int speed_level) override;
     bool velocityCommandAllowed() const;
     int bodyHeightState() const;
+    BackendResult startRecharge();
+    BackendResult stopRecharge();
+    BackendResult startUndock();
+    BackendResult stopUndock();
+    int chargeState() const;
     BackendState state() const override;
     void setStateCallback(StateCallback callback) override;
     void setImuCallback(ImuCallback callback) override;
@@ -71,6 +76,10 @@ private:
     int imu_configured_hz_{0};
     int motion_status_{0};
     int navigation_gait_{33};
+    int machine_status_{0};
+    int task_type_{0};
+    int task_status_{0};
+    uint32_t task_error_code_{0};
     std::condition_variable motion_cv_;
 };
 

@@ -48,6 +48,7 @@ public:
             std::lock_guard<std::mutex> lock(owner_.mutex_);
             state.mode = owner_.navigation_gait_;
             owner_.motion_status_ = static_cast<int>(data.motion_status);
+            owner_.machine_status_ = static_cast<int>(data.machine_status);
         }
         state.control_owned = data.control_source == robot_sdk::CtrlSource::CTRL_SOURCE_SDK;
         state.vx = data.speed.line;
@@ -60,6 +61,16 @@ public:
         else if (p1) state.battery_percent = data.battery.power1;
         else if (p2) state.battery_percent = data.battery.power2;
         owner_.updateState(state);
+    }
+
+    void OnTaskStateData(const robot_sdk::TaskStateInfo &data) override {
+        {
+            std::lock_guard<std::mutex> lock(owner_.mutex_);
+            owner_.task_type_ = static_cast<int>(data.task_type);
+            owner_.task_status_ = static_cast<int>(data.task_status);
+            owner_.task_error_code_ = data.error_code;
+        }
+        owner_.motion_cv_.notify_all();
     }
 
     void OnImuData(const robot_sdk::ImuData &data) override {
@@ -504,6 +515,51 @@ BackendResult D1MaxBackend::setGait(int gait) {
 
 BackendResult D1MaxBackend::setSpeed(int speed_level) {
     return fromError(client_->SetSpeed(speed_level, connect_timeout_ms_));
+}
+
+BackendResult D1MaxBackend::startRecharge() {
+    if (!client_ || !client_->IsConnected()) return {false, "D1 SDK is not connected."};
+    auto control = takeControl();
+    if (!control.success) return control;
+    auto stop = fromError(client_->Move(0.0F, 0.0F, 0.0F, connect_timeout_ms_));
+    if (!stop.success) return stop;
+    return fromError(client_->StartRechargeTask(connect_timeout_ms_));
+}
+
+BackendResult D1MaxBackend::stopRecharge() {
+    if (!client_ || !client_->IsConnected()) return {false, "D1 SDK is not connected."};
+    return fromError(client_->StopRechargeTask(connect_timeout_ms_));
+}
+
+BackendResult D1MaxBackend::startUndock() {
+    if (!client_ || !client_->IsConnected()) return {false, "D1 SDK is not connected."};
+    auto control = takeControl();
+    if (!control.success) return control;
+    return fromError(client_->StartUnDockTask(connect_timeout_ms_));
+}
+
+BackendResult D1MaxBackend::stopUndock() {
+    if (!client_ || !client_->IsConnected()) return {false, "D1 SDK is not connected."};
+    return fromError(client_->StopUnDockTask(connect_timeout_ms_));
+}
+
+int D1MaxBackend::chargeState() const {
+    // X30-compatible values: 0=idle, 1=task running, 2=charging,
+    // 4=task failure. D1 task details remain available through SDK logs.
+    std::lock_guard<std::mutex> lock(mutex_);
+    using robot_sdk::MachineStatus;
+    using robot_sdk::TaskStatus;
+    using robot_sdk::TaskType;
+    if (task_status_ == static_cast<int>(TaskStatus::FAILURE)) return 4;
+    if (task_type_ == static_cast<int>(TaskType::RECHARGING)) {
+        if (machine_status_ == static_cast<int>(MachineStatus::RECHARGE)) return 2;
+        if (task_status_ == static_cast<int>(TaskStatus::STARTING) ||
+            task_status_ == static_cast<int>(TaskStatus::RUNNING)) return 1;
+    }
+    if (task_type_ == static_cast<int>(TaskType::UNDOCK) &&
+        (task_status_ == static_cast<int>(TaskStatus::STARTING) ||
+         task_status_ == static_cast<int>(TaskStatus::RUNNING))) return 3;
+    return 0;
 }
 
 bool D1MaxBackend::velocityCommandAllowed() const {
