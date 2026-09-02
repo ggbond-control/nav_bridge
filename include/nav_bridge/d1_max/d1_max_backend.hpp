@@ -2,6 +2,7 @@
 
 #include <memory>
 #include <condition_variable>
+#include <cstdint>
 #include <mutex>
 #include <string>
 #include <system_error>
@@ -36,10 +37,12 @@ public:
     BackendResult setSpeed(int speed_level) override;
     bool velocityCommandAllowed() const;
     int bodyHeightState() const;
-    BackendResult startRecharge();
-    BackendResult stopRecharge();
-    BackendResult startUndock();
-    BackendResult stopUndock();
+    // These methods return success only after the SDK state callbacks confirm
+    // the requested task transition, rather than after the command ACK alone.
+    BackendResult startRecharge(int confirmation_timeout_ms);
+    BackendResult stopRecharge(int confirmation_timeout_ms);
+    BackendResult startUndock(int confirmation_timeout_ms);
+    BackendResult stopUndock(int confirmation_timeout_ms);
     int chargeState() const;
     BackendState state() const override;
     void setStateCallback(StateCallback callback) override;
@@ -53,6 +56,9 @@ private:
     class ControlCallback;
 
     BackendResult fromError(const std::error_code &ec) const;
+    BackendResult waitForTaskTransition(int task_type, int machine_status,
+                                        bool starting, uint64_t min_sequence,
+                                        int timeout_ms);
     void updateState(const BackendState &state);
 
     std::string host_ip_;
@@ -80,6 +86,7 @@ private:
     int task_type_{0};
     int task_status_{0};
     uint32_t task_error_code_{0};
+    uint64_t task_state_sequence_{0};
     std::condition_variable motion_cv_;
 };
 

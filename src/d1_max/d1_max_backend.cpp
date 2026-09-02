@@ -69,6 +69,7 @@ public:
             owner_.task_type_ = static_cast<int>(data.task_type);
             owner_.task_status_ = static_cast<int>(data.task_status);
             owner_.task_error_code_ = data.error_code;
+            ++owner_.task_state_sequence_;
         }
         owner_.motion_cv_.notify_all();
     }
@@ -517,30 +518,96 @@ BackendResult D1MaxBackend::setSpeed(int speed_level) {
     return fromError(client_->SetSpeed(speed_level, connect_timeout_ms_));
 }
 
-BackendResult D1MaxBackend::startRecharge() {
+BackendResult D1MaxBackend::startRecharge(int confirmation_timeout_ms) {
     if (!client_ || !client_->IsConnected()) return {false, "D1 SDK is not connected."};
     auto control = takeControl();
     if (!control.success) return control;
     auto stop = fromError(client_->Move(0.0F, 0.0F, 0.0F, connect_timeout_ms_));
     if (!stop.success) return stop;
-    return fromError(client_->StartRechargeTask(connect_timeout_ms_));
+    uint64_t sequence;
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        sequence = task_state_sequence_;
+    }
+    const auto start = fromError(client_->StartRechargeTask(connect_timeout_ms_));
+    if (!start.success) return start;
+    return waitForTaskTransition(static_cast<int>(robot_sdk::TaskType::RECHARGING),
+                                 static_cast<int>(robot_sdk::MachineStatus::RECHARGE), true,
+                                 sequence, confirmation_timeout_ms);
 }
 
-BackendResult D1MaxBackend::stopRecharge() {
+BackendResult D1MaxBackend::stopRecharge(int confirmation_timeout_ms) {
     if (!client_ || !client_->IsConnected()) return {false, "D1 SDK is not connected."};
-    return fromError(client_->StopRechargeTask(connect_timeout_ms_));
+    uint64_t sequence;
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        sequence = task_state_sequence_;
+    }
+    const auto stop = fromError(client_->StopRechargeTask(connect_timeout_ms_));
+    if (!stop.success) return stop;
+    return waitForTaskTransition(static_cast<int>(robot_sdk::TaskType::RECHARGING),
+                                 static_cast<int>(robot_sdk::MachineStatus::RECHARGE), false,
+                                 sequence, confirmation_timeout_ms);
 }
 
-BackendResult D1MaxBackend::startUndock() {
+BackendResult D1MaxBackend::startUndock(int confirmation_timeout_ms) {
     if (!client_ || !client_->IsConnected()) return {false, "D1 SDK is not connected."};
     auto control = takeControl();
     if (!control.success) return control;
-    return fromError(client_->StartUnDockTask(connect_timeout_ms_));
+    uint64_t sequence;
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        sequence = task_state_sequence_;
+    }
+    const auto start = fromError(client_->StartUnDockTask(connect_timeout_ms_));
+    if (!start.success) return start;
+    return waitForTaskTransition(static_cast<int>(robot_sdk::TaskType::UNDOCK),
+                                 static_cast<int>(robot_sdk::MachineStatus::UNDOCK), true,
+                                 sequence, confirmation_timeout_ms);
 }
 
-BackendResult D1MaxBackend::stopUndock() {
+BackendResult D1MaxBackend::stopUndock(int confirmation_timeout_ms) {
     if (!client_ || !client_->IsConnected()) return {false, "D1 SDK is not connected."};
-    return fromError(client_->StopUnDockTask(connect_timeout_ms_));
+    uint64_t sequence;
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        sequence = task_state_sequence_;
+    }
+    const auto stop = fromError(client_->StopUnDockTask(connect_timeout_ms_));
+    if (!stop.success) return stop;
+    return waitForTaskTransition(static_cast<int>(robot_sdk::TaskType::UNDOCK),
+                                 static_cast<int>(robot_sdk::MachineStatus::UNDOCK), false,
+                                 sequence, confirmation_timeout_ms);
+}
+
+BackendResult D1MaxBackend::waitForTaskTransition(int task_type, int machine_status,
+                                                   bool starting, uint64_t min_sequence,
+                                                   int timeout_ms) {
+    using robot_sdk::TaskStatus;
+    const auto deadline = std::chrono::steady_clock::now() +
+                          std::chrono::milliseconds(std::max(1, timeout_ms));
+    std::unique_lock<std::mutex> lock(mutex_);
+    while (true) {
+        const bool new_task_state = task_state_sequence_ > min_sequence && task_type_ == task_type;
+        if (new_task_state && task_status_ == static_cast<int>(TaskStatus::FAILURE)) {
+            return {false, "D1 task failed, error_code=" + std::to_string(task_error_code_)};
+        }
+        if (starting) {
+            const bool task_running = task_status_ == static_cast<int>(TaskStatus::STARTING) ||
+                                      task_status_ == static_cast<int>(TaskStatus::RUNNING);
+            if (new_task_state && task_running && machine_status_ == machine_status) {
+                return {true, "D1 task confirmed running."};
+            }
+        } else if (new_task_state && task_status_ == static_cast<int>(TaskStatus::STOPPED) &&
+                   machine_status_ != machine_status) {
+            return {true, "D1 task confirmed stopped."};
+        }
+        if (motion_cv_.wait_until(lock, deadline) == std::cv_status::timeout) {
+            break;
+        }
+    }
+    const std::string operation = starting ? "start" : "stop";
+    return {false, "Timed out waiting for D1 task to " + operation + " confirmation."};
 }
 
 int D1MaxBackend::chargeState() const {
