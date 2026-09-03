@@ -89,8 +89,7 @@ public:
                     vyaw_ = msg->angular.z;
                     last_cmd_time_ = std::chrono::steady_clock::now();
                 }
-                if (!state().control_owned && !action_in_progress_.load() &&
-                    !charge_motion_blocked_.load()) {
+                if (!state().control_owned && !action_in_progress_.load()) {
                     backend_->takeControl();
                 }
             });
@@ -226,9 +225,7 @@ public:
                     result.successful = true;
                     result.reason = "D1 charge state=" + std::to_string(backend_->chargeState());
                 } else {
-                    action_in_progress_.store(true);
                     BackendResult backend_result;
-                    if (command == 0 || command == 4) charge_motion_blocked_.store(true);
                     const int confirmation_timeout_ms =
                         std::max(1, charge_task_confirmation_timeout_sec_) * 1000;
                     if (command == 0) backend_result = backend_->startRecharge(confirmation_timeout_ms);
@@ -236,11 +233,6 @@ public:
                     else if (command == 4) backend_result = backend_->startUndock(confirmation_timeout_ms);
                     else if (command == 5) backend_result = backend_->stopUndock(confirmation_timeout_ms);
                     else backend_result = {false, "Unsupported D1 charge command. Use 0=START, 1=STOP, 3=QUERY, 4=UNDOCK_START, 5=UNDOCK_STOP."};
-                    action_in_progress_.store(false);
-                    // The timer derives the lasting velocity block from the SDK's
-                    // live task state. This temporary flag only covers this service
-                    // call before a task-state callback arrives.
-                    charge_motion_blocked_.store(false);
                     result.successful = backend_result.success;
                     result.reason = backend_result.message;
                 }
@@ -285,11 +277,7 @@ private:
         const auto current_state = state();
         if (current_state.control_owned) {
             const auto age = std::chrono::duration_cast<std::chrono::milliseconds>(current - last).count();
-            if (backend_->chargeState() == 4) {
-                charge_motion_blocked_.store(false);
-            }
-            if (action_in_progress_.load() || charge_motion_blocked_.load() ||
-                backend_->chargeTaskActive() ||
+            if (action_in_progress_.load() ||
                 !backend_->velocityCommandAllowed() || age > cmd_vel_timeout_ms_) {
                 vx = vy = vyaw = 0.0;
             }
@@ -336,7 +324,6 @@ private:
     double vx_{0.0}, vy_{0.0}, vyaw_{0.0};
     std::chrono::steady_clock::time_point last_cmd_time_{std::chrono::steady_clock::time_point::min()};
     std::atomic<bool> action_in_progress_{false};
-    std::atomic<bool> charge_motion_blocked_{false};
     rclcpp::Subscription<geometry_msgs::msg::Twist>::SharedPtr cmd_vel_sub_;
     rclcpp::Subscription<sensor_msgs::msg::Imu>::SharedPtr imu_driver_sub_;
     rclcpp::Publisher<std_msgs::msg::Int32>::SharedPtr basic_state_pub_;

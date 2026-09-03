@@ -692,16 +692,6 @@ int D1MaxBackend::chargeState() const {
     return 0;
 }
 
-bool D1MaxBackend::chargeTaskActive() const {
-    std::lock_guard<std::mutex> lock(mutex_);
-    using robot_sdk::TaskStatus;
-    using robot_sdk::TaskType;
-    const bool running = task_status_ == static_cast<int>(TaskStatus::STARTING) ||
-                         task_status_ == static_cast<int>(TaskStatus::RUNNING);
-    return running && (task_type_ == static_cast<int>(TaskType::RECHARGING) ||
-                       task_type_ == static_cast<int>(TaskType::UNDOCK));
-}
-
 bool D1MaxBackend::velocityCommandAllowed() const {
     using robot_sdk::MotionStatus;
     std::lock_guard<std::mutex> lock(mutex_);

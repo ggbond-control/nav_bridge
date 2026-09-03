@@ -44,7 +44,6 @@ public:
     BackendResult startUndock(int confirmation_timeout_ms);
     BackendResult stopUndock(int confirmation_timeout_ms);
     int chargeState() const;
-    bool chargeTaskActive() const;
     BackendState state() const override;
     void setStateCallback(StateCallback callback) override;
     void setImuCallback(ImuCallback callback) override;
