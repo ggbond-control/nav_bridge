@@ -49,6 +49,13 @@ public:
             state.mode = owner_.navigation_gait_;
             owner_.motion_status_ = static_cast<int>(data.motion_status);
             owner_.machine_status_ = static_cast<int>(data.machine_status);
+            owner_.charging_pile_connected_ = data.charging_pile_connected;
+            owner_.battery1_present_ = data.battery.present1;
+            owner_.battery2_present_ = data.battery.present2;
+            owner_.battery1_power_supply_status_ =
+                static_cast<int>(data.battery.power_supply_status1);
+            owner_.battery2_power_supply_status_ =
+                static_cast<int>(data.battery.power_supply_status2);
         }
         state.control_owned = data.control_source == robot_sdk::CtrlSource::CTRL_SOURCE_SDK;
         state.vx = data.speed.line;
@@ -531,9 +538,7 @@ BackendResult D1MaxBackend::startRecharge(int confirmation_timeout_ms) {
     }
     const auto start = fromError(client_->StartRechargeTask(connect_timeout_ms_));
     if (!start.success) return start;
-    return waitForTaskTransition(static_cast<int>(robot_sdk::TaskType::RECHARGING),
-                                 static_cast<int>(robot_sdk::MachineStatus::RECHARGE), true,
-                                 sequence, confirmation_timeout_ms);
+    return waitForRechargeStarted(sequence, confirmation_timeout_ms);
 }
 
 BackendResult D1MaxBackend::stopRecharge(int confirmation_timeout_ms) {
@@ -541,17 +546,25 @@ BackendResult D1MaxBackend::stopRecharge(int confirmation_timeout_ms) {
     uint64_t sequence;
     {
         std::lock_guard<std::mutex> lock(mutex_);
+        const bool recharge_active = task_type_ == static_cast<int>(robot_sdk::TaskType::RECHARGING) &&
+                                     (task_status_ == static_cast<int>(robot_sdk::TaskStatus::STARTING) ||
+                                      task_status_ == static_cast<int>(robot_sdk::TaskStatus::RUNNING));
+        if (!recharge_active) return {false, "D1 recharge task is not active; stop command was not sent."};
         sequence = task_state_sequence_;
     }
     const auto stop = fromError(client_->StopRechargeTask(connect_timeout_ms_));
     if (!stop.success) return stop;
-    return waitForTaskTransition(static_cast<int>(robot_sdk::TaskType::RECHARGING),
-                                 static_cast<int>(robot_sdk::MachineStatus::RECHARGE), false,
-                                 sequence, confirmation_timeout_ms);
+    return waitForRechargeStopped(sequence, confirmation_timeout_ms);
 }
 
 BackendResult D1MaxBackend::startUndock(int confirmation_timeout_ms) {
     if (!client_ || !client_->IsConnected()) return {false, "D1 SDK is not connected."};
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        if (!charging_pile_connected_) {
+            return {false, "D1 is not connected to a charging pile; undock task was not sent."};
+        }
+    }
     auto control = takeControl();
     if (!control.success) return control;
     uint64_t sequence;
@@ -561,9 +574,7 @@ BackendResult D1MaxBackend::startUndock(int confirmation_timeout_ms) {
     }
     const auto start = fromError(client_->StartUnDockTask(connect_timeout_ms_));
     if (!start.success) return start;
-    return waitForTaskTransition(static_cast<int>(robot_sdk::TaskType::UNDOCK),
-                                 static_cast<int>(robot_sdk::MachineStatus::UNDOCK), true,
-                                 sequence, confirmation_timeout_ms);
+    return waitForUndockCompleted(sequence, confirmation_timeout_ms);
 }
 
 BackendResult D1MaxBackend::stopUndock(int confirmation_timeout_ms) {
@@ -575,39 +586,91 @@ BackendResult D1MaxBackend::stopUndock(int confirmation_timeout_ms) {
     }
     const auto stop = fromError(client_->StopUnDockTask(connect_timeout_ms_));
     if (!stop.success) return stop;
-    return waitForTaskTransition(static_cast<int>(robot_sdk::TaskType::UNDOCK),
-                                 static_cast<int>(robot_sdk::MachineStatus::UNDOCK), false,
-                                 sequence, confirmation_timeout_ms);
+    return waitForUndockStopped(sequence, confirmation_timeout_ms);
 }
 
-BackendResult D1MaxBackend::waitForTaskTransition(int task_type, int machine_status,
-                                                   bool starting, uint64_t min_sequence,
-                                                   int timeout_ms) {
+bool D1MaxBackend::isChargingLocked() const {
+    const int charging = static_cast<int>(robot_sdk::PowerSupplyStatus::CHARGING);
+    return (battery1_present_ && battery1_power_supply_status_ == charging) ||
+           (battery2_present_ && battery2_power_supply_status_ == charging);
+}
+
+BackendResult D1MaxBackend::waitForRechargeStarted(uint64_t min_sequence, int timeout_ms) {
     using robot_sdk::TaskStatus;
+    using robot_sdk::TaskType;
     const auto deadline = std::chrono::steady_clock::now() +
                           std::chrono::milliseconds(std::max(1, timeout_ms));
     std::unique_lock<std::mutex> lock(mutex_);
     while (true) {
-        const bool new_task_state = task_state_sequence_ > min_sequence && task_type_ == task_type;
+        const bool new_task_state = task_state_sequence_ > min_sequence &&
+                                    task_type_ == static_cast<int>(TaskType::RECHARGING);
         if (new_task_state && task_status_ == static_cast<int>(TaskStatus::FAILURE)) {
-            return {false, "D1 task failed, error_code=" + std::to_string(task_error_code_)};
+            return {false, "D1 recharge task failed, error_code=" + std::to_string(task_error_code_)};
         }
-        if (starting) {
-            const bool task_running = task_status_ == static_cast<int>(TaskStatus::STARTING) ||
-                                      task_status_ == static_cast<int>(TaskStatus::RUNNING);
-            if (new_task_state && task_running && machine_status_ == machine_status) {
-                return {true, "D1 task confirmed running."};
-            }
-        } else if (new_task_state && task_status_ == static_cast<int>(TaskStatus::STOPPED) &&
-                   machine_status_ != machine_status) {
-            return {true, "D1 task confirmed stopped."};
+        const bool task_active = task_status_ == static_cast<int>(TaskStatus::STARTING) ||
+                                 task_status_ == static_cast<int>(TaskStatus::RUNNING);
+        if (new_task_state && task_active && charging_pile_connected_ && isChargingLocked()) {
+            return {true, "D1 is connected to the charging pile and battery charging is confirmed."};
         }
         if (motion_cv_.wait_until(lock, deadline) == std::cv_status::timeout) {
             break;
         }
     }
-    const std::string operation = starting ? "start" : "stop";
-    return {false, "Timed out waiting for D1 task to " + operation + " confirmation."};
+    return {false, "Timed out waiting for D1 charging-pile connection and battery charging confirmation."};
+}
+
+BackendResult D1MaxBackend::waitForRechargeStopped(uint64_t min_sequence, int timeout_ms) {
+    using robot_sdk::TaskStatus;
+    using robot_sdk::TaskType;
+    const auto deadline = std::chrono::steady_clock::now() +
+                          std::chrono::milliseconds(std::max(1, timeout_ms));
+    std::unique_lock<std::mutex> lock(mutex_);
+    while (true) {
+        const bool stopped = task_state_sequence_ > min_sequence &&
+                             task_type_ == static_cast<int>(TaskType::RECHARGING) &&
+                             task_status_ == static_cast<int>(TaskStatus::STOPPED);
+        if (stopped) return {true, "D1 recharge task stopped."};
+        if (motion_cv_.wait_until(lock, deadline) == std::cv_status::timeout) break;
+    }
+    return {false, "Timed out waiting for D1 recharge task to stop."};
+}
+
+BackendResult D1MaxBackend::waitForUndockCompleted(uint64_t min_sequence, int timeout_ms) {
+    using robot_sdk::TaskStatus;
+    using robot_sdk::TaskType;
+    const auto deadline = std::chrono::steady_clock::now() +
+                          std::chrono::milliseconds(std::max(1, timeout_ms));
+    std::unique_lock<std::mutex> lock(mutex_);
+    while (true) {
+        const bool new_undock_state = task_state_sequence_ > min_sequence &&
+                                      task_type_ == static_cast<int>(TaskType::UNDOCK);
+        if (new_undock_state && task_status_ == static_cast<int>(TaskStatus::FAILURE)) {
+            return {false, "D1 undock task failed, error_code=" + std::to_string(task_error_code_)};
+        }
+        if (new_undock_state && task_status_ == static_cast<int>(TaskStatus::SUCCESS) &&
+            !charging_pile_connected_) {
+            return {true, "D1 undock completed and charging-pile disconnection is confirmed."};
+        }
+        if (motion_cv_.wait_until(lock, deadline) == std::cv_status::timeout) break;
+    }
+    return {false, "Timed out waiting for D1 undock completion and charging-pile disconnection."};
+}
+
+BackendResult D1MaxBackend::waitForUndockStopped(uint64_t min_sequence, int timeout_ms) {
+    using robot_sdk::TaskStatus;
+    using robot_sdk::TaskType;
+    const auto deadline = std::chrono::steady_clock::now() +
+                          std::chrono::milliseconds(std::max(1, timeout_ms));
+    std::unique_lock<std::mutex> lock(mutex_);
+    while (true) {
+        if (task_state_sequence_ > min_sequence &&
+            task_type_ == static_cast<int>(TaskType::UNDOCK) &&
+            task_status_ == static_cast<int>(TaskStatus::STOPPED)) {
+            return {true, "D1 undock task stopped."};
+        }
+        if (motion_cv_.wait_until(lock, deadline) == std::cv_status::timeout) break;
+    }
+    return {false, "Timed out waiting for D1 undock task to stop."};
 }
 
 int D1MaxBackend::chargeState() const {
@@ -619,7 +682,7 @@ int D1MaxBackend::chargeState() const {
     using robot_sdk::TaskType;
     if (task_status_ == static_cast<int>(TaskStatus::FAILURE)) return 4;
     if (task_type_ == static_cast<int>(TaskType::RECHARGING)) {
-        if (machine_status_ == static_cast<int>(MachineStatus::RECHARGE)) return 2;
+        if (charging_pile_connected_ && isChargingLocked()) return 2;
         if (task_status_ == static_cast<int>(TaskStatus::STARTING) ||
             task_status_ == static_cast<int>(TaskStatus::RUNNING)) return 1;
     }
@@ -627,6 +690,16 @@ int D1MaxBackend::chargeState() const {
         (task_status_ == static_cast<int>(TaskStatus::STARTING) ||
          task_status_ == static_cast<int>(TaskStatus::RUNNING))) return 3;
     return 0;
+}
+
+bool D1MaxBackend::chargeTaskActive() const {
+    std::lock_guard<std::mutex> lock(mutex_);
+    using robot_sdk::TaskStatus;
+    using robot_sdk::TaskType;
+    const bool running = task_status_ == static_cast<int>(TaskStatus::STARTING) ||
+                         task_status_ == static_cast<int>(TaskStatus::RUNNING);
+    return running && (task_type_ == static_cast<int>(TaskType::RECHARGING) ||
+                       task_type_ == static_cast<int>(TaskType::UNDOCK));
 }
 
 bool D1MaxBackend::velocityCommandAllowed() const {

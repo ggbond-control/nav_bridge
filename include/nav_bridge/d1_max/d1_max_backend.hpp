@@ -37,13 +37,14 @@ public:
     BackendResult setSpeed(int speed_level) override;
     bool velocityCommandAllowed() const;
     int bodyHeightState() const;
-    // These methods return success only after the SDK state callbacks confirm
-    // the requested task transition, rather than after the command ACK alone.
+    // These methods return success only after the SDK confirms the requested
+    // physical/task state, rather than after the command ACK alone.
     BackendResult startRecharge(int confirmation_timeout_ms);
     BackendResult stopRecharge(int confirmation_timeout_ms);
     BackendResult startUndock(int confirmation_timeout_ms);
     BackendResult stopUndock(int confirmation_timeout_ms);
     int chargeState() const;
+    bool chargeTaskActive() const;
     BackendState state() const override;
     void setStateCallback(StateCallback callback) override;
     void setImuCallback(ImuCallback callback) override;
@@ -56,9 +57,11 @@ private:
     class ControlCallback;
 
     BackendResult fromError(const std::error_code &ec) const;
-    BackendResult waitForTaskTransition(int task_type, int machine_status,
-                                        bool starting, uint64_t min_sequence,
-                                        int timeout_ms);
+    BackendResult waitForRechargeStarted(uint64_t min_sequence, int timeout_ms);
+    BackendResult waitForRechargeStopped(uint64_t min_sequence, int timeout_ms);
+    BackendResult waitForUndockCompleted(uint64_t min_sequence, int timeout_ms);
+    BackendResult waitForUndockStopped(uint64_t min_sequence, int timeout_ms);
+    bool isChargingLocked() const;
     void updateState(const BackendState &state);
 
     std::string host_ip_;
@@ -87,6 +90,11 @@ private:
     int task_status_{0};
     uint32_t task_error_code_{0};
     uint64_t task_state_sequence_{0};
+    bool charging_pile_connected_{false};
+    bool battery1_present_{false};
+    bool battery2_present_{false};
+    int battery1_power_supply_status_{0};
+    int battery2_power_supply_status_{0};
     std::condition_variable motion_cv_;
 };
 

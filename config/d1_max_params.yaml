@@ -10,7 +10,8 @@ nav_bridge_node:
     reconnect_interval_ms: 2000
     cmd_vel_rate_hz: 50
     cmd_vel_timeout_ms: 500
-    # START/STOP commands succeed only after SDK task-state confirmation.
+    # Physical charging/undock confirmation wait; D1 may need 30-60 seconds
+    # to approach, dock, or leave the charging pile.
     charge_task_confirmation_timeout_sec: 60
     # Prefer the navigation host's 200 Hz IMU driver; SDK remains available as a fallback.
     imu_source: "imu_driver"

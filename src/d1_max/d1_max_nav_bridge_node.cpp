@@ -237,18 +237,10 @@ public:
                     else if (command == 5) backend_result = backend_->stopUndock(confirmation_timeout_ms);
                     else backend_result = {false, "Unsupported D1 charge command. Use 0=START, 1=STOP, 3=QUERY, 4=UNDOCK_START, 5=UNDOCK_STOP."};
                     action_in_progress_.store(false);
-                    if ((command == 1 || command == 5) && backend_result.success) {
-                        charge_motion_blocked_.store(false);
-                    } else if ((command == 0 || command == 4) && !backend_result.success) {
-                        // Keep a safety block only when the task command was accepted
-                        // but its final state confirmation timed out. All other errors,
-                        // including a confirmed SDK FAILURE, cannot own navigation motion.
-                        const bool confirmation_timed_out =
-                            backend_result.message.find("Timed out waiting for D1 task") != std::string::npos;
-                        if (!confirmation_timed_out || backend_->chargeState() == 4) {
-                            charge_motion_blocked_.store(false);
-                        }
-                    }
+                    // The timer derives the lasting velocity block from the SDK's
+                    // live task state. This temporary flag only covers this service
+                    // call before a task-state callback arrives.
+                    charge_motion_blocked_.store(false);
                     result.successful = backend_result.success;
                     result.reason = backend_result.message;
                 }
@@ -297,6 +289,7 @@ private:
                 charge_motion_blocked_.store(false);
             }
             if (action_in_progress_.load() || charge_motion_blocked_.load() ||
+                backend_->chargeTaskActive() ||
                 !backend_->velocityCommandAllowed() || age > cmd_vel_timeout_ms_) {
                 vx = vy = vyaw = 0.0;
             }
