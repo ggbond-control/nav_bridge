@@ -506,11 +506,16 @@ BackendResult D1MaxBackend::setGait(int gait) {
                          connect_timeout_ms_)) {
             return {false, "Timeout waiting for D1 general gait mode."};
         }
-        int speed = static_cast<int>(robot_sdk::SpeedLevel::SPEED_LEVEL_MEDIUM);
-        if (gait == 0 || gait == 32) speed = static_cast<int>(robot_sdk::SpeedLevel::SPEED_LEVEL_SLOW);
-        else if (gait == 3) speed = static_cast<int>(robot_sdk::SpeedLevel::SPEED_LEVEL_HIGH);
-        auto speed_result = setSpeed(speed);
-        if (!speed_result.success) return speed_result;
+        // L_WALK is represented by the SDK's dedicated Gait posture. It is
+        // intentionally not followed by SetSpeed(SLOW): SDK Gait is a distinct
+        // mode, not merely the low-speed variant of the general posture.
+        if (gait != 32) {
+            int speed = static_cast<int>(robot_sdk::SpeedLevel::SPEED_LEVEL_MEDIUM);
+            if (gait == 0) speed = static_cast<int>(robot_sdk::SpeedLevel::SPEED_LEVEL_SLOW);
+            else if (gait == 3) speed = static_cast<int>(robot_sdk::SpeedLevel::SPEED_LEVEL_HIGH);
+            auto speed_result = setSpeed(speed);
+            if (!speed_result.success) return speed_result;
+        }
     }
 
     {

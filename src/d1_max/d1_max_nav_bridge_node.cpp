@@ -46,8 +46,24 @@ public:
                                                   connect_timeout_ms_, reconnect_interval_ms_,
                                                   imu_source_ == "sdk");
         backend_->setStateCallback([this](const BackendState &state) {
-            std::lock_guard<std::mutex> lock(state_mutex_);
-            state_ = state;
+            BackendState previous;
+            bool changed = false;
+            {
+                std::lock_guard<std::mutex> lock(state_mutex_);
+                previous = state_;
+                changed = previous.motion_state != state.motion_state ||
+                          previous.mode != state.mode ||
+                          previous.control_owned != state.control_owned;
+                state_ = state;
+            }
+            if (changed) {
+                RCLCPP_INFO(get_logger(),
+                            "D1 nav state machine: motion=%d->%d, gait=%d->%d, control=%s->%s",
+                            static_cast<int>(previous.motion_state),
+                            static_cast<int>(state.motion_state), previous.mode, state.mode,
+                            previous.control_owned ? "owned" : "released",
+                            state.control_owned ? "owned" : "released");
+            }
         });
         backend_->setImuCallback([this](const BackendImu &data) {
             if (imu_source_ != "sdk") return;
@@ -162,12 +178,19 @@ public:
                         const auto it = names.find(name);
                         if (it != names.end()) gait = it->second;
                     }
+                    const int previous_gait = backend_->state().mode;
                     action_in_progress_.store(true);
                     const auto backend_result = gait >= 0
                                                      ? backend_->setGait(gait)
                                                      : BackendResult{false, "Unsupported D1 gait name or value."};
                     action_in_progress_.store(false);
                     result.successful = backend_result.success; result.reason = backend_result.message;
+                    if (backend_result.success && previous_gait != gait) {
+                        RCLCPP_INFO(get_logger(),
+                                    "D1 nav state transition: gait %d -> %d; SDK mapping=%s%s",
+                                    previous_gait, gait, d1GaitMapping(gait).c_str(),
+                                    gait == 32 ? "; speed unchanged (dedicated Gait posture)" : "");
+                    }
                 }
                 response->results.push_back(result);
             });
@@ -254,6 +277,17 @@ public:
     }
 
 private:
+    static std::string d1GaitMapping(int gait) {
+        switch (gait) {
+        case 32: return "Gait() [L_WALK]";
+        case 6: case 7: case 8: case 36: return "Stair()";
+        case 0: return "Gait()+SetSpeed(SLOW)";
+        case 3: return "Gait()+SetSpeed(HIGH)";
+        case 33: case 34: return "Gait()+SetSpeed(MEDIUM)";
+        default: return "unsupported";
+        }
+    }
+
     static void fillResponse(const std::shared_ptr<std_srvs::srv::Trigger::Response> &response,
                              const BackendResult &result) {
         response->success = result.success;
