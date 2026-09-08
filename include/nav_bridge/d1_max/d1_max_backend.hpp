@@ -84,6 +84,7 @@ private:
     int imu_configured_hz_{0};
     int motion_status_{0};
     int navigation_gait_{33};
+    int speed_level_{2};
     int machine_status_{0};
     int task_type_{0};
     int task_status_{0};

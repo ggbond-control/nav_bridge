@@ -251,10 +251,50 @@ BackendResult D1MaxBackend::releaseControl() {
 }
 
 BackendResult D1MaxBackend::move(double vx, double vy, double vyaw) {
-    const auto clamp = [](double value) { return std::max(-1.0, std::min(1.0, value)); };
+    // ROS uses SI units (m/s, rad/s), while SDK Move() expects normalized
+    // percentages in [-1, 1]. Convert each axis using the active speed/gait
+    // limits before calling the SDK.
+    int gait;
+    int speed_level;
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        gait = navigation_gait_;
+        speed_level = speed_level_;
+    }
+
+    // L_WALK is implemented by the dedicated SDK Gait posture, but its
+    // externally visible velocity contract follows general-mode low speed.
+    if (gait == 32) speed_level = static_cast<int>(robot_sdk::SpeedLevel::SPEED_LEVEL_SLOW);
+
+    double max_forward = 1.0;
+    if (speed_level == static_cast<int>(robot_sdk::SpeedLevel::SPEED_LEVEL_MEDIUM)) max_forward = 2.0;
+    else if (speed_level == static_cast<int>(robot_sdk::SpeedLevel::SPEED_LEVEL_HIGH)) max_forward = 3.0;
+
+    const double max_lateral = 0.5;
+    double max_yaw = 1.5;
+    const double abs_forward = std::abs(vx);
+    // SDK medium/high rules: lateral motion is disabled above 1 m/s and yaw
+    // is reduced to 1 rad/s; high speed reduces yaw to 0.5 rad/s above 2 m/s.
+    if (speed_level != static_cast<int>(robot_sdk::SpeedLevel::SPEED_LEVEL_SLOW)) {
+        if (abs_forward > 1.0) {
+            vy = 0.0;
+            max_yaw = 1.0;
+        }
+        if (speed_level == static_cast<int>(robot_sdk::SpeedLevel::SPEED_LEVEL_HIGH) &&
+            abs_forward > 2.0) {
+            max_yaw = 0.5;
+        }
+    }
+
+    const auto normalize = [](double value, double limit) {
+        if (limit <= 0.0) return 0.0;
+        return std::max(-1.0, std::min(1.0, value / limit));
+    };
+    const float sdk_left_right = static_cast<float>(normalize(vy, max_lateral));
+    const float sdk_forward_back = static_cast<float>(normalize(vx, max_forward));
+    const float sdk_yaw = static_cast<float>(normalize(vyaw, max_yaw));
     // SDK order is left/right, forward/back, yaw; ROS order is x, y, yaw.
-    return fromError(client_->Move(static_cast<float>(clamp(vy)), static_cast<float>(clamp(vx)),
-                                   static_cast<float>(clamp(vyaw))));
+    return fromError(client_->Move(sdk_left_right, sdk_forward_back, sdk_yaw));
 }
 
 BackendResult D1MaxBackend::stand() {
@@ -515,6 +555,11 @@ BackendResult D1MaxBackend::setGait(int gait) {
             else if (gait == 3) speed = static_cast<int>(robot_sdk::SpeedLevel::SPEED_LEVEL_HIGH);
             auto speed_result = setSpeed(speed);
             if (!speed_result.success) return speed_result;
+        } else {
+            // Keep the local velocity contract at general-mode low speed,
+            // without sending SetSpeed(SLOW) to the dedicated Gait posture.
+            std::lock_guard<std::mutex> lock(mutex_);
+            speed_level_ = static_cast<int>(robot_sdk::SpeedLevel::SPEED_LEVEL_SLOW);
         }
     }
 
@@ -527,7 +572,12 @@ BackendResult D1MaxBackend::setGait(int gait) {
 }
 
 BackendResult D1MaxBackend::setSpeed(int speed_level) {
-    return fromError(client_->SetSpeed(speed_level, connect_timeout_ms_));
+    const auto result = fromError(client_->SetSpeed(speed_level, connect_timeout_ms_));
+    if (result.success) {
+        std::lock_guard<std::mutex> lock(mutex_);
+        speed_level_ = speed_level;
+    }
+    return result;
 }
 
 BackendResult D1MaxBackend::startRecharge(int confirmation_timeout_ms) {
