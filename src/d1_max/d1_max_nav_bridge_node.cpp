@@ -283,7 +283,8 @@ private:
         case 6: case 7: case 8: case 36: return "Stair()";
         case 0: return "Gait()+SetSpeed(SLOW)";
         case 3: return "Gait()+SetSpeed(HIGH)";
-        case 33: case 34: return "Gait()+SetSpeed(MEDIUM)";
+        case 33: return "Gait()+SetSpeed(HIGH)";
+        case 34: return "Gait()+SetSpeed(MEDIUM)";
         default: return "unsupported";
         }
     }

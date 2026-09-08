@@ -554,7 +554,9 @@ BackendResult D1MaxBackend::setGait(int gait) {
         if (gait != 32) {
             int speed = static_cast<int>(robot_sdk::SpeedLevel::SPEED_LEVEL_MEDIUM);
             if (gait == 0) speed = static_cast<int>(robot_sdk::SpeedLevel::SPEED_LEVEL_SLOW);
-            else if (gait == 3) speed = static_cast<int>(robot_sdk::SpeedLevel::SPEED_LEVEL_HIGH);
+            else if (gait == 3 || gait == 33) {
+                speed = static_cast<int>(robot_sdk::SpeedLevel::SPEED_LEVEL_HIGH);
+            }
             auto speed_result = setSpeed(speed);
             if (!speed_result.success) return speed_result;
         } else {
