@@ -189,7 +189,7 @@ public:
                         RCLCPP_INFO(get_logger(),
                                     "D1 nav state transition: gait %d -> %d; SDK mapping=%s%s",
                                     previous_gait, gait, d1GaitMapping(gait).c_str(),
-                                    gait == 32 ? "; speed unchanged (dedicated Gait posture)" : "");
+                                    gait == 32 ? "; ROS velocity contract=general MEDIUM" : "");
                     }
                 }
                 response->results.push_back(result);
@@ -279,7 +279,7 @@ public:
 private:
     static std::string d1GaitMapping(int gait) {
         switch (gait) {
-        case 32: return "Gait() [L_WALK]";
+        case 32: return "Gait() [L_WALK], ROS limit=general MEDIUM";
         case 6: case 7: case 8: case 36: return "Stair()";
         case 0: return "Gait()+SetSpeed(SLOW)";
         case 3: return "Gait()+SetSpeed(HIGH)";

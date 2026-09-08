@@ -263,8 +263,10 @@ BackendResult D1MaxBackend::move(double vx, double vy, double vyaw) {
     }
 
     // L_WALK is implemented by the dedicated SDK Gait posture, but its
-    // externally visible velocity contract follows general-mode low speed.
-    if (gait == 32) speed_level = static_cast<int>(robot_sdk::SpeedLevel::SPEED_LEVEL_SLOW);
+    // externally visible velocity contract follows general-mode medium speed.
+    // Do not send SetSpeed() for L_WALK; this is only the local ROS-to-SDK
+    // normalization contract.
+    if (gait == 32) speed_level = static_cast<int>(robot_sdk::SpeedLevel::SPEED_LEVEL_MEDIUM);
 
     double max_forward = 1.0;
     if (speed_level == static_cast<int>(robot_sdk::SpeedLevel::SPEED_LEVEL_MEDIUM)) max_forward = 2.0;
@@ -556,10 +558,10 @@ BackendResult D1MaxBackend::setGait(int gait) {
             auto speed_result = setSpeed(speed);
             if (!speed_result.success) return speed_result;
         } else {
-            // Keep the local velocity contract at general-mode low speed,
-            // without sending SetSpeed(SLOW) to the dedicated Gait posture.
+            // Keep the local velocity contract at general-mode medium speed,
+            // without sending SetSpeed() to the dedicated Gait posture.
             std::lock_guard<std::mutex> lock(mutex_);
-            speed_level_ = static_cast<int>(robot_sdk::SpeedLevel::SPEED_LEVEL_SLOW);
+            speed_level_ = static_cast<int>(robot_sdk::SpeedLevel::SPEED_LEVEL_MEDIUM);
         }
     }
 
