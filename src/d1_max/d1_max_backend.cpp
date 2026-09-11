@@ -365,7 +365,7 @@ BackendResult D1MaxBackend::stand() {
     // feedback wait are identical to the explicit gait service.
     const auto mountain = setGait(33);
     if (!mountain.success) return mountain;
-    return {true, "D1 Max is standing in the general navigation mode (MOUNTAIN), medium speed."};
+    return {true, "D1 Max is standing in the general navigation mode (MOUNTAIN), high speed."};
 }
 
 BackendResult D1MaxBackend::lie() {
