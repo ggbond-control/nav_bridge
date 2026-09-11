@@ -344,7 +344,6 @@ BackendResult D1MaxBackend::stand() {
     }
 
     current = status();
-    const bool needs_general_mode = !is_general(current);
     if (!is_general(current)) {
         std::error_code ec;
         if (current == static_cast<int>(robot_sdk::MotionStatus::MOTION_STATUS_LIE_DOWN)) {
@@ -361,23 +360,11 @@ BackendResult D1MaxBackend::stand() {
         }
     }
 
-    current = status();
-    if (needs_general_mode) {
-        auto ec = client_->Gait(connect_timeout_ms_);
-        if (ec) return fromError(ec);
-        if (!wait_status({static_cast<int>(robot_sdk::MotionStatus::MOTION_STATUS_GAIT),
-                          static_cast<int>(robot_sdk::MotionStatus::MOTION_STATUS_WALK)},
-                         connect_timeout_ms_)) {
-            return {false, "Timeout switching D1 to the general navigation mode (MOUNTAIN)."};
-        }
-    }
-
-    auto speed = setSpeed(static_cast<int>(robot_sdk::SpeedLevel::SPEED_LEVEL_MEDIUM));
-    if (!speed.success) return speed;
-
-    auto final_state = this->state();
-    final_state.connected = true;
-    updateState(final_state);
+    // The unified /stand contract means standing in MOUNTAIN, not merely any
+    // generic locomotion state. Reuse setGait(33) so the SDK command and
+    // feedback wait are identical to the explicit gait service.
+    const auto mountain = setGait(33);
+    if (!mountain.success) return mountain;
     return {true, "D1 Max is standing in the general navigation mode (MOUNTAIN), medium speed."};
 }
 
