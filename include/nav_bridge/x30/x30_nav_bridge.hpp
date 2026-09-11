@@ -76,6 +76,8 @@ protected:
     void handleChargeCommandRequest(
         const std::shared_ptr<rcl_interfaces::srv::SetParameters::Request> req,
         std::shared_ptr<rcl_interfaces::srv::SetParameters::Response> res) override;
+    void handleReadyRequest(const std::shared_ptr<std_srvs::srv::Trigger::Request> req,
+                            std::shared_ptr<std_srvs::srv::Trigger::Response> res);
 
 private:
     struct ControlPulse {
@@ -184,6 +186,7 @@ private:
     // ===================== 业务模块 =====================
     RobotStateStore state_store_;
     std::unique_ptr<ActionExecutor> action_executor_;
+    rclcpp::Service<std_srvs::srv::Trigger>::SharedPtr ready_srv_;
     StateCallback backend_state_callback_;
     ImuCallback imu_callback_;
     OdometryCallback odom_callback_;

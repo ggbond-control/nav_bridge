@@ -251,6 +251,8 @@ bool X30NavBridge::initialize() {
     using namespace std::placeholders;
     stand_srv_ = this->create_service<std_srvs::srv::Trigger>(
         "~/stand", std::bind(&X30NavBridge::handleStandRequest, this, _1, _2));
+    ready_srv_ = this->create_service<std_srvs::srv::Trigger>(
+        "~/ready", std::bind(&X30NavBridge::handleReadyRequest, this, _1, _2));
     lie_srv_ = this->create_service<std_srvs::srv::Trigger>(
         "~/lie", std::bind(&X30NavBridge::handleLieRequest, this, _1, _2));
     soft_estop_srv_ = this->create_service<std_srvs::srv::Trigger>(
@@ -923,6 +925,9 @@ bool X30NavBridge::isExpectedChargeStateForCommand(uint8_t command, uint16_t sta
         return state == CHARGE_STATE_DO_CHARGE_TASK || state == CHARGE_STATE_CHARGING;
     case kChargeCommandStop:
         return state == CHARGE_STATE_IDLE;
+    case 4:  // Unified UNDOCK_START maps to X30 STOP + idle confirmation.
+    case 5:
+        return state == CHARGE_STATE_IDLE;
     case kChargeCommandReset:
         return state == CHARGE_STATE_IDLE;
     case kChargeCommandQuery:
@@ -1525,6 +1530,13 @@ void X30NavBridge::handleStandRequest(
     }
 }
 
+void X30NavBridge::handleReadyRequest(
+    const std::shared_ptr<std_srvs::srv::Trigger::Request> req,
+    std::shared_ptr<std_srvs::srv::Trigger::Response> res)
+{
+    handleStandRequest(req, res);
+}
+
 void X30NavBridge::handleLieRequest(
     const std::shared_ptr<std_srvs::srv::Trigger::Request> /*req*/,
     std::shared_ptr<std_srvs::srv::Trigger::Response> res) {
@@ -1772,7 +1784,11 @@ bool X30NavBridge::parseChargeCommandParameter(const rcl_interfaces::msg::Parame
             command = static_cast<uint8_t>(raw);
             return true;
         }
-        error = "Integer charge_command " + std::to_string(raw) + " out of range [0, 3].";
+        if (raw == 4 || raw == 5) {
+            command = static_cast<uint8_t>(raw);
+            return true;
+        }
+        error = "Integer charge_command " + std::to_string(raw) + " out of range [0, 5].";
         return false;
     }
 
@@ -1798,9 +1814,17 @@ bool X30NavBridge::parseChargeCommandParameter(const rcl_interfaces::msg::Parame
             command = kChargeCommandQuery;
             return true;
         }
+        if (upper == "UNDOCK_START") {
+            command = 4;
+            return true;
+        }
+        if (upper == "UNDOCK_STOP") {
+            command = 5;
+            return true;
+        }
 
         error = "Unknown charge_command '" + param.value.string_value +
-                "'. Supported: start, stop, reset, query, or integer 0..3.";
+                "'. Supported: start, stop, reset, query, undock_start, undock_stop, or integer 0..5.";
         return false;
     }
 
@@ -1873,6 +1897,14 @@ X30NavBridge::ChargeCommandResult X30NavBridge::executeChargeCommand(uint8_t com
         cmd_code = CMD_CHARGE_MANAGER_QUERY;
         cmd_value = CHARGE_COMMAND_QUERY_VALUE;
         break;
+    case 4:  // Unified interface: X30 has no separate undock SDK task; STOP + idle is its equivalent.
+        cmd_code = CMD_CHARGE_MANAGER;
+        cmd_value = CHARGE_COMMAND_STOP_VALUE;
+        break;
+    case 5:
+        cmd_code = CMD_CHARGE_MANAGER;
+        cmd_value = CHARGE_COMMAND_STOP_VALUE;
+        break;
     default:
         result.success = false;
         result.charge_state = CHARGE_STATE_IDLE;
@@ -1881,7 +1913,8 @@ X30NavBridge::ChargeCommandResult X30NavBridge::executeChargeCommand(uint8_t com
         return result;
     }
 
-    const bool should_wait_until_target = command == kChargeCommandStart || command == kChargeCommandStop;
+    const bool should_wait_until_target = command == kChargeCommandStart || command == kChargeCommandStop ||
+                                          command == 4 || command == 5;
 
     RCLCPP_DEBUG(this->get_logger(), "⚡ 收到充电服务请求 command=%u", static_cast<unsigned int>(command));
 
@@ -1947,7 +1980,7 @@ X30NavBridge::ChargeCommandResult X30NavBridge::executeChargeCommand(uint8_t com
         result.state_name = chargeStateToString(final_state);
         if (isExpectedChargeStateForCommand(command, final_state))
         {
-            if (command == kChargeCommandStop)
+            if (command == kChargeCommandStop || command == 4 || command == 5)
             {
                 if (!switchToManualModeAfterCharge())
                 {

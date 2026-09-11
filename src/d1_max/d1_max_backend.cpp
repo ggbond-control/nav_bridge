@@ -618,6 +618,25 @@ BackendResult D1MaxBackend::stopRecharge(int confirmation_timeout_ms) {
 
 BackendResult D1MaxBackend::startUndock(int confirmation_timeout_ms) {
     if (!client_ || !client_->IsConnected()) return {false, "D1 SDK is not connected."};
+    const auto deadline = std::chrono::steady_clock::now() +
+                          std::chrono::milliseconds(std::max(1, confirmation_timeout_ms));
+    const auto remaining_timeout_ms = [&deadline]() {
+        return std::max(1, static_cast<int>(std::chrono::duration_cast<std::chrono::milliseconds>(
+            deadline - std::chrono::steady_clock::now()).count()));
+    };
+    bool recharge_active = false;
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        recharge_active = task_type_ == static_cast<int>(robot_sdk::TaskType::RECHARGING) &&
+                                     (task_status_ == static_cast<int>(robot_sdk::TaskStatus::STARTING) ||
+                                      task_status_ == static_cast<int>(robot_sdk::TaskStatus::RUNNING));
+    }
+    if (recharge_active) {
+        // Unified UNDOCK_START is an exit operation: stop charging first,
+        // then start the physical undock task.
+        const auto stop = stopRecharge(remaining_timeout_ms());
+        if (!stop.success) return stop;
+    }
     {
         std::lock_guard<std::mutex> lock(mutex_);
         if (!charging_pile_connected_) {
@@ -633,7 +652,7 @@ BackendResult D1MaxBackend::startUndock(int confirmation_timeout_ms) {
     }
     const auto start = fromError(client_->StartUnDockTask(connect_timeout_ms_));
     if (!start.success) return start;
-    return waitForUndockCompleted(sequence, confirmation_timeout_ms);
+    return waitForUndockCompleted(sequence, remaining_timeout_ms());
 }
 
 BackendResult D1MaxBackend::stopUndock(int confirmation_timeout_ms) {

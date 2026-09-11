@@ -156,6 +156,17 @@ public:
                 action_in_progress_.store(false);
                 fillResponse(response, result);
             });
+        // Compatibility endpoint used by inspection_charge_executor after a
+        // confirmed charge STOP/UNDOCK sequence.  D1's recovery operation is
+        // the same stand/general-navigation preparation exposed by x30 ready.
+        ready_srv_ = create_service<std_srvs::srv::Trigger>(
+            "~/ready", [this](const std::shared_ptr<std_srvs::srv::Trigger::Request> /*request*/,
+                               std::shared_ptr<std_srvs::srv::Trigger::Response> response) {
+                action_in_progress_.store(true);
+                const auto result = backend_->stand();
+                action_in_progress_.store(false);
+                fillResponse(response, result);
+            });
         gait_srv_ = create_service<rcl_interfaces::srv::SetParameters>(
             "~/set_gait", [this](const std::shared_ptr<rcl_interfaces::srv::SetParameters::Request> request,
                                   std::shared_ptr<rcl_interfaces::srv::SetParameters::Response> response) {
@@ -370,7 +381,7 @@ private:
     rclcpp::Publisher<nav_msgs::msg::Odometry>::SharedPtr odom_pub_;
     rclcpp::Publisher<sensor_msgs::msg::JointState>::SharedPtr joint_pub_;
     rclcpp::Publisher<std_msgs::msg::String>::SharedPtr fault_pub_;
-    rclcpp::Service<std_srvs::srv::Trigger>::SharedPtr stand_srv_, lie_srv_, estop_srv_, release_srv_;
+    rclcpp::Service<std_srvs::srv::Trigger>::SharedPtr stand_srv_, lie_srv_, estop_srv_, release_srv_, ready_srv_;
     rclcpp::Service<rcl_interfaces::srv::SetParameters>::SharedPtr gait_srv_, speed_srv_;
     rclcpp::Service<rcl_interfaces::srv::SetParameters>::SharedPtr body_height_srv_, charge_command_srv_;
     rclcpp::TimerBase::SharedPtr timer_;
