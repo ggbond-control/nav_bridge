@@ -1,0 +1,199 @@
+eggs:
+  driver-rslidar:
+    command: bash /opt/runtime/bin/start_rslidar_driver.sh
+    name: driver-rslidar
+    id: 1
+    state:
+      status: Running
+      start_time: null
+      try_count: 0
+      error: ''
+      pid: 0
+    paths:
+
+  driver-uss:
+    command: bash /opt/runtime/bin/start_uss_driver.sh
+    name: driver-uss
+    id: 2
+    state:
+      status: Running
+      start_time: null
+      try_count: 0
+      error: ''
+      pid: 0
+    paths:
+
+  driver-imu:
+    command: bash /opt/runtime/bin/start_imu_driver.sh
+    name: driver-imu
+    id: 3
+    state:
+      status: Running
+      start_time: null
+      try_count: 0
+      error: ''
+      pid: 0
+    paths:
+
+  driver-uwb:
+    command: bash /opt/runtime/bin/start_uwb_driver.sh
+    name: driver-uwb
+    id: 4
+    state:
+      status: Running
+      start_time: null
+      try_count: 0
+      error: ''
+      pid: 0
+    paths:
+
+  driver-rtk:
+    command: bash /opt/runtime/bin/start_rtk_driver.sh
+    name: driver-rtk
+    id: 5
+    state:
+      status: Running
+      start_time: null
+      try_count: 0
+      error: ''
+      pid: 0
+    paths:
+
+  perception-seg:
+    command: bash /opt/runtime/bin/start_perception_seg.sh
+    name: perception-seg
+    id: 6
+    state:
+      status: Running
+      start_time: null
+      try_count: 8
+      error: ''
+      pid: 0
+    paths:
+
+  robot-forward:
+    command: bash /opt/runtime/bin/start_robot_forward.sh
+    name: robot-forward
+    id: 7
+    state:
+      status: Stopped
+      start_time: null
+      try_count: 0
+      error: ''
+      pid: 0
+    paths:
+
+  time-sync:
+    command: bash /opt/runtime/bin/start_linuxptp.sh
+    name: time-sync
+    id: 8
+    state:
+      status: Stopped
+      start_time: null
+      try_count: 0
+      error: ''
+      pid: 0
+    paths:
+
+  robot-alg-manager: 
+    command: bash /opt/runtime/bin/alg-manager.sh
+    name: robot-alg-manager
+    id: 9
+    state:
+      status: Running
+      start_time: null
+      try_count: 0
+      error: ''
+      pid: 0
+    paths:
+
+  robot-meb:
+    command: bash /opt/runtime/bin/start_robot_meb.sh
+    name: robot-meb
+    id: 10
+    state:
+      status: Running
+      start_time: null
+      try_count: 0
+      error: ''
+      pid: 0
+    paths:
+
+  perception-track:
+    command: bash /opt/runtime/bin/start_perception_track.sh
+    name: perception-track
+    id: 11
+    state:
+      status: Running
+      start_time: null
+      try_count: 0
+      error: ''
+      pid: 0
+    paths:
+
+  image-decoder:
+    command: bash /opt/runtime/bin/start_image_decoder.sh
+    name: image-decoder
+    id: 12
+    state:
+      status: Running
+      start_time: null
+      try_count: 0
+      error: ''
+      pid: 0
+    paths:
+
+
+  robot_platform_agent:
+    command: bash /opt/runtime/bin/start_robot_platform_agent.sh
+    name: robot_platform_agent
+    id: 13
+    state:
+      status: Running
+      start_time: null
+      try_count: 0
+      error: ''
+      pid: 0
+    paths:
+
+  nav:
+    command: bash /opt/runtime/bin/start_nav.sh
+    name: nav
+    id: 14
+    state:
+      status: Stopped
+      start_time: null
+      try_count: 0
+      error: ''
+      pid: 0
+    paths:
+      stdout: /home/robot/robot_launch_log/nav.stdout
+      stderr: /home/robot/robot_launch_log/nav.stderr
+
+  robot_slam:
+    command: bash /opt/runtime/bin/start_robot_slam.sh
+    name: robot_slam
+    id: 15
+    state:
+      status: Stopped
+      start_time: null
+      try_count: 0
+      error: ''
+      pid: 0
+    paths:
+      stdout: /home/robot/robot_launch_log/robot_slam.stdout
+      stderr: /home/robot/robot_launch_log/robot_slam.stderr
+
+  localization:
+    command: bash /opt/runtime/bin/start_naviloc.sh
+    name: localization
+    id: 16
+    state:
+      status: Stopped
+      start_time: null
+      try_count: 0
+      error: ''
+      pid: 0
+    paths:
+      stdout: /home/robot/robot_launch_log/robot_naviloc.stdout
+      stderr: /home/robot/robot_launch_log/robot_naviloc.stderr
