@@ -1,0 +1,17 @@
+# /etc/systemd/system/fhzn-wifi.service
+[Unit]
+Description=FHZN Wi-Fi station supplicant (wlan0)
+Documentation=man:wpa_supplicant(8)
+Wants=network-pre.target
+After=systemd-networkd.service network-pre.target
+Before=network.target
+
+[Service]
+Type=simple
+ExecStart=/sbin/wpa_supplicant -i wlan0 -c /home/robot/FHZN_WIFI.conf
+ExecReload=/bin/kill -HUP $MAINPID
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target

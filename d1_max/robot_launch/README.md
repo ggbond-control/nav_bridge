@@ -2,6 +2,12 @@
 
 本目录是从 D1 Max 导航主机 `robot@192.168.168.100` 导出的配置备份。备份对象原先位于导航主机的 `~/Workspace/driver_ws` 和 `~/.robot_egg_launch.yaml`，用于固件升级后恢复；固件升级可能删除第三方 ROS 包、启动脚本和 `robot-launch` egg 配置。
 
+## bot 主机 WIFI 设置
+
+```
+wpa_passphrase FHZN FHZN1234 >  ~/FHZN_WIFI.conf
+```
+
 ## 目录内容
 
 ```text
