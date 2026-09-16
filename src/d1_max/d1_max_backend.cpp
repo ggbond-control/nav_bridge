@@ -76,7 +76,21 @@ public:
             owner_.task_type_ = static_cast<int>(data.task_type);
             owner_.task_status_ = static_cast<int>(data.task_status);
             owner_.task_error_code_ = data.error_code;
-            ++owner_.task_state_sequence_;
+            const uint64_t sequence = ++owner_.task_state_sequence_;
+            if (data.task_type == robot_sdk::TaskType::RECHARGING &&
+                data.task_status == robot_sdk::TaskStatus::STOPPED) {
+                owner_.recharge_stopped_sequence_ = sequence;
+            }
+            if (data.task_type == robot_sdk::TaskType::UNDOCK) {
+                if (data.task_status == robot_sdk::TaskStatus::SUCCESS) {
+                    owner_.undock_success_sequence_ = sequence;
+                } else if (data.task_status == robot_sdk::TaskStatus::FAILURE) {
+                    owner_.undock_failure_sequence_ = sequence;
+                    owner_.undock_failure_error_code_ = data.error_code;
+                } else if (data.task_status == robot_sdk::TaskStatus::STOPPED) {
+                    owner_.undock_stopped_sequence_ = sequence;
+                }
+            }
         }
         owner_.motion_cv_.notify_all();
     }
@@ -685,52 +699,44 @@ BackendResult D1MaxBackend::waitForRechargeStarted(uint64_t min_sequence, int ti
 }
 
 BackendResult D1MaxBackend::waitForRechargeStopped(uint64_t min_sequence, int timeout_ms) {
-    using robot_sdk::TaskStatus;
-    using robot_sdk::TaskType;
     const auto deadline = std::chrono::steady_clock::now() +
                           std::chrono::milliseconds(std::max(1, timeout_ms));
     std::unique_lock<std::mutex> lock(mutex_);
     while (true) {
-        const bool stopped = task_state_sequence_ > min_sequence &&
-                             task_type_ == static_cast<int>(TaskType::RECHARGING) &&
-                             task_status_ == static_cast<int>(TaskStatus::STOPPED);
-        if (stopped) return {true, "D1 recharge task stopped."};
+        if (recharge_stopped_sequence_ > min_sequence) {
+            return {true, "D1 recharge task stopped."};
+        }
         if (motion_cv_.wait_until(lock, deadline) == std::cv_status::timeout) break;
     }
     return {false, "Timed out waiting for D1 recharge task to stop."};
 }
 
 BackendResult D1MaxBackend::waitForUndockCompleted(uint64_t min_sequence, int timeout_ms) {
-    using robot_sdk::TaskStatus;
-    using robot_sdk::TaskType;
     const auto deadline = std::chrono::steady_clock::now() +
                           std::chrono::milliseconds(std::max(1, timeout_ms));
     std::unique_lock<std::mutex> lock(mutex_);
     while (true) {
-        const bool new_undock_state = task_state_sequence_ > min_sequence &&
-                                      task_type_ == static_cast<int>(TaskType::UNDOCK);
-        if (new_undock_state && task_status_ == static_cast<int>(TaskStatus::FAILURE)) {
-            return {false, "D1 undock task failed, error_code=" + std::to_string(task_error_code_)};
+        if (undock_failure_sequence_ > min_sequence) {
+            return {false, "D1 undock task failed, error_code=" +
+                           std::to_string(undock_failure_error_code_)};
         }
-        if (new_undock_state && task_status_ == static_cast<int>(TaskStatus::SUCCESS) &&
-            !charging_pile_connected_) {
-            return {true, "D1 undock completed and charging-pile disconnection is confirmed."};
+        if (undock_success_sequence_ > min_sequence) {
+            // TaskStateInfo is the SDK's terminal task result. The charging
+            // pile telemetry is deliberately not a success prerequisite: it
+            // may update after SUCCESS or lag the physical departure.
+            return {true, "D1 undock task completed."};
         }
         if (motion_cv_.wait_until(lock, deadline) == std::cv_status::timeout) break;
     }
-    return {false, "Timed out waiting for D1 undock completion and charging-pile disconnection."};
+    return {false, "Timed out waiting for D1 undock task completion."};
 }
 
 BackendResult D1MaxBackend::waitForUndockStopped(uint64_t min_sequence, int timeout_ms) {
-    using robot_sdk::TaskStatus;
-    using robot_sdk::TaskType;
     const auto deadline = std::chrono::steady_clock::now() +
                           std::chrono::milliseconds(std::max(1, timeout_ms));
     std::unique_lock<std::mutex> lock(mutex_);
     while (true) {
-        if (task_state_sequence_ > min_sequence &&
-            task_type_ == static_cast<int>(TaskType::UNDOCK) &&
-            task_status_ == static_cast<int>(TaskStatus::STOPPED)) {
+        if (undock_stopped_sequence_ > min_sequence) {
             return {true, "D1 undock task stopped."};
         }
         if (motion_cv_.wait_until(lock, deadline) == std::cv_status::timeout) break;

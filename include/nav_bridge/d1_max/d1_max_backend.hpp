@@ -90,6 +90,14 @@ private:
     int task_status_{0};
     uint32_t task_error_code_{0};
     uint64_t task_state_sequence_{0};
+    // Task-state callbacks are edge-triggered. Preserve terminal events for
+    // the current command so a later state update cannot overwrite them
+    // before a synchronous ROS service wakes up.
+    uint64_t recharge_stopped_sequence_{0};
+    uint64_t undock_success_sequence_{0};
+    uint64_t undock_failure_sequence_{0};
+    uint32_t undock_failure_error_code_{0};
+    uint64_t undock_stopped_sequence_{0};
     bool charging_pile_connected_{false};
     bool battery1_present_{false};
     bool battery2_present_{false};
