@@ -1,0 +1,13 @@
+{
+  queries_default_timeout: 120000,
+  transport: {
+    shared_memory: {
+      enabled: false
+    }
+  },
+  connect: {
+    endpoints: [
+      "tcp/127.0.0.1:7447"        // 连接本机 Router
+    ]
+  }
+}
