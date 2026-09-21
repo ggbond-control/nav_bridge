@@ -63,7 +63,7 @@ scp -r d1_max/robot_launch/cloud_merge \
 
 ```bash
 cd ~/Workspace/driver_ws
-source /opt/ros/jazzy/setup.bash
+source /opt/ros/humble/setup.bash
 colcon build --packages-select cloud_merge --symlink-install
 source install/setup.bash
 ```
@@ -84,8 +84,12 @@ chmod +x ~/Workspace/driver_ws/bin/start_cloud_merge.sh
 #!/usr/bin/env bash
 set -e
 source /opt/runtime/env.bash
-source /home/robot/Workspace/driver_ws/install/setup.bash
-exec ros2 launch cloud_merge cloud_merge.launch.py use_rviz:=false
+source /opt/ros/humble/setup.bash
+source /home/robot/Workspace/driver_ws/install/cloud_merge/share/cloud_merge/local_setup.bash
+cloud_merge_prefix=/home/robot/Workspace/driver_ws/install/cloud_merge
+export AMENT_PREFIX_PATH="${cloud_merge_prefix}:${AMENT_PREFIX_PATH:-}"
+export CMAKE_PREFIX_PATH="${cloud_merge_prefix}:${CMAKE_PREFIX_PATH:-}"
+exec /opt/ros/humble/bin/ros2 launch cloud_merge cloud_merge.launch.py use_rviz:=false
 ```
 
 若工作区路径改变，只需同步修改脚本中的 `source` 路径。
@@ -134,10 +138,35 @@ robot-launch restart cloud-merge
 用于首次验证或排查配置时：
 
 ```bash
-source /opt/ros/jazzy/setup.bash
-source ~/Workspace/driver_ws/install/setup.bash
+source /opt/runtime/env.bash
+source /opt/ros/humble/setup.bash
+source ~/Workspace/driver_ws/install/cloud_merge/share/cloud_merge/local_setup.bash
 bash ~/Workspace/driver_ws/bin/start_cloud_merge.sh
 ```
+
+在刷机后的 NX 环境中，`driver_ws` 可能使用 isolated install，顶层
+`install/setup.bash` 可能为空；启动脚本因此直接 source
+`install/cloud_merge/share/cloud_merge/local_setup.bash`，并显式加入该包前缀。
+如果手动启动，不要只 source 顶层
+setup，至少执行：
+
+```bash
+source /opt/runtime/env.bash
+source /opt/ros/humble/setup.bash
+source ~/Workspace/driver_ws/install/cloud_merge/share/cloud_merge/local_setup.bash
+```
+
+确认可执行文件不是空文件，并在源码变更或刷机后重新编译：
+
+```bash
+cd ~/Workspace/driver_ws
+colcon build --packages-select cloud_merge --symlink-install \
+  --event-handlers console_direct+ \
+  --cmake-args -DCMAKE_BUILD_TYPE=Release
+file build/cloud_merge/cloud_merge_node
+```
+
+`file` 应显示 `ELF 64-bit ... ARM aarch64`，不能是 `empty` 或 `Exec format error`。
 
 验证话题：
 
@@ -162,4 +191,3 @@ ros2 topic echo --once /lidar/airy/header
 ## 备份完整性与版本说明
 
 本备份保留了当前设备上的源码和标定参数，不代表新固件一定兼容。升级后若雷达驱动更换了话题名、坐标系或 PointCloud2 字段布局，应只修改 `config/cloud_merge.yaml` 中对应参数，并保留原始备份以便回滚。
-
