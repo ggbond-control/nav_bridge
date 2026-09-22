@@ -7,7 +7,7 @@
   },
   connect: {
     endpoints: [
-      "tcp/127.0.0.1:7447"        // 连接本机 Router
+      "tcp/127.0.0.1:7447"
     ]
   }
 }

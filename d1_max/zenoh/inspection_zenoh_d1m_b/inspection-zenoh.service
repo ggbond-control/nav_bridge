@@ -1,0 +1,24 @@
+[Unit]
+Description=Inspection Zenoh Router
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=cat
+Group=cat
+WorkingDirectory=/home/cat/Workspace/zenoh_ws
+Environment=HOME=/home/cat
+# Derived from D1M-B's interactive ~/.zshrc environment at deployment time.
+Environment=ROS_DOMAIN_ID=28
+Environment=RMW_IMPLEMENTATION=rmw_zenoh_cpp
+Environment=ZENOH_ROUTER_CONFIG_URI=/home/cat/Workspace/zenoh_ws/router_config.json5
+Environment=ZENOH_SESSION_CONFIG_URI=/home/cat/Workspace/zenoh_ws/session_config.json5
+ExecStart=/usr/bin/bash -c 'source /opt/ros/jazzy/setup.bash && source /home/cat/Workspace/zenoh_ws/install/setup.bash && exec ros2 run rmw_zenoh_cpp rmw_zenohd'
+Restart=always
+RestartSec=2
+KillSignal=SIGINT
+TimeoutStopSec=15
+
+[Install]
+WantedBy=multi-user.target
