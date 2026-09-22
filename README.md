@@ -379,9 +379,79 @@ ros2 service call /nav_bridge_node/set_body_height rcl_interfaces/srv/SetParamet
 
 ## 8. 编译与运行
 
+### 8.1 选择性编译 X30 与 D1 Max
+
+两个机器人型号对应独立可执行文件，由 CMake 选项控制是否构建：
+
+| CMake 选项 | 默认值 | 构建产物 | 说明 |
+| --- | --- | --- | --- |
+| `NAV_BRIDGE_BUILD_X30` | `ON` | `x30_nav_bridge_node` | X30 UDP 桥接节点；构建时需要 `rviz_2d_overlay_msgs`。 |
+| `NAV_BRIDGE_BUILD_D1_MAX` | `OFF` | `d1_max_nav_bridge_node` | D1 Max RobotSDK 桥接节点。启用后才检查并链接 D1 SDK。 |
+
+默认构建仅包含 X30，适合未安装或不需要 D1 SDK 的开发机：
+
 ```bash
 colcon build --packages-select nav_bridge --cmake-args -DCMAKE_BUILD_TYPE=Release -Wno-dev -DCMAKE_EXPORT_COMPILE_COMMANDS=1 --symlink-install
+```
 
+仅构建 D1 Max：
+
+```bash
+colcon build --packages-select nav_bridge --cmake-clean-cache --symlink-install \
+  --cmake-args \
+  -DCMAKE_BUILD_TYPE=Release \
+  -DNAV_BRIDGE_BUILD_X30=OFF \
+  -DNAV_BRIDGE_BUILD_D1_MAX=ON
+```
+
+同时构建两个型号：
+
+```bash
+colcon build --packages-select nav_bridge --cmake-clean-cache --symlink-install \
+  --cmake-args \
+  -DCMAKE_BUILD_TYPE=Release \
+  -DNAV_BRIDGE_BUILD_X30=ON \
+  -DNAV_BRIDGE_BUILD_D1_MAX=ON
+```
+
+仅构建 X30（显式指定，便于 CI 或部署脚本）：
+
+```bash
+colcon build --packages-select nav_bridge --cmake-clean-cache --symlink-install \
+  --cmake-args \
+  -DCMAKE_BUILD_TYPE=Release \
+  -DNAV_BRIDGE_BUILD_X30=ON \
+  -DNAV_BRIDGE_BUILD_D1_MAX=OFF
+```
+
+D1 Max SDK 默认从仓库内的 `third_party/robot_sdk` 读取，不依赖
+`RobotSDK-0.2.1` 的本地路径。构建时会根据编译目标自动选择：
+
+- ARM64/aarch64：`third_party/robot_sdk/lib/aarch64/librobot_sdk.so.0.2.1`
+- x86_64：`third_party/robot_sdk/lib/x86_64/librobot_sdk.so.0.2.1`
+
+如 SDK 被放到其他已复制的目录，可通过 CMake 覆盖根目录：
+
+```bash
+colcon build --packages-select nav_bridge --cmake-clean-cache --symlink-install \
+  --cmake-args \
+  -DNAV_BRIDGE_BUILD_X30=OFF \
+  -DNAV_BRIDGE_BUILD_D1_MAX=ON \
+  -DD1_MAX_SDK_ROOT=/absolute/path/to/robot_sdk
+```
+
+切换任一 `NAV_BRIDGE_BUILD_*` 选项时必须重新配置 CMake；上述命令中的
+`--cmake-clean-cache` 会清除旧缓存。若省略它，历史配置可能导致未预期的
+可执行文件仍被保留或缺失。
+
+### 8.2 按 YAML 启动
+
+编译完成后，统一 launch 从 `config/nav_bridge.yaml` 的 `robot_type` 选择
+可执行文件：`x30` 对应 `x30_nav_bridge_node`，`d1_max` 对应
+`d1_max_nav_bridge_node`。因此 YAML 选择的型号必须已经被编译；例如只构建
+D1 Max 后将 `robot_type` 设置为 `x30` 会因找不到 X30 可执行文件而启动失败。
+
+```bash
 source install/setup.bash
 
 ros2 launch nav_bridge nav_bridge.launch.py
