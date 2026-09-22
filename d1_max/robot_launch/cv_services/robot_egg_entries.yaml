@@ -1,0 +1,30 @@
+# Append these entries under the existing top-level "eggs:" mapping.
+# The wrappers use setpriv because robot-launch itself runs as root, while the
+# CV applications must retain robot ownership for their model, upload and log files.
+  algorithm-center:
+    command: bash /home/robot/CV/bin/start_algorithm_center.sh
+    name: algorithm-center
+    id: 18
+    state:
+      status: Running
+      start_time: null
+      try_count: 0
+      error: ''
+      pid: 0
+    paths:
+      stdout: /home/robot/robot_launch_log/algorithm-center.stdout
+      stderr: /home/robot/robot_launch_log/algorithm-center.stderr
+
+  cable-damage-detect:
+    command: bash /home/robot/CV/bin/start_cable_damage_detect.sh
+    name: cable-damage-detect
+    id: 19
+    state:
+      status: Running
+      start_time: null
+      try_count: 0
+      error: ''
+      pid: 0
+    paths:
+      stdout: /home/robot/robot_launch_log/cable-damage-detect.stdout
+      stderr: /home/robot/robot_launch_log/cable-damage-detect.stderr
