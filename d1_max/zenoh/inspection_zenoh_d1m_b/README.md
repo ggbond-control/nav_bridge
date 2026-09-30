@@ -31,12 +31,17 @@ restart the service.
 ```bash
 sudo install -o root -g root -m 0644 inspection-zenoh.service \
   /etc/systemd/system/inspection-zenoh.service
+sudo install -d -o root -g root -m 0755 \
+  /etc/systemd/system/inspection-zenoh.service.d
+sudo install -o root -g root -m 0644 inspection-zenoh.service.d/priority.conf \
+  /etc/systemd/system/inspection-zenoh.service.d/priority.conf
 sudo install -o cat -g cat -m 0644 router_config.json5 \
   /home/cat/Workspace/zenoh_ws/router_config.json5
 sudo install -o cat -g cat -m 0644 session_config.json5 \
   /home/cat/Workspace/zenoh_ws/session_config.json5
 sudo systemctl daemon-reload
-sudo systemctl enable --now inspection-zenoh.service
+sudo systemctl enable inspection-zenoh.service
+sudo systemctl restart inspection-zenoh.service
 ```
 
 ## Verify
@@ -44,6 +49,7 @@ sudo systemctl enable --now inspection-zenoh.service
 ```bash
 systemctl status inspection-zenoh.service --no-pager
 systemctl is-enabled inspection-zenoh.service
+systemctl show inspection-zenoh.service -p Nice -p CPUWeight
 ss -ltnp | grep ':7447'
 sudo journalctl -u inspection-zenoh.service -n 100 --no-pager
 ```
@@ -51,6 +57,10 @@ sudo journalctl -u inspection-zenoh.service -n 100 --no-pager
 The router process must be owned by `cat`; do not additionally start
 `ros2 run rmw_zenoh_cpp rmw_zenohd` in an SSH shell, because it would conflict
 with the service on port `7447`.
+
+The priority drop-in sets `Nice=-5` and `CPUWeight=600`. On D1M-B, this keeps
+Zenoh below localization/navigation (`Nice=-10`) but above the gimbal
+(`Nice=5`). Restarting Zenoh briefly interrupts ROS connections.
 
 ## Deployment Result: 2026-09-22
 
