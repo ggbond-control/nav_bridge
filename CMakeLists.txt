@@ -138,8 +138,9 @@ if(NAV_BRIDGE_BUILD_CYVET)
 
   endif()
 endif()
-install(DIRECTORY cyvet DESTINATION share/${PROJECT_NAME}
-  PATTERN "__pycache__" EXCLUDE)
+if(NAV_BRIDGE_BUILD_CYVET)
+  install(FILES CYVET.md DESTINATION share/${PROJECT_NAME})
+endif()
 
 install(DIRECTORY include/
   DESTINATION include)

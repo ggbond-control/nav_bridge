@@ -34,33 +34,6 @@ ament_target_dependencies(motion_high_level_client
   uniubi
 )
 
-add_executable(motion_high_level_client_example src/motion_high_level_client_example.cpp)
-ament_target_dependencies(motion_high_level_client_example
-  rclcpp
-  uniubi
-)
-target_link_libraries(motion_high_level_client_example motion_high_level_client)
-
-add_executable(motion_high_level_client_cli src/motion_high_level_client_cli.cpp)
-ament_target_dependencies(motion_high_level_client_cli
-  rclcpp
-  uniubi
-)
-target_link_libraries(motion_high_level_client_cli motion_high_level_client)
-
-add_executable(sensor_observed_subscriber src/sensor_observed_subscriber.cpp)
-ament_target_dependencies(sensor_observed_subscriber
-  rclcpp
-  uniubi
-)
-
-install(TARGETS
-  motion_high_level_client_example
-  motion_high_level_client_cli
-  sensor_observed_subscriber
-  DESTINATION lib/${PROJECT_NAME}
-)
-
 install(TARGETS motion_high_level_client
   EXPORT export_motion_high_level_client
   ARCHIVE DESTINATION lib

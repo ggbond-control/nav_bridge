@@ -6,5 +6,20 @@ where a file or included artifact states a different license.
 
 Original UniUbi source code, ROS 2 integration code, examples, and
 documentation in this repository are made available under Apache-2.0. Vendored
-third-party components are subject to their own license terms. See
-THIRD_PARTY_NOTICES.md for component-specific notices.
+third-party components are subject to their own license terms. Component-specific notices follow below.
+
+
+Third-Party Notices
+
+This file records third-party components vendored in this repository. These
+notices do not change the license terms of the referenced components.
+
+JsonCpp
+
+- Path: `third_party/jsoncpp/`
+- License: Public Domain or MIT, as stated by the upstream JsonCpp license
+- Notice file: `third_party/jsoncpp/LICENSE`
+- Upstream: https://github.com/open-source-parsers/jsoncpp
+
+JsonCpp is vendored for the `uniubi_motion_client` package. Redistribution
+must preserve the upstream license text included with the vendored source.
