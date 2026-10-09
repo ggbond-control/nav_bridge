@@ -109,6 +109,38 @@ if(NAV_BRIDGE_BUILD_D1_MAX)
     RENAME librobot_sdk.so.0.2.1)
 endif()
 
+option(NAV_BRIDGE_BUILD_CYVET "Build the UniUbi Cyvet backend" OFF)
+if(NAV_BRIDGE_BUILD_CYVET)
+  find_package(uniubi REQUIRED)
+  find_package(uniubi_motion_client REQUIRED)
+  add_library(nav_bridge_cyvet_backend STATIC src/cyvet/cyvet_backend.cpp)
+  target_include_directories(nav_bridge_cyvet_backend PUBLIC
+    $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
+    $<INSTALL_INTERFACE:include>)
+  ament_target_dependencies(nav_bridge_cyvet_backend rclcpp uniubi uniubi_motion_client)
+  target_link_libraries(nav_bridge_cyvet_backend Threads::Threads uniubi_motion_client::motion_high_level_client)
+  add_executable(cyvet_nav_bridge_node src/cyvet/cyvet_nav_bridge_node.cpp)
+  ament_target_dependencies(cyvet_nav_bridge_node
+    rclcpp geometry_msgs nav_msgs sensor_msgs std_msgs std_srvs rcl_interfaces)
+  target_link_libraries(cyvet_nav_bridge_node nav_bridge_cyvet_backend)
+  install(TARGETS nav_bridge_cyvet_backend ARCHIVE DESTINATION lib)
+  install(TARGETS cyvet_nav_bridge_node DESTINATION lib/${PROJECT_NAME})
+  if(BUILD_TESTING)
+    find_package(ament_cmake_gtest REQUIRED)
+    ament_add_gtest(cyvet_motion_math_test test/cyvet/test_motion_math.cpp)
+    target_include_directories(cyvet_motion_math_test PRIVATE include)
+    find_package(Python3 REQUIRED COMPONENTS Interpreter)
+    ament_add_test(cyvet_protocol_integration
+      GENERATE_RESULT_FOR_RETURN_CODE_ZERO
+      COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/test/cyvet/integration.py"
+        --executable "$<TARGET_FILE:cyvet_nav_bridge_node>"
+      TIMEOUT 180)
+
+  endif()
+endif()
+install(DIRECTORY cyvet DESTINATION share/${PROJECT_NAME}
+  PATTERN "__pycache__" EXCLUDE)
+
 install(DIRECTORY include/
   DESTINATION include)
 

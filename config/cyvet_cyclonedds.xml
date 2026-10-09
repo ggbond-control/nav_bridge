@@ -1,0 +1,12 @@
+<?xml version="1.0" encoding="utf-8"?>
+<CycloneDDS xmlns="https://cdds.io/config">
+  <!-- Robot communication only. Business ROS traffic retains its own domain. -->
+  <Domain Id="42">
+    <General>
+      <Interfaces>
+        <NetworkInterface name="eth1" presence_required="true"/>
+      </Interfaces>
+      <AllowMulticast>true</AllowMulticast>
+    </General>
+  </Domain>
+</CycloneDDS>

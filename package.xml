@@ -3,7 +3,7 @@
 <package format="3">
   <name>nav_bridge</name>
   <version>0.1.0</version>
-  <description>Navigation bridge between ROS2 and robot dog UDP protocol. Abstract base class with X30 UDP subclass implementation.</description>
+  <description>ROS 2 chassis bridge for X30, D1 Max and UniUbi Cyvet robots.</description>
   <maintainer email="chen@example.com">Chen</maintainer>
   <license>Apache License 2.0</license>
 
@@ -22,6 +22,9 @@
   <depend>rviz_2d_overlay_msgs</depend>
   <depend>rcl_interfaces</depend>
 
+  <test_depend>ament_cmake_gtest</test_depend>
+  <test_depend>rclpy</test_depend>
+  <exec_depend>rmw_cyclonedds_cpp</exec_depend>
   <test_depend>ament_lint_auto</test_depend>
   <test_depend>ament_lint_common</test_depend>
 

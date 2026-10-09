@@ -739,7 +739,7 @@ bool MotionHighLevelClient::rpc_call(
       return false;
     }
 
-    if (response->code != 0) {
+    if (response->code != 0 || response->device_id != device_id()) {
       std::cerr << context << " response code=" << response->code << std::endl;
       set_error(kRpcCallFailed);
       return false;
@@ -906,7 +906,7 @@ void MotionHighLevelClient::handle_renew_response(
 
   try {
     const auto response = future.get();
-    if (!response || response->code != 0) {
+    if (!response || response->code != 0 || response->device_id != device_id()) {
       lose_control(kSessionExpired);
       return;
     }
@@ -952,7 +952,7 @@ void MotionHighLevelClient::create_event_subscription()
 
   event_subscription_ = node_->create_subscription<EventMessage>(
     event_topic_,
-    rclcpp::QoS(10),
+    rclcpp::QoS(10).best_effort().durability_volatile(),
     [this](const EventMessage::SharedPtr message) {
       handle_event(*message);
     });

@@ -8,3 +8,5 @@ Log
 .cache
 .clang-format
 .codex
+__pycache__
+validation

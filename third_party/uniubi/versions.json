@@ -12,5 +12,9 @@
   "mock_reference": {
     "url": "https://github.com/uniubi-ai/uniubi_robot_mock",
     "commit": "651e3e8e5dc3ff4775507e434baf66063809c51d"
+  },
+  "documentation": {
+    "url": "https://github.com/uniubi-ai/uniubi-docs",
+    "commit": "939d9c7286c35089c3464a2fbd04e67914b510a1"
   }
 }
