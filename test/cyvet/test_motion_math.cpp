@@ -1,13 +1,6 @@
 #include <gtest/gtest.h>
 #include "nav_bridge/cyvet/motion_math.hpp"
 
-TEST(CyvetVelocity, IntersectionAndInvalidInputs) {
-    using nav_bridge::cyvet::limitAxis;
-    EXPECT_DOUBLE_EQ(limitAxis(-1,0.4,{-0.2,1.5}),-0.2);
-    EXPECT_DOUBLE_EQ(limitAxis(1,0.4,{-0.2,1.5}),0.4);
-    EXPECT_THROW(limitAxis(NAN,0.4,{-1,1}),std::invalid_argument);
-    EXPECT_THROW(limitAxis(0,0.4,{1,2}),std::invalid_argument);
-}
 TEST(CyvetOdometry, ReentryRetainsPoseAndRotatesDisplacement) {
     nav_bridge::cyvet::ContinuousOdometry odom;
     const auto last=odom.update(1,{3,4,1.5707963267948966});

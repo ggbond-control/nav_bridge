@@ -2,6 +2,7 @@
 #include "nav_bridge/cyvet/motion_math.hpp"
 
 #include <atomic>
+#include <array>
 #include <chrono>
 #include <condition_variable>
 #include <deque>
@@ -51,10 +52,9 @@ struct CyvetBackend::Impl {
             !std::isfinite(opts.cmd_vel_rate_hz) || opts.cmd_vel_rate_hz <= 0 ||
             opts.cmd_vel_rate_hz > 200 || (opts.lateral_sign != 1 && opts.lateral_sign != -1))
             throw std::invalid_argument("Invalid Cyvet device/network/timing parameters");
-        for (const auto &limits : opts.speed_limits)
-            for (double limit : limits)
-                if (!std::isfinite(limit) || limit < 0)
-                    throw std::invalid_argument("Cyvet speed limits must be finite and nonnegative");
+        if (opts.default_control_profile != "slow" && opts.default_control_profile != "fast")
+            throw std::invalid_argument("default_control_profile must be slow or fast");
+        selected_profile = opts.default_control_profile;
         context = std::make_shared<rclcpp::Context>();
         rclcpp::InitOptions init;
         init.auto_initialize_logging(false);
@@ -131,17 +131,15 @@ struct CyvetBackend::Impl {
     OdometryCallback odom_callback;
     JointCallback joint_callback;
     FaultCallback fault_callback;
-    std::string last_fault, current_action;
+    std::string last_fault, current_action, selected_profile, acknowledged_profile, reported_profile;
     Clock::time_point battery_at{}, motion_reply_at{}, system_reply_at{}, next_connect{},
         next_motion{}, next_system{}, next_velocity{}, next_halt{};
     std::optional<Pending> pending_motion, pending_system;
     uint64_t query_sequence{0}, motion_stamp{0}, sensor_stamp{0};
     uint64_t velocity_rpc_timeouts{0}, velocity_rpc_recoveries{0};
-    std::array<cyvet::AxisRange, 3> ranges{};
     std::set<std::string> actions;
     std::map<std::pair<unsigned, unsigned>, std::string> layout;
     cyvet::ContinuousOdometry continuous_odom;
-    int speed{1};
     bool capabilities_valid{false}, observations_enabled{false}, velocity_active{false},
          estop_latched{false}, halt_escalated{false}, releasing{false};
 
@@ -219,6 +217,7 @@ struct CyvetBackend::Impl {
         if (ready && action != "walking") inhibit();
         std::lock_guard<std::mutex> lock(mutex);
         current_action = action;
+        reported_profile = root["controlProfile"].isString() ? root["controlProfile"].asString() : "";
         cached.vx = x; cached.vy = y; cached.vyaw = yaw;
         cached.connected = true;
         cached.control_owned = client->getState() == Client::kControlled;
@@ -243,8 +242,9 @@ struct CyvetBackend::Impl {
                 for (size_t i = 0; i < names.size(); ++i) {
                     if (param.get("name", "").asString() != names[i] ||
                         !param["min"].isNumeric() || !param["max"].isNumeric()) continue;
-                    ranges[i] = {param["min"].asDouble(), param["max"].asDouble()};
-                    cyvet::limitAxis(0, 0, ranges[i]);
+                    const double minimum = param["min"].asDouble(), maximum = param["max"].asDouble();
+                    if (!finite({minimum, maximum}) || minimum > 0 || maximum < 0 || minimum > maximum)
+                        throw std::runtime_error("Invalid walking capability range");
                     found[i] = true;
                 }
             }
@@ -304,14 +304,17 @@ struct CyvetBackend::Impl {
         }
         return {true, "Cyvet connected; read-only until stand/ready is called"};
     }
-    Json::Value velocityParams(double x, double y, double yaw) const {
+    Json::Value velocityParams(double x, double y, double yaw, const std::string &profile = "") const {
         Json::Value params(Json::objectValue);
-        params["lineVelocityX"] = cyvet::limitAxis(x, opts.speed_limits[speed-1][0], ranges[0]);
-        params["lineVelocityY"] = cyvet::limitAxis(y * opts.lateral_sign, opts.speed_limits[speed-1][1], ranges[1]);
-        params["velocity"] = cyvet::limitAxis(yaw, opts.speed_limits[speed-1][2], ranges[2]);
+        params["controlProfile"] = profile.empty() ? selected_profile : profile;
+        // No bridge speed tiers or clipping. The vendor profile owns its limits.
+        params["lineVelocityX"] = x;
+        params["lineVelocityY"] = y * opts.lateral_sign;
+        params["velocity"] = yaw;
         return params;
     }
-    BackendResult confirm(const std::string &action, bool zero, uint64_t token, bool can_cancel = true) {
+    BackendResult confirm(const std::string &action, bool zero, uint64_t token, bool can_cancel = true,
+                          const std::string &profile = "") {
         const auto end = Clock::now() + std::chrono::milliseconds(opts.action_timeout_ms);
         while (Clock::now() < end) {
             if (can_cancel && interrupted(token)) return {false, "Action canceled by stop/shutdown"};
@@ -320,7 +323,10 @@ struct CyvetBackend::Impl {
             if (client->queryMotionState(value, opts.rpc_timeout_ms)) {
                 updateMotion(parse(value));
                 BackendState snapshot = state();
-                if (current_action == action && (!zero ||
+                // The RPC ACK precedes the next effective motion-state tick.
+                // Wait for the requested profile rather than failing on one old tick.
+                if ((profile.empty() || reported_profile.empty() || reported_profile == profile) &&
+                    current_action == action && (!zero ||
                     std::abs(snapshot.vx)+std::abs(snapshot.vy)+std::abs(snapshot.vyaw) < 1e-5))
                     return {true, "Confirmed " + action};
             }
@@ -328,6 +334,8 @@ struct CyvetBackend::Impl {
             std::unique_lock<std::mutex> lock(mutex);
             cv.wait_for(lock, 20ms);
         }
+        if (!profile.empty() && !reported_profile.empty() && reported_profile != profile)
+            return {false, "Control profile confirmation timed out: requested " + profile + ", reported " + reported_profile};
         return {false, "Physical/task state confirmation timed out: " + action};
     }
     BackendResult stop(bool can_cancel = true) {
@@ -360,9 +368,10 @@ struct CyvetBackend::Impl {
         cancelQueries();
         auto result = acquire(token);
         if (!result.success) return result;
-        if (!client->startAction("walking", json(velocityParams(0, 0, 0)), opts.rpc_timeout_ms)) {
+        const auto &profile = opts.default_control_profile;
+        if (!client->startAction("walking", json(velocityParams(0, 0, 0, profile)), opts.rpc_timeout_ms)) {
             result = error("Walking preparation rejected");
-        } else result = confirm("walking", true, token);
+        } else result = confirm("walking", true, token, true, profile);
         if (!result.success) {
             // Never enable motion after an unconfirmed action, including an ambiguous ACK timeout.
             if (!interrupted(token) && stop(false).success) releaseSdk();
@@ -371,9 +380,48 @@ struct CyvetBackend::Impl {
         {
             std::lock_guard<std::mutex> lock(mutex);
             if (interrupted(token)) return {false, "Preparation canceled"};
+            selected_profile = profile; cached.mode = profile == "slow" ? 0 : 3;
+            acknowledged_profile = profile;
             velocity.reset(); estop_latched = false; ready.store(true);
         }
-        return {true, "Walking at zero velocity confirmed; navigation ready"};
+        return {true, "Walking at zero velocity confirmed; navigation ready; " + profileDescription(profile)};
+    }
+    std::string profileDescription(const std::string &profile) const {
+        return "controlProfile=" + profile +
+            (reported_profile.empty() ? " (RPC accepted; firmware does not report model identity)" : " (reported by firmware)");
+    }
+    BackendResult switchProfile(const std::string &profile, uint64_t token) {
+        if (interrupted(token) || halt_pending || estop_latched ||
+            client->getState() != Client::kControlled || current_action != "walking" ||
+            Clock::now()-motion_reply_at > std::chrono::milliseconds(opts.telemetry_timeout_ms)) {
+            if (!interrupted(token) && client->getState() == Client::kControlled) {
+                const auto stopped = stop(false);
+                if (!stopped.success) fault(stopped.message);
+            }
+            return {false, "Fresh controlled walking session required; call stand/ready first"};
+        }
+        cancelQueries();
+        auto result = stop();
+        if (result.success && !interrupted(token)) {
+            if (!client->setActionParams(json(velocityParams(0, 0, 0, profile)), opts.rpc_timeout_ms))
+                result = error("Control profile change rejected or timed out");
+            else result = confirm("walking", true, token, true, profile);
+        }
+        if (interrupted(token)) return {false, "Profile change canceled by stop/shutdown"};
+        if (!result.success) {
+            inhibit();
+            const auto stopped = stop(false);
+            if (!stopped.success) fault(stopped.message);
+            return result;
+        }
+        {
+            std::lock_guard<std::mutex> lock(mutex);
+            if (interrupted(token)) return {false, "Profile change canceled"};
+            selected_profile = profile; cached.mode = profile == "slow" ? 0 : 3;
+            acknowledged_profile = profile;
+            velocity.reset(); ready.store(true);
+        }
+        return {true, "Stopped and walking confirmed; " + profileDescription(profile) + "; send new cmd_vel to move"};
     }
     bool releaseSdk() {
         // Firmware may emit its loss-of-ownership event before the release RPC
@@ -696,14 +744,20 @@ BackendResult CyvetBackend::softEstop(bool enabled) {
     return impl_->submitStop([this](uint64_t token) { return impl_->estop(token); });
 }
 BackendResult CyvetBackend::setMode(int mode) {
-    if (mode != 0) return {false,"Cyvet supports only WALK/0; legacy gaits are not equivalent"};
-    return {true,"WALK selected; explicit stand/ready required to enable motion"};
+    return setGait(mode);
+}
+BackendResult CyvetBackend::setGait(int gait) {
+    if (gait == 0) return setSpeed(1);
+    if (gait == 3) return setSpeed(3);
+    return {false,"Cyvet supports WALK/SLOW/0 and RUN/FAST/3; no medium model"};
 }
 BackendResult CyvetBackend::setSpeed(int level) {
-    if (level<1 || level>3) return {false,"Speed must be 1, 2 or 3"};
-    return impl_->submit([this,level](uint64_t) {
-        impl_->speed=level; return BackendResult{true,"Local speed limit changed; vendor profile remains unchanged"};
-    });
+    if (level != 1 && level != 3) return {false,"Speed must be 1=slow or 3=fast; no medium model"};
+    if (!impl_->ready || !state().control_owned)
+        return {false,"Explicit stand/ready required before selecting a control profile"};
+    return impl_->submit([this,level](uint64_t token) {
+        return impl_->switchProfile(level == 1 ? "slow" : "fast",token);
+    },false,true);
 }
 BackendResult CyvetBackend::move(double x,double y,double yaw) {
     if (!finite({x,y,yaw})) return {false,"Non-finite velocity rejected"};
@@ -721,6 +775,10 @@ std::string CyvetBackend::diagnostics() const {
     value["control_owned"]=state.control_owned; value["navigation_ready"]=impl_->ready.load();
     value["stop_pending"]=impl_->halt_pending.load();
     value["action"]=impl_->current_action;
+    value["control_profile_selected"]=impl_->selected_profile;
+    value["gait"]=state.mode;
+    value["control_profile_acknowledged"]=impl_->acknowledged_profile;
+    value["control_profile_reported"]=impl_->reported_profile;
     value["vx"]=state.vx; value["vy"]=state.vy; value["yaw_rate"]=state.vyaw;
     value["last_error"]=impl_->last_fault; value["battery_valid"]=state.battery_percent>=0;
     value["command_cached"]=impl_->velocity.has_value();

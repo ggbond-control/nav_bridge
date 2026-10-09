@@ -1,9 +1,7 @@
 #pragma once
 
-#include <algorithm>
 #include <cmath>
 #include <cstdint>
-#include <stdexcept>
 
 namespace nav_bridge::cyvet {
 struct Pose2 { double x{0}, y{0}, yaw{0}; };
@@ -37,13 +35,4 @@ private:
     Pose2 offset_, last_;
 };
 
-struct AxisRange { double min{0}, max{0}; };
-inline double limitAxis(double value, double cap, AxisRange range) {
-    if (!std::isfinite(value) || !std::isfinite(cap) || cap < 0 ||
-        !std::isfinite(range.min) || !std::isfinite(range.max) ||
-        range.min > 0 || range.max < 0 || range.min > range.max) {
-        throw std::invalid_argument("Invalid velocity or capability range");
-    }
-    return std::clamp(value, std::max(-cap, range.min), std::min(cap, range.max));
-}
 }  // namespace nav_bridge::cyvet

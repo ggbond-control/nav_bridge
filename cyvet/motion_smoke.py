@@ -11,6 +11,8 @@ import rclpy
 from geometry_msgs.msg import Twist
 from std_msgs.msg import String
 from std_srvs.srv import Trigger
+from rcl_interfaces.msg import Parameter, ParameterValue
+from rcl_interfaces.srv import SetParameters
 from sensor_msgs.msg import Imu, JointState
 from nav_msgs.msg import Odometry
 from rclpy.qos import QoSProfile, ReliabilityPolicy
@@ -18,7 +20,7 @@ from rclpy.qos import QoSProfile, ReliabilityPolicy
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument('--stage', required=True, choices=['stand', 'axes', 'combined', 'takeover', 'estop', 'lie', 'zero_stream', 'idle_hold'])
+    parser.add_argument('--stage', required=True, choices=['stand', 'axes', 'combined', 'takeover', 'estop', 'lie', 'zero_stream', 'idle_hold', 'profiles'])
     parser.add_argument('--executable', help='Optionally launch a fresh node for this one check')
     parser.add_argument('--params', help='Required when --executable is used')
     parser.add_argument('--seconds', type=float, default=1., help='Per-axis duration, 0.1 to 5 seconds')
@@ -138,6 +140,27 @@ def main():
         if not reported:
             raise RuntimeError('Robot did not report a nonzero control velocity')
 
+    def select_profile(profile, gait):
+        client = node.create_client(SetParameters, '/nav_bridge_node/set_gait')
+        try:
+            if not client.wait_for_service(timeout_sec=3.):
+                raise RuntimeError('Missing set_gait service')
+            request = SetParameters.Request(parameters=[Parameter(name='gait',
+                value=ParameterValue(type=4, string_value=profile))])
+            future = client.call_async(request)
+            wait(future.done)
+            result = future.result().results[0]
+            print(json.dumps({'service': 'set_gait', 'profile': profile,
+                'success': result.successful, 'message': result.reason}), flush=True)
+            if not result.successful:
+                raise RuntimeError('Profile switch failed: ' + result.reason)
+            wait(lambda: status.get('gait') == gait and status.get('navigation_ready') and
+                 status.get('control_profile_acknowledged') == profile and
+                 not status.get('command_cached') and
+                 all(abs(status.get(k, 1.)) < .001 for k in ('vx', 'vy', 'yaw_rate')))
+        finally:
+            node.destroy_client(client)
+
     try:
         wait(lambda: status.get('connected') and status.get('battery_valid'))
         if status.get('control_owned') or status.get('navigation_ready'):
@@ -158,9 +181,25 @@ def main():
             for values in pulses:
                 pulse(*values)
         elif args.stage == 'combined':
-            # All three components remain within the already calibrated first gear.
+            # Keep the previously calibrated low test velocities.
             pulse('forward_left_left_turn', .1, args.lateral_speed, args.yaw_speed)
             pulse('backward_right_right_turn', -.1, -args.lateral_speed, -args.yaw_speed)
+        elif args.stage == 'profiles':
+            if status.get('control_profile_acknowledged') != 'slow':
+                raise RuntimeError('Default deployment must start with slow')
+            # Zero axes only: this stage does not publish translational/turning commands.
+            for profile, gait in [('fast', 3), ('slow', 0), ('fast', 3)]:
+                select_profile(profile, gait)
+                settled = time.monotonic() + 2.
+                wait(lambda: time.monotonic() > settled)
+                if not status.get('navigation_ready') or not status.get('control_owned'):
+                    raise RuntimeError('Profile hold lost readiness: ' + json.dumps(status))
+            call('ready')
+            wait(lambda: status.get('control_profile_acknowledged') == 'slow' and status.get('gait') == 0)
+            call('lie')
+            wait(lambda: not status.get('control_owned') and status.get('action') == 'laying')
+            print('PASS: zero-speed profile RPCs, cache clearing, default slow and laying/release confirmed', flush=True)
+            return
         elif args.stage == 'takeover':
             print('TAKEOVER NOW: zero-speed walking; use the remote to take control within 60 seconds',
                   flush=True)

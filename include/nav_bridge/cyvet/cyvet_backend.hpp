@@ -1,6 +1,5 @@
 #pragma once
 
-#include <array>
 #include <memory>
 #include <string>
 #include "nav_bridge/robot_backend.hpp"
@@ -21,8 +20,7 @@ struct CyvetOptions {
     int telemetry_timeout_ms{2000};
     double cmd_vel_rate_hz{30};
     double lateral_sign{1};
-    std::array<std::array<double, 3>, 3> speed_limits{{
-        {{0.2, 0.1, 0.3}}, {{0.4, 0.2, 0.5}}, {{0.6, 0.3, 0.8}}}};
+    std::string default_control_profile{"slow"};
 };
 
 // Owns a separate robot ROS context and a serialized SDK/executor worker.
@@ -40,6 +38,7 @@ public:
     BackendResult lie() override;
     BackendResult softEstop(bool enabled) override;
     BackendResult setMode(int mode) override;
+    BackendResult setGait(int gait);
     BackendResult setSpeed(int speed_level) override;
     BackendState state() const override;
     std::string diagnostics() const;

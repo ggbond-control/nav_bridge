@@ -16,9 +16,8 @@ nav_bridge_node:
     cmd_vel_timeout_ms: 500
     telemetry_timeout_ms: 2000
     lateral_sign: 1.0
-    speed_limits_slow: [0.2, 0.1, 0.3]
-    speed_limits_medium: [0.4, 0.2, 0.5]
-    speed_limits_high: [0.6, 0.3, 0.8]
+    # stand/ready explicitly selects the vendor model; there is no local speed tier.
+    default_control_profile: "slow"
     imu_frame_id: "imu_link"
     odom_frame_id: "odom"
     base_frame_id: "base_link"

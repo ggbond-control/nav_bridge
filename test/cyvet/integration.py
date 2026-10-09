@@ -59,6 +59,14 @@ class Robot:
         self.wrong_velocity_identity = False
         self.invalid_quaternion = False
         self.motion_offline = False
+        self.profile = 'slow'
+        self.profile_lag_ticks = 0
+        self.old_profile_ticks = 0
+        self.previous_profile = 'slow'
+        self.report_profile = False
+        self.profile_override = ''
+        self.reject_profile = ''
+        self.action_params = []
         self.service = node.create_service(System, 'robotServer', self.request,
                                           callback_group=ReentrantCallbackGroup())
         qos = QoSProfile(depth=1, reliability=ReliabilityPolicy.BEST_EFFORT)
@@ -96,6 +104,11 @@ class Robot:
         elif method == 'queryMotionState':
             params = {'action': self.action, **dict(zip(
                 ('lineVelocityX', 'lineVelocityY', 'velocity'), self.velocity))}
+            if self.report_profile:
+                effective = self.previous_profile if self.old_profile_ticks else self.profile
+                if self.old_profile_ticks:
+                    self.old_profile_ticks -= 1
+                params['controlProfile'] = self.profile_override or effective
         elif method == 'takeMotionControl':
             result = not self.reject_acquire
             if result:
@@ -121,12 +134,21 @@ class Robot:
             if result:
                 self.action = p['action']
                 self.velocity = [0., 0., 0.]
+                if self.action == 'walking':
+                    self.profile = p.get('params', {}).get('controlProfile', 'slow')
         elif method == 'setMotionActionParams':
             if self.wrong_velocity_identity:
                 res.device_id = 'different-robot'
-            result = bool(self.owner) and not self.reject_velocity
+            action_params = p.get('params', {})
+            self.action_params.append(dict(action_params))
+            result = (bool(self.owner) and not self.reject_velocity and
+                      action_params.get('controlProfile') != self.reject_profile)
             if result:
-                self.velocity = [p.get('params', {}).get(n, 0.)
+                if action_params.get('controlProfile', self.profile) != self.profile:
+                    self.previous_profile = self.profile
+                    self.old_profile_ticks = self.profile_lag_ticks
+                self.profile = action_params.get('controlProfile', self.profile)
+                self.velocity = [action_params.get(n, 0.)
                                  for n in ('lineVelocityX', 'lineVelocityY', 'velocity')]
         elif method in ('stopMotionAction', 'emergencyStopMotion'):
             result = bool(self.owner)
@@ -246,12 +268,20 @@ def main():
     def state():
         return json.loads(messages['/nav_bridge_node/backend_status'].data)
 
+    def set_gait(value):
+        v = (ParameterValue(type=2, integer_value=value) if isinstance(value, int)
+             else ParameterValue(type=4, string_value=value))
+        req = SetParameters.Request(parameters=[Parameter(name='gait', value=v)])
+        return service('set_gait', SetParameters, req).results[0]
+
     try:
         wait(lambda: '/battery/level' in messages and counts.get('/joint_states', 0)>2)
         assert not robot.owner and not any(m == 'takeMotionControl' for m, _ in robot.calls)
         velocity()
         time.sleep(.2)
         assert not robot.owner, 'cmd_vel must not acquire control'
+        assert not set_gait('FAST').successful
+        assert not robot.owner and not any(m == 'takeMotionControl' for m, _ in robot.calls)
         assert messages['/battery/level'].data == 73
         assert abs(messages['/imu/data'].orientation.w - 1) < 1e-6
         # Flush old packets before checking that invalid samples are suppressed.
@@ -277,9 +307,65 @@ def main():
         assert not service('stand').success
         robot.reject_acquire = False
         assert service('stand').success
+        assert robot.profile == 'slow'
+        wait(lambda: state()['navigation_ready'] and state()['gait'] == 0)
+        assert not set_gait('MEDIUM').successful
+        assert not set_gait(34).successful
+        req = SetParameters.Request(parameters=[Parameter(name='speed',
+                                    value=ParameterValue(type=2, integer_value=2))])
+        assert not service('set_speed', SetParameters, req).results[0].successful
         velocity()
         wait(lambda: robot.velocity[0] != 0.)
-        assert all(abs(a-b)<1e-6 for a,b in zip(robot.velocity,[.15,.08,.25]))
+        assert set_gait('fast').successful
+        wait(lambda: state()['gait'] == 3 and state()['navigation_ready'])
+        assert robot.profile == 'fast' and robot.velocity == [0., 0., 0.]
+        assert state()['control_profile_acknowledged'] == 'fast'
+        assert state()['control_profile_reported'] == ''  # Real firmware may omit it.
+        settle_until = time.monotonic() + .6
+        wait(lambda: time.monotonic() > settle_until)
+        assert robot.velocity == [0., 0., 0.], 'switch must discard cached velocity'
+        velocity()
+        wait(lambda: robot.velocity[0] != 0.)
+        assert robot.velocity == [.6, .4, .8], 'no local speed-tier clipping'
+        assert robot.action_params[-1]['controlProfile'] == 'fast'
+        assert set_gait(0).successful and robot.profile == 'slow'
+        robot.report_profile = True
+        robot.profile_lag_ticks = 3  # Firmware ACK precedes effective state updates.
+        assert set_gait(3).successful
+        wait(lambda: state()['control_profile_reported'] == 'fast')
+        robot.profile_lag_ticks = 0
+        assert service('ready').success and robot.profile == 'slow', 'ready restores default slow'
+        robot.reject_profile = 'fast'
+        assert not set_gait('RUN').successful
+        wait(lambda: not state()['navigation_ready'])
+        assert robot.velocity == [0., 0., 0.] and state()['gait'] == 0
+        robot.reject_profile = ''
+        assert service('ready').success
+        robot.profile_override = 'slow'
+        assert not set_gait('FAST').successful, 'reported model mismatch must fail'
+        wait(lambda: not state()['navigation_ready'] and robot.velocity == [0., 0., 0.])
+        robot.profile_override = ''
+        assert service('ready').success
+        robot.report_profile = False
+        # A queued stop must cancel a profile change, including an ambiguous
+        # profile RPC whose reply arrives after its deadline.
+        robot.delay_method, robot.delay_seconds, robot.delay_remaining = 'setMotionActionParams', .35, 1
+        profile_client = node.create_client(SetParameters, '/nav_bridge_node/set_gait')
+        req = SetParameters.Request(parameters=[Parameter(name='gait',
+                                    value=ParameterValue(type=4, string_value='FAST'))])
+        profile_future = profile_client.call_async(req)
+        wait(lambda: robot.delay_remaining == 0)
+        assert service('release_control').success
+        wait(profile_future.done)
+        assert not profile_future.result().results[0].successful
+        assert not robot.owner
+        wait(lambda: not state()['navigation_ready'] and not state()['command_cached'])
+        node.destroy_client(profile_client)
+        robot.delay_method, robot.delay_seconds, robot.delay_remaining = '', 0., -1
+        assert service('ready').success and robot.profile == 'slow'
+        velocity()
+        wait(lambda: robot.velocity[0] != 0.)
+        assert all(abs(a-b)<1e-6 for a,b in zip(robot.velocity,[.6,.4,.8]))
         wait(lambda: robot.velocity == [0.,0.,0.])
         assert any(m == 'stopMotionAction' for m,_ in robot.calls), 'watchdog must stop action'
         # A failed stop ACK must trigger an emergency fallback, confirmation,
@@ -420,7 +506,7 @@ def main():
         req.parameters = [Parameter(name='gait', value=ParameterValue(type=2,integer_value=33))]
         assert not service('set_gait',SetParameters,req).results[0].successful
         req.parameters[0].value.integer_value = 0
-        assert service('set_gait',SetParameters,req).results[0].successful
+        assert not service('set_gait',SetParameters,req).results[0].successful
         assert not robot.owner and not state()['navigation_ready']
         assert not service('charge_command',SetParameters,req).results[0].successful
         assert service('lie').success and not robot.owner
@@ -428,7 +514,7 @@ def main():
         process.send_signal(signal.SIGTERM)
         process.wait(timeout=15.)
         assert process.returncode == 0 and not robot.owner
-        print('PASS: read-only startup, invalid telemetry/quaternion/NaN, identity rejection, limits, watchdog, motion stale, fresh-input timeout recovery, explicit rejection/wrong identity no retry, expired-input timeout stop, estop/recovery, rejection, concurrent stop, preemption, reconnect, odom continuity, compatibility, shutdown')
+        print('PASS: read-only startup, two vendor profiles/no local clipping/default slow, profile rejection/mismatch/cache discard, invalid telemetry/quaternion/NaN, identity rejection, watchdog, motion stale, fresh-input timeout recovery, explicit rejection/wrong identity no retry, expired-input timeout stop, estop/recovery, rejection, concurrent stop, preemption, reconnect, odom continuity, compatibility, shutdown')
     finally:
         if process.poll() is None:
             process.send_signal(signal.SIGTERM)

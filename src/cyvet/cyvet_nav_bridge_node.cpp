@@ -1,4 +1,5 @@
 #include <algorithm>
+#include <cctype>
 #include <csignal>
 #include <cmath>
 #include <memory>
@@ -36,13 +37,7 @@ public:
         options.telemetry_timeout_ms=declare_parameter<int>("telemetry_timeout_ms",2000);
         options.cmd_vel_rate_hz=declare_parameter<double>("cmd_vel_rate_hz",30.0);
         options.lateral_sign=declare_parameter<double>("lateral_sign",1.0);
-        for (size_t i=0; i<3; ++i) {
-            const std::vector<std::string> names{"slow","medium","high"};
-            auto limits=declare_parameter<std::vector<double>>("speed_limits_"+names[i],
-                {options.speed_limits[i][0],options.speed_limits[i][1],options.speed_limits[i][2]});
-            if (limits.size()!=3) throw std::invalid_argument("Each speed limit requires [vx, vy, yaw]");
-            std::copy(limits.begin(),limits.end(),options.speed_limits[i].begin());
-        }
+        options.default_control_profile=declare_parameter<std::string>("default_control_profile","slow");
         imu_frame_=declare_parameter<std::string>("imu_frame_id","imu_link");
         odom_frame_=declare_parameter<std::string>("odom_frame_id","odom");
         base_frame_=declare_parameter<std::string>("base_frame_id","base_link");
@@ -106,14 +101,21 @@ public:
         addParameters("set_gait",[this](const auto &parameter) {
             const auto &v=parameter.value;
             if (parameter.name!="gait") return BackendResult{false,"Expected parameter gait"};
-            if ((v.type==2 && v.integer_value==0) ||
-                (v.type==4 && (v.string_value=="WALK" || v.string_value=="walk"))) return backend_->setMode(0);
-            return BackendResult{false,"Cyvet supports only WALK/0"};
+            if (v.type==2 && (v.integer_value==0 || v.integer_value==3))
+                return backend_->setGait(static_cast<int>(v.integer_value));
+            if (v.type==4) {
+                std::string name=v.string_value;
+                std::transform(name.begin(),name.end(),name.begin(),
+                    [](unsigned char c) { return static_cast<char>(std::toupper(c)); });
+                if (name=="WALK" || name=="SLOW") return backend_->setGait(0);
+                if (name=="RUN" || name=="FAST") return backend_->setGait(3);
+            }
+            return BackendResult{false,"Cyvet supports only WALK/SLOW/0 and RUN/FAST/3; no medium model"};
         });
         addParameters("set_speed",[this](const auto &parameter) {
             if (parameter.name!="speed" || parameter.value.type!=2 ||
-                parameter.value.integer_value<1 || parameter.value.integer_value>3)
-                return BackendResult{false,"Expected integer speed 1/2/3"};
+                (parameter.value.integer_value!=1 && parameter.value.integer_value!=3))
+                return BackendResult{false,"Expected integer speed 1=slow or 3=fast; medium is unsupported"};
             return backend_->setSpeed(static_cast<int>(parameter.value.integer_value));
         });
         for (const std::string name : {"set_body_height","charge_command"})

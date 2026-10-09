@@ -72,18 +72,23 @@ DDS 服务发现不依赖在参数中写死机器人 IP；通过 device_id 检�
 
 | 服务（节点私有命名空间） | 类型 | Cyvet 行为 |
 |---|---|---|
-| `stand`、`ready` | `std_srvs/srv/Trigger` | 显式取权，确认零速 walking，解除本地禁止运动 |
+| `stand`、`ready` | `std_srvs/srv/Trigger` | 显式取权，启动默认 slow 的零速 walking，确认后解除本地禁止运动 |
 | `lie` | 同上 | 确认 laying，然后释放控制权 |
 | `soft_estop` | 同上 | 本地立刻封锁速度，请求官方 emergencyStop；仅 ready/stand 恢复 |
 | `release_control` | 同上 | stopAction，确认后释放 |
-| `set_gait` | `rcl_interfaces/srv/SetParameters` | 一项 `gait`，仅整数 0 或字符串 WALK/walk；不取权或解除急停 |
-| `set_speed` | 同上 | 一项整数 `speed` 1/2/3，改变本地速度上限 |
+| `set_gait` | `rcl_interfaces/srv/SetParameters` | 一项 `gait`：WALK/SLOW/0 → 厂商 slow；RUN/FAST/3 → 厂商 fast；字符串不区分大小写 |
+| `set_speed` | 同上 | 兼容入口：一项整数 `speed`，1 → slow、3 → fast；2 明确不支持，不再设置本地限速 |
 | `set_body_height`、`charge_command` | 同上 | 明确返回不支持 |
 
 `/cmd_vel` 为 `geometry_msgs/msg/Twist`，使用 linear.x / linear.y / angular.z，
-单位 m/s / m/s / rad/s；拒绝 NaN/Inf。三档上限分别为
-`(0.2,0.1,0.3)`、`(0.4,0.2,0.5)`、`(0.6,0.3,0.8)`，默认第一档。
-实际取配置上限与设备能力范围的交集，不切换厂商 fast profile。
+单位 m/s / m/s / rad/s；拒绝 NaN/Inf。没有本地三档或速度裁剪；三轴输入
+（横向按 lateral_sign 转换）与当前 controlProfile 一起完整发送给厂商接口。
+每次 stand/ready 显式选择 default_control_profile，配置默认 slow；不会继承上次 fast。
+切档须先 stand/ready，不自动取权或解除急停。切档先清理旧速度并确认停止，
+发送三轴全零的 controlProfile，再确认 walking/零速；成功后须发送新的 cmd_vel。
+拒绝、超时、报告档位不匹配或并发停止会使切换失败并封锁速度。
+官方当前仅 slow/fast 两种 profile；不虚构 medium 模型。详细映射、命令和固件
+确认边界见 [CONTROL_PROFILES.md](CONTROL_PROFILES.md)。
 SDK 默认 30 Hz 派发（现场配置为 10 Hz）、500 ms 输入超时、200 ms SDK 默认速度/停止 RPC 超时（现场配置为 500 ms）；
 连接 5 s、重连 2 s、动作确认 10 s、数据有效期 2 s、请求租约 5 s。
 SDK 取权含厂商约定的 3 s master 切换等待；停止请求会先禁止本地速度，
@@ -96,7 +101,7 @@ SDK 取权含厂商约定的 3 s master 切换等待；停止请求会先禁止�
 |---|---|---|
 | `/battery/level` | `std_msgs/msg/UInt8` | 0–100；未知、过期、未连接时不发布 |
 | `/robot_basic_state` | `std_msgs/msg/Int32` | 使用下表 Cyvet 通用状态值 |
-| `/robot_gait_state` | `std_msgs/msg/Int32` | 0 = WALK（支持模式，连接与就绪看诊断） |
+| `/robot_gait_state` | `std_msgs/msg/Int32` | 0 = WALK/slow、3 = RUN/fast（最近成功选择；连接与就绪看诊断） |
 | `/imu/data` | `sensor_msgs/msg/Imu` | 有限值且 accel/gyro 无错误；四元数归一化，无效 orientation covariance[0]=-1 |
 | `/joint_states` | `sensor_msgs/msg/JointState` | 实际布局名称；所有关节在线、无错误、数据完整且名称唯一才发布 |
 | `/leg_odom` | `nav_msgs/msg/Odometry` | 有效且有限的 SE(2) 样本；epoch/重连以偏移连续衔接 |
@@ -145,7 +150,7 @@ python3 /home/cat/Workspace/driver_ws/src/nav_bridge/cyvet/read_only_smoke.py \
 `--axes lateral_yaw --seconds 5 --lateral-speed 0.1 --yaw-speed 0.3`。
 
 `--stage combined --seconds 3 --lateral-speed 0.1 --yaw-speed 0.3` 依次发送
-前进/左移/左转和后退/右移/右转组合，各项仍在第一档上限内；两组之间确认停止。
+前进/左移/左转和后退/右移/右转组合，使用已校准的低速输入；两组之间确认停止。
 `--stage takeover` 仅零速 walking，提示现场在 60 秒内遥控接管；检测失权后
 继续观察 5 秒，确认零速输入不会自动取权，不再调用 ready。此项尚未现场执行。
 

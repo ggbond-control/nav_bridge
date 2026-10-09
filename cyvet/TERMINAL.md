@@ -48,7 +48,7 @@ ros2 run teleop_twist_keyboard teleop_twist_keyboard
 ```
 
 标准键盘节点发布 Twist 到 `/cmd_vel`，其默认线速度为 0.5 m/s、转速为
-1.0 rad/s；桥接第一档会限制到 vx 0.2、vy 0.1 m/s、yaw 0.3 rad/s。
+1.0 rad/s；桥接直接发送这些输入给当前厂商模型，不再裁剪为旧第一档速度。
 也可添加 `--ros-args -p speed:=0.1 -p turn:=0.3` 使用较小输入。
 此前新增的 cyvet_* 快捷别名已移除，没有新增业务接口。
 
@@ -63,7 +63,8 @@ ros2 run teleop_twist_keyboard teleop_twist_keyboard
 
 Jazzy 的该键盘版本每次按键发布一条消息，持续运动需要按住按键让终端重复输入。
 没有新按键消息超过 500 ms，桥接执行停止；这与退出或释放控制权不同。
-键盘自身 q/z 等键能修改输入速度，桥接第一档上限仍为 (0.2,0.1,0.3)。
+键盘自身 q/z 等键能修改输入速度。厂商 slow/fast 模型通过原 set_gait 服务切换，
+见 [CONTROL_PROFILES.md](CONTROL_PROFILES.md)；每次 stand/ready 默认回到 slow。
 
 退出键盘后，在终端 2 执行：
 
