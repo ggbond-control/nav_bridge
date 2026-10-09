@@ -89,6 +89,7 @@ public:
         backend_->setFaultCallback([this](const BackendFault &data) {
             std_msgs::msg::String msg;
             msg.data="code="+std::to_string(data.code)+": "+data.message; fault_pub_->publish(msg);
+            RCLCPP_ERROR_THROTTLE(get_logger(), *get_clock(), 2000, "Cyvet fault: %s", msg.data.c_str());
         });
         velocity_sub_=create_subscription<geometry_msgs::msg::Twist>("/cmd_vel",rclcpp::QoS(1),
             [this](geometry_msgs::msg::Twist::ConstSharedPtr msg) {

@@ -179,7 +179,7 @@ SystemRpcClientBase::SharedResponse SystemRpcClientBase::send_request(
 
   client_->remove_pending_request(future);
   if (result == rclcpp::FutureReturnCode::TIMEOUT) {
-    throw std::runtime_error("System RPC request timed out");
+    throw SystemRpcTimeout();
   }
   throw std::runtime_error("System RPC request was interrupted");
 }

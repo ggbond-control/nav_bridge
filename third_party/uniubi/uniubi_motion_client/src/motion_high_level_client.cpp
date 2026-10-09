@@ -761,6 +761,10 @@ bool MotionHighLevelClient::rpc_call(
 
     set_error(kActionRejected);
     return false;
+  } catch (const SystemRpcTimeout & e) {
+    std::cerr << context << " RPC failed: " << e.what() << std::endl;
+    set_error(kRpcTimeout);
+    return false;
   } catch (const std::exception & e) {
     std::cerr << context << " RPC failed: " << e.what() << std::endl;
     set_error(kRpcCallFailed);
@@ -880,7 +884,13 @@ void MotionHighLevelClient::tick_renew()
         handle_renew_response(sequence, controller, future);
       });
     pending_renew_request_id_ = future.request_id;
-    pending_renew_deadline_ = now + std::chrono::milliseconds(kRenewTimeoutMs);
+    // A 3 s reply wait consumes nearly all of a 5 s lease after the first
+    // lease/3 renewal. Budget at most lease/10 per attempt so transient device
+    // forwarding failures leave time to retry before the actual lease expires.
+    const auto lease = std::chrono::milliseconds(lease_ms_ > 0 ? lease_ms_ : kDefaultLeaseMs);
+    const auto response_budget = std::min(std::chrono::milliseconds(kRenewTimeoutMs),
+      std::max(std::chrono::milliseconds(200), lease/10));
+    pending_renew_deadline_ = std::min(lease_deadline, now + response_budget);
   } catch (const std::exception & e) {
     std::cerr << "renewMotionControl async RPC failed: " << e.what() << std::endl;
     if (std::chrono::steady_clock::now() >= lease_deadline) {

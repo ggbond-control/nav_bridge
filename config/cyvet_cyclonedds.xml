@@ -1,6 +1,7 @@
 <?xml version="1.0" encoding="utf-8"?>
 <CycloneDDS xmlns="https://cdds.io/config">
   <!-- Robot communication only. Business ROS traffic retains its own domain. -->
+  <!-- Remote Wi-Fi locators may still use Linux routes; see cyvet/RPC_TIMEOUT_FIX.md. -->
   <Domain Id="42">
     <General>
       <Interfaces>

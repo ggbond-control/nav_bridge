@@ -18,18 +18,21 @@ from rclpy.qos import QoSProfile, ReliabilityPolicy
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument('--stage', required=True, choices=['stand', 'axes', 'combined', 'takeover', 'estop', 'lie', 'zero_stream'])
+    parser.add_argument('--stage', required=True, choices=['stand', 'axes', 'combined', 'takeover', 'estop', 'lie', 'zero_stream', 'idle_hold'])
     parser.add_argument('--executable', help='Optionally launch a fresh node for this one check')
     parser.add_argument('--params', help='Required when --executable is used')
     parser.add_argument('--seconds', type=float, default=1., help='Per-axis duration, 0.1 to 5 seconds')
     parser.add_argument('--axes', choices=['all', 'lateral', 'yaw', 'lateral_yaw'], default='all')
     parser.add_argument('--lateral-speed', type=float, default=.06)
     parser.add_argument('--yaw-speed', type=float, default=.1)
+    parser.add_argument('--hold-seconds', type=float, default=10., help='Zero/idle hold duration, 1 to 180 seconds')
     args = parser.parse_args()
     if not 0 < args.lateral_speed <= .1 or not 0 < args.yaw_speed <= .3:
         parser.error('Attended checks require lateral speed <=0.1 m/s and yaw <=0.3 rad/s')
     if not .1 <= args.seconds <= 5.:
         parser.error('--seconds must be between 0.1 and 5')
+    if not 1 <= args.hold_seconds <= 180:
+        parser.error('--hold-seconds must be between 1 and 180')
     if args.executable and not args.params:
         parser.error('--executable requires --params')
     rclpy.init()
@@ -174,12 +177,14 @@ def main():
             print('PASS: remote takeover revoked bridge control; zero cmd_vel did not reacquire',
                   flush=True)
             return
-        elif args.stage == 'zero_stream':
-            end = time.monotonic() + 10.
+        elif args.stage in ('zero_stream', 'idle_hold'):
+            end = time.monotonic() + args.hold_seconds
+            print(json.dumps({'hold_stage': args.stage, 'seconds': args.hold_seconds}), flush=True)
             while time.monotonic() < end:
-                if not status.get('navigation_ready'):
-                    raise RuntimeError('Zero stream lost readiness: ' + json.dumps(status))
-                pub.publish(Twist())
+                if not status.get('navigation_ready') or not status.get('control_owned'):
+                    raise RuntimeError('Zero/idle hold lost readiness or ownership: ' + json.dumps(status))
+                if args.stage == 'zero_stream':
+                    pub.publish(Twist())
                 rclpy.spin_once(node, timeout_sec=.04)
             settled = time.monotonic() + .7
             wait(lambda: time.monotonic() > settled)

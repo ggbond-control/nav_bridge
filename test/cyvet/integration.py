@@ -38,6 +38,7 @@ class Robot:
         self.node = node
         self.owner = ''
         self.lease_activity = time.monotonic()
+        self.lease_ms = 5000
         self.action = ''
         self.velocity = [0., 0., 0.]
         self.offline = False
@@ -53,6 +54,9 @@ class Robot:
         self.wrong_identity = False
         self.delay_method = ''
         self.delay_seconds = 0.
+        self.delay_remaining = -1
+        self.reject_velocity = False
+        self.wrong_velocity_identity = False
         self.invalid_quaternion = False
         self.motion_offline = False
         self.service = node.create_service(System, 'robotServer', self.request,
@@ -67,7 +71,9 @@ class Robot:
         self.calls.append((req.method, req.device_id))
         res.device_id = ('different-robot' if self.wrong_identity and
                          req.method == 'setMotionMasterRole' else req.device_id)
-        if req.method == self.delay_method:
+        if req.method == self.delay_method and self.delay_remaining != 0:
+            if self.delay_remaining > 0:
+                self.delay_remaining -= 1
             time.sleep(self.delay_seconds)
         if self.offline or (self.motion_offline and req.method == 'queryMotionState') or req.device_id != 'cyvet-test':
             res.code = 1
@@ -94,7 +100,7 @@ class Robot:
             result = not self.reject_acquire
             if result:
                 self.owner = 'fixture-controller'
-                params = {'controller': self.owner, 'leaseTimeout': 5000}
+                params = {'controller': self.owner, 'leaseTimeout': self.lease_ms}
         elif method == 'setMotionMasterRole':
             pass
         elif method == 'setMotionObservedEnable':
@@ -109,13 +115,16 @@ class Robot:
             time.sleep(.05)  # Real firmware can send this before the RPC ACK.
         elif method == 'renewMotionControl':
             result = bool(self.owner)
+            params = {'leaseTimeout': self.lease_ms}
         elif method == 'startMotionAction':
             result = bool(self.owner) and not self.reject_action
             if result:
                 self.action = p['action']
                 self.velocity = [0., 0., 0.]
         elif method == 'setMotionActionParams':
-            result = bool(self.owner)
+            if self.wrong_velocity_identity:
+                res.device_id = 'different-robot'
+            result = bool(self.owner) and not self.reject_velocity
             if result:
                 self.velocity = [p.get('params', {}).get(n, 0.)
                                  for n in ('lineVelocityX', 'lineVelocityY', 'velocity')]
@@ -137,7 +146,7 @@ class Robot:
         return res
 
     def observed(self):
-        if self.owner and time.monotonic() - self.lease_activity > 5.:
+        if self.owner and time.monotonic() - self.lease_activity > self.lease_ms/1000.:
             self.owner = ''
             self.velocity = [0., 0., 0.]
         if not self.enabled or self.offline:
@@ -293,6 +302,68 @@ def main():
         settle_until = time.monotonic() + .2
         wait(lambda: time.monotonic() > settle_until)
         assert robot.velocity == [0., 0., 0.], 'NaN must never reach the vendor'
+        # Only an actual timeout may retry, and only newer live input in an
+        # unchanged walking/control session. The retry must use the latest axes.
+        recoveries = state()['velocity_rpc_recoveries']
+        robot.delay_method, robot.delay_seconds, robot.delay_remaining = 'setMotionActionParams', .35, 1
+        velocity(.1, .03, .1)
+        wait(lambda: robot.delay_remaining == 0)
+
+        def recovered():
+            velocity(-.1, -.03, -.1)
+            assert state()['navigation_ready'], 'a confirmed transient retry must retain readiness'
+            return state()['velocity_rpc_recoveries'] > recoveries and robot.velocity[0] < 0
+
+        wait(recovered)
+        robot.delay_method, robot.delay_seconds, robot.delay_remaining = '', 0., -1
+        wait(lambda: robot.velocity == [0., 0., 0.])
+        # Explicit rejection and wrong identity must not be treated as timeouts.
+        for failure in ('reject_velocity', 'wrong_velocity_identity'):
+            assert service('ready').success
+            wait(lambda: state()['navigation_ready'] and not state()['command_cached'])
+            setattr(robot, failure, True)
+            before = sum(m == 'setMotionActionParams' for m, _ in robot.calls)
+            velocity()
+            wait(lambda: not state()['navigation_ready'] and robot.velocity == [0., 0., 0.])
+            assert sum(m == 'setMotionActionParams' for m, _ in robot.calls) == before+1
+            setattr(robot, failure, False)
+            assert service('ready').success
+            wait(lambda: state()['navigation_ready'])
+        # A priority stop arriving during a timeout must prevent the retry even
+        # if a newer input has already arrived.
+        robot.delay_method, robot.delay_seconds, robot.delay_remaining = 'setMotionActionParams', .35, 1
+        before = sum(m == 'setMotionActionParams' for m, _ in robot.calls)
+        velocity(.1, 0., 0.)
+        wait(lambda: robot.delay_remaining == 0)
+        velocity(-.1, 0., 0.)
+        cancel_client = node.create_client(Trigger, '/nav_bridge_node/release_control')
+        cancel_future = cancel_client.call_async(Trigger.Request())
+        wait(cancel_future.done)
+        assert cancel_future.result().success and not robot.owner
+        assert sum(m == 'setMotionActionParams' for m, _ in robot.calls) == before+1
+        node.destroy_client(cancel_client)
+        robot.delay_method, robot.delay_seconds, robot.delay_remaining = '', 0., -1
+        assert service('ready').success
+        wait(lambda: state()['navigation_ready'])
+        # The first idle lease reply can be late. A short lease must retry well
+        # before expiry, while retaining the same controller without reacquiring.
+        assert service('release_control').success
+        robot.lease_ms = 2000
+        assert service('ready').success
+        wait(lambda: state()['navigation_ready'])
+        robot.delay_method, robot.delay_seconds, robot.delay_remaining = 'renewMotionControl', 3., 1
+        acquisitions = sum(m == 'takeMotionControl' for m, _ in robot.calls)
+        renewals = sum(m == 'renewMotionControl' for m, _ in robot.calls)
+        wait(lambda: sum(m == 'renewMotionControl' for m, _ in robot.calls) >= renewals+2)
+        settle_until = time.monotonic()+.4
+        wait(lambda: time.monotonic() > settle_until)
+        assert state()['navigation_ready'] and state()['control_owned'] and robot.owner
+        assert sum(m == 'takeMotionControl' for m, _ in robot.calls) == acquisitions
+        robot.delay_method, robot.delay_seconds, robot.delay_remaining = '', 0., -1
+        assert service('release_control').success
+        robot.lease_ms = 5000
+        assert service('ready').success
+        wait(lambda: state()['navigation_ready'])
         # Stale motion state must inhibit even when battery/system queries work.
         robot.motion_offline = True
         wait(lambda: not state()['navigation_ready'])
@@ -357,7 +428,7 @@ def main():
         process.send_signal(signal.SIGTERM)
         process.wait(timeout=15.)
         assert process.returncode == 0 and not robot.owner
-        print('PASS: read-only startup, invalid telemetry/quaternion/NaN, identity rejection, limits, watchdog, motion stale, RPC timeout, estop/recovery, rejection, concurrent stop, preemption, reconnect, odom continuity, compatibility, shutdown')
+        print('PASS: read-only startup, invalid telemetry/quaternion/NaN, identity rejection, limits, watchdog, motion stale, fresh-input timeout recovery, explicit rejection/wrong identity no retry, expired-input timeout stop, estop/recovery, rejection, concurrent stop, preemption, reconnect, odom continuity, compatibility, shutdown')
     finally:
         if process.poll() is None:
             process.send_signal(signal.SIGTERM)

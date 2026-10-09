@@ -136,6 +136,7 @@ struct CyvetBackend::Impl {
         next_motion{}, next_system{}, next_velocity{}, next_halt{};
     std::optional<Pending> pending_motion, pending_system;
     uint64_t query_sequence{0}, motion_stamp{0}, sensor_stamp{0};
+    uint64_t velocity_rpc_timeouts{0}, velocity_rpc_recoveries{0};
     std::array<cyvet::AxisRange, 3> ranges{};
     std::set<std::string> actions;
     std::map<std::pair<unsigned, unsigned>, std::string> layout;
@@ -465,7 +466,38 @@ struct CyvetBackend::Impl {
         // Mark active before RPC; a timed-out request may still have taken effect.
         velocity_active = true;
         if (!client->setActionParams(json(params), opts.rpc_timeout_ms)) {
-            inhibit(); error("Velocity rejected or timed out");
+            const auto failure = client->getLastError();
+            if (failure == Client::kRpcTimeout) {
+                { std::lock_guard<std::mutex> lock(mutex); ++velocity_rpc_timeouts; }
+                // A transient device forwarding timeout need not revoke a healthy
+                // session. Never replay the timed-out command: require newer input,
+                // a fresh walking state, and the same uncanceled generation.
+                std::string value;
+                if (ready && !interrupted(command->generation) &&
+                    client->getState() == Client::kControlled &&
+                    client->queryMotionState(value, opts.rpc_timeout_ms)) {
+                    try {
+                        updateMotion(parse(value));
+                        std::optional<Velocity> latest;
+                        { std::lock_guard<std::mutex> lock(mutex); latest = velocity; }
+                        if (latest && latest->at > command->at && ready &&
+                            latest->generation == command->generation && !interrupted(latest->generation) &&
+                            client->getState() == Client::kControlled && current_action == "walking" &&
+                            Clock::now()-latest->at <= std::chrono::milliseconds(opts.cmd_vel_timeout_ms) &&
+                            client->setActionParams(json(velocityParams(latest->x, latest->y, latest->yaw)),
+                                                    opts.rpc_timeout_ms)) {
+                            std::lock_guard<std::mutex> lock(mutex);
+                            ++velocity_rpc_recoveries;
+                            RCLCPP_WARN(node->get_logger(), "Velocity RPC timeout recovered with fresh input; count=%llu",
+                                static_cast<unsigned long long>(velocity_rpc_recoveries));
+                            return;
+                        }
+                    } catch (const std::exception &e) {
+                        fault(std::string("Invalid motion state during timeout recovery: ")+e.what());
+                    }
+                }
+            }
+            inhibit(); fault("Velocity update failed; stopping", failure);
             const auto result = stop();
             if (!result.success) fault(result.message);
         }
@@ -692,6 +724,8 @@ std::string CyvetBackend::diagnostics() const {
     value["vx"]=state.vx; value["vy"]=state.vy; value["yaw_rate"]=state.vyaw;
     value["last_error"]=impl_->last_fault; value["battery_valid"]=state.battery_percent>=0;
     value["command_cached"]=impl_->velocity.has_value();
+    value["velocity_rpc_timeouts"]=static_cast<Json::UInt64>(impl_->velocity_rpc_timeouts);
+    value["velocity_rpc_recoveries"]=static_cast<Json::UInt64>(impl_->velocity_rpc_recoveries);
     if (impl_->velocity) {
         value["command_age_ms"]=static_cast<Json::Int64>(std::chrono::duration_cast<std::chrono::milliseconds>(Clock::now()-impl_->velocity->at).count());
         value["command_current"]=impl_->velocity->generation==impl_->generation.load();

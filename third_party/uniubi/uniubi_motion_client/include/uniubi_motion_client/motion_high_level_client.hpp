@@ -56,6 +56,7 @@ public:
     kNotConnected,         ///< 未 connect() 时调用了需要连接态的接口。
     kNotControlled,        ///< 未持有控制权时调用了控制类接口。
     kActionRejected,       ///< 服务端返回 result=false 或参数不合法。
+    kRpcTimeout,           ///< Deadline elapsed; distinct from invalid/rejected replies.
   };
 
   /// 控制权状态变化回调。成功取权、释放、续约失效、被抢权时触发。

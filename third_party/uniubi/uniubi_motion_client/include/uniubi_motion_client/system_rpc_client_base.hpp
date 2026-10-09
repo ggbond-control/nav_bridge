@@ -4,6 +4,7 @@
 #include <chrono>
 #include <cstdint>
 #include <string>
+#include <stdexcept>
 
 #include "json/json.h"
 #include "rclcpp/rclcpp.hpp"
@@ -11,6 +12,12 @@
 
 namespace uniubi_motion_client
 {
+
+class SystemRpcTimeout final : public std::runtime_error
+{
+public:
+  SystemRpcTimeout() : std::runtime_error("System RPC request timed out") {}
+};
 
 struct SystemRpcRequest
 {

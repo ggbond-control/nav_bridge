@@ -113,6 +113,13 @@ SDK 取权含厂商约定的 3 s master 切换等待；停止请求会先禁止�
 确认前拒绝导航准备。恢复仍需显式 stand/ready。诊断 stop_pending 表示
 停止待确认；失去控制权后本机无法再保证远程停止。
 
+速度 RPC 的 deadline 超时允许一次有限恢复：查询到 fresh walking、仍持权且
+未被停止取消，只重试期间收到的更新、未过期速度。明确拒绝、错误设备、过期输入
+或再次失败仍封锁并停止，不会自动 stand/ready。诊断提供 velocity_rpc_timeouts
+和 velocity_rpc_recoveries，终端打印恢复 WARN 或具体 fault。
+本固件 DDS 可能选择机器人 Wi-Fi locator，板端已增加目标专用有线路由；
+实测原因、路由维护和回滚见 [RPC_TIMEOUT_FIX.md](RPC_TIMEOUT_FIX.md)。
+
 消息使用业务节点接收时间，原始观测时间仅用于拒绝重复和倒退样本。
 当前协议时间基准未完成实机标定，不能据此声称测量时间已与 ROS 对齐。
 数据缺失不会制造关节或里程计；重连缺失期间不推算位移。
