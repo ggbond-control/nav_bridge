@@ -1,0 +1,10 @@
+uniubi_robot_msgs
+Copyright 2026 UniUbi
+
+This repository is licensed under the Apache License, Version 2.0, except
+where a file or included artifact states a different license.
+
+Original UniUbi source code, IDL files, ROS 2 message definitions, service
+definitions, schemas, and documentation in this repository are made available
+under Apache-2.0. Third-party components and generated artifacts are not
+covered by the repository-level license unless explicitly stated.

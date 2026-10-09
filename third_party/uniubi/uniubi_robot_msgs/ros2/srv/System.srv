@@ -1,0 +1,13 @@
+# Translated from uniubi_robot_msgs/idl/RPCMessage.idl:
+# request  -> uniubi::srv::dds_::System_Request_
+# response -> uniubi::srv::dds_::System_Response_
+uint64 timestamp
+string service
+string device_id
+string method
+string payload
+---
+uint32 code
+uint64 timestamp
+string device_id
+string payload

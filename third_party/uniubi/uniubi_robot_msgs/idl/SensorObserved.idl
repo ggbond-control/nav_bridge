@@ -1,0 +1,73 @@
+
+#ifndef __UNIUBI_DDS_SENSOR_OBSERVED_IDL_H_
+#define __UNIUBI_DDS_SENSOR_OBSERVED_IDL_H_
+
+module uniubi {
+    module dds_ {
+
+        enum GPSSignalLevel {
+            gpsGre38db,         /**< 信号强 */
+            gpsGre30db,         /**< 信号中 */
+            gpsLes30db          /**< 信号弱 */
+        };
+
+        /**地理坐标点*/
+        struct GEOGPoint {
+            float       lat;        /**< 纬度,deg */
+            float       lng;        /**< 经度,deg */
+        };
+
+        struct GPSFrame {
+            uint32      valid;      /**< 1=有效,0=异常 */
+            float       speed;      /**< GPS 测速,km/h */
+            int32       level;      /**< 信号等级,见 GPSSignalLevel */
+            int32       rssi;       /**< 信号强度原始值 单位 dbm */
+            GEOGPoint   point;      /**< 坐标信息 */
+        };
+
+        enum UWBPairState {
+            uwbPairNone,        /**< 未配对 */
+            uwbInPairing,       /**< 配对中 */
+            uwbPairSuccess,     /**< 配对成功 */
+            uwbPairFailed       /**< 配对失败 */
+        };
+
+        struct UWBRawObserved {
+            uint8       valid;      /**< 数据是否有效 */
+            uint8       pairState;  /**< 是否配对,见 UWBPairState */
+            int16       rssi;       /**< 信号强度 单位 dbm */
+            uint16      pitch;      /**< 俯仰角 单位 deg,[0, 360) */
+            uint16      azimuth;    /**< 方位角 单位 deg,[0, 360) 正前方 0 度、逆时针递增 */
+            uint32      distance;   /**< 距离 单位 cm */
+            uint32      beaconId;   /**< 当前配对信标ID */
+        };
+
+        typedef float OdomVector3[3];
+        struct MotionOdometry {
+            uint8       valid;
+            uint32      epoch;
+            float       yaw;
+            float       yawSpeed;
+            OdomVector3 position;
+            OdomVector3 velocity;
+        };
+    };
+
+    module msg {
+        module dds_ {
+
+            typedef uniubi::dds_::GPSFrame GPSFrame;
+            typedef uniubi::dds_::UWBRawObserved UWBRawObserved;
+            typedef uniubi::dds_::MotionOdometry MotionOdometry;
+
+            struct SensorObserved_ {
+                uint64          timestamp;  ///递增相对时间戳(单位 us,设备内部服务使用,非墙钟)
+                GPSFrame        gps;        ///GPS 观测
+                UWBRawObserved  uwb;        ///UWB 观测
+                MotionOdometry  odom;       ///Walk 平面里程计
+            };
+        };
+    };
+};
+
+#endif //__UNIUBI_DDS_SENSOR_OBSERVED_IDL_H_

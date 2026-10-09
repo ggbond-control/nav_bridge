@@ -1,0 +1,16 @@
+
+#ifndef __UNIUBI_DDS_REQUEST_HEADER_IDL__
+#define __UNIUBI_DDS_REQUEST_HEADER_IDL__
+
+module uniubi {
+    module dds_ {
+
+        @final
+        struct Header {
+            uint64     clientId;
+            uint64     requestId;
+        };
+    };
+};
+
+#endif

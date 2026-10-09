@@ -1,0 +1,25 @@
+
+#ifndef __UNIUBI_DDS_EVENT_MESSAGE_IDL__
+#define __UNIUBI_DDS_EVENT_MESSAGE_IDL__
+
+#include "Request.idl"
+
+module uniubi {
+    module msg {
+        module dds_ {
+
+            typedef uniubi::dds_::Header Header;
+            struct EventMessage_ {
+                Header      header;
+                uint32      magic;
+                uint64      timestamp;
+                string      topic;
+                string      payload;
+            };
+        };
+    };
+};
+
+#endif
+
+

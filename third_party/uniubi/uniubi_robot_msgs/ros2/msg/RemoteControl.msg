@@ -1,0 +1,25 @@
+# Translated from uniubi_robot_msgs/idl/RemoteControl.idl: uniubi::msg::dds_::RemoteControl_.
+uint64 controller
+uint64 timestamp
+uint8 back
+uint8 start
+uint8 lb
+uint8 rb
+uint8 f1
+uint8 f2
+uint8 a
+uint8 b
+uint8 x
+uint8 y
+uint8 up
+uint8 down
+uint8 left
+uint8 right
+uint8 ls
+uint8 rs
+float32 stick_lx
+float32 stick_ly
+float32 stick_rx
+float32 stick_ry
+float32 trigger_l
+float32 trigger_r

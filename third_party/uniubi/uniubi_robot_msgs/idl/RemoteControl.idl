@@ -1,0 +1,40 @@
+
+#ifndef __UNIUBI_DDS_REMOTE_CONTROL_IDL_H_
+#define __UNIUBI_DDS_REMOTE_CONTROL_IDL_H_
+
+module uniubi {
+    module msg {
+        module dds_{
+
+            struct RemoteControl_ {
+                uint64          controller;             ///控制者唯一标识
+                uint64          timestamp;              ///相对时间戳要递增
+                /// 按键状态
+                uint8           back;
+                uint8           start;
+                uint8           lb;
+                uint8           rb;
+                uint8           f1;
+                uint8           f2;
+                uint8           a;
+                uint8           b;
+                uint8           x;
+                uint8           y;
+                uint8           up;
+                uint8           down;
+                uint8           left;
+                uint8           right;
+                uint8           ls;
+                uint8           rs;
+                float           stickLX;
+                float           stickLY;
+                float           stickRX;
+                float           stickRY;
+                float           triggerL;
+                float           triggerR;
+            };
+        };
+    };
+};
+
+#endif //__UNIUBI_DDS_REMOTE_CONTROL_IDL_H_

@@ -1,0 +1,1070 @@
+#include "uniubi_motion_client/motion_high_level_client.hpp"
+
+#include <algorithm>
+#include <cstdint>
+#include <iostream>
+#include <sstream>
+#include <stdexcept>
+#include <thread>
+#include <utility>
+
+#include "json/json.h"
+
+namespace uniubi_motion_client
+{
+
+namespace
+{
+
+constexpr const char * kRobotAppService = "robotAppService";
+constexpr const char * kHostEventTopic = "robotServer.host.event";
+constexpr const char * kControlStatusTopic = "robotServer.control.status";
+constexpr std::uint32_t kEventMagic = 0x53425645U;
+constexpr int32_t kDefaultLeaseMs = 60000;
+constexpr int32_t kMasterSwitchRpcTimeoutMs = 5000;
+constexpr int32_t kMasterSwitchRetryMs = 1000;
+constexpr int32_t kMasterSwitchWaitMs = 3000;
+constexpr int32_t kRenewTimeoutMs = 3000;
+constexpr int32_t kRenewTimerPeriodMs = 200;
+
+Json::Value null_params()
+{
+  return Json::Value(Json::nullValue);
+}
+
+Json::Value empty_object()
+{
+  return Json::Value(Json::objectValue);
+}
+
+Json::Value bool_param(const std::string & name, bool value)
+{
+  Json::Value params(Json::objectValue);
+  params[name] = value;
+  return params;
+}
+
+std::string write_json(const Json::Value & value)
+{
+  Json::StreamWriterBuilder builder;
+  builder["indentation"] = "";
+  return Json::writeString(builder, value);
+}
+
+bool parse_json_no_throw(const std::string & json, Json::Value & value, std::string & error)
+{
+  Json::CharReaderBuilder builder;
+  std::istringstream stream(json);
+  return Json::parseFromStream(builder, stream, &value, &error);
+}
+
+bool read_controlled(const Json::Value & payload)
+{
+  if (!payload.isMember("controlled")) {
+    return false;
+  }
+
+  const auto & value = payload["controlled"];
+  if (value.isBool()) {
+    return value.asBool();
+  }
+  if (value.isString()) {
+    return value.asString() != "0";
+  }
+  return false;
+}
+
+}  // namespace
+
+MotionHighLevelClient::MotionHighLevelClient(
+  const rclcpp::Node::SharedPtr & node,
+  rclcpp::Executor & executor,
+  const std::string & ros_service_name,
+  const std::string & device_id,
+  const std::string & event_topic,
+  const std::string & sensor_observed_topic,
+  const std::string & motion_observed_topic,
+  const std::string & sensor_observed_source,
+  const std::string & cere_motion_topic)
+: SystemRpcClientBase(node, ros_service_name, device_id),
+  node_(node),
+  executor_(executor),
+  pending_renew_request_id_(std::nullopt),
+  pending_renew_deadline_(std::nullopt),
+  last_control_activity_at_(std::chrono::steady_clock::now()),
+  renew_sequence_(0),
+  event_topic_(event_topic),
+  sensor_observed_topic_(sensor_observed_topic),
+  sensor_observed_source_(sensor_observed_source),
+  cere_motion_topic_(cere_motion_topic),
+  motion_observed_topic_(motion_observed_topic),
+  lease_ms_(kDefaultLeaseMs),
+  state_(kDisconnected),
+  last_error_(kNone)
+{
+  if (sensor_observed_source_ != "sensor_observed" && sensor_observed_source_ != "cere_motion_state") {
+    throw std::invalid_argument("sensor_observed_source must be sensor_observed or cere_motion_state");
+  }
+}
+
+MotionHighLevelClient::~MotionHighLevelClient()
+{
+  disconnect();
+}
+
+bool MotionHighLevelClient::connect(int32_t lease_ms)
+{
+  if (state_ != kDisconnected) {
+    return true;
+  }
+
+  if (!wait_for_service(timeout_from_ms(5000))) {
+    set_error(kRpcConnectFailed);
+    return false;
+  }
+
+  // RobotServer may announce the request endpoint slightly before its response
+  // writer has matched this new client. Give the reverse path a short settling
+  // window before issuing the first synchronous RPC.
+  std::this_thread::sleep_for(std::chrono::milliseconds(200));
+
+  lease_ms_ = lease_ms > 0 ? lease_ms : kDefaultLeaseMs;
+  controller_.clear();
+  create_event_subscription();
+  set_error(kNone);
+  state_ = kConnected;
+  return true;
+}
+
+void MotionHighLevelClient::disconnect()
+{
+  if (state_ == kControlled) {
+    (void)releaseControl();
+  }
+
+  stop_renew_timer();
+  destroy_event_subscription();
+  destroy_sensor_observed_subscription();
+  destroy_motion_observed_subscription();
+  controller_.clear();
+  state_ = kDisconnected;
+}
+
+bool MotionHighLevelClient::startControl(int32_t timeout_ms)
+{
+  if (!ensure_connected()) {
+    return false;
+  }
+
+  if (state_ == kControlled) {
+    return true;
+  }
+
+  const auto deadline = std::chrono::steady_clock::now() + timeout_from_ms(timeout_ms);
+  const auto fail_acquire = [this]() {
+    set_error(kRpcAcquireRejected);
+    if (connect_callback_) {
+      connect_callback_(kConnected, kRpcAcquireRejected);
+    }
+    return false;
+  };
+
+  // Match the official High-level SDK acquisition sequence: first restore the
+  // built-in cerebellum controller as motor master, wait for the asynchronous
+  // switch to settle, and only then acquire the High-level RPC session.
+  Json::Value master_params(Json::objectValue);
+  master_params["master"] = "cerebellum";
+  Json::Value master_ret;
+  while (true) {
+    const auto now = std::chrono::steady_clock::now();
+    if (now >= deadline) {
+      return fail_acquire();
+    }
+    const auto remaining_ms = std::max<int64_t>(
+      1,
+      std::chrono::duration_cast<std::chrono::milliseconds>(deadline - now).count());
+    const auto rpc_timeout_ms = static_cast<int32_t>(std::min<int64_t>(
+      remaining_ms, kMasterSwitchRpcTimeoutMs));
+    if (rpc_call(
+        "setMotionMasterRole",
+        client_id(),
+        master_params,
+        master_ret,
+        rpc_timeout_ms,
+        "setMotionMasterRole"))
+    {
+      break;
+    }
+
+    const auto retry_at = std::chrono::steady_clock::now();
+    if (retry_at >= deadline) {
+      return fail_acquire();
+    }
+    std::this_thread::sleep_for(std::min(
+      std::chrono::milliseconds(kMasterSwitchRetryMs),
+      std::chrono::duration_cast<std::chrono::milliseconds>(deadline - retry_at)));
+  }
+
+  const auto switched_at = std::chrono::steady_clock::now();
+  if (switched_at + std::chrono::milliseconds(kMasterSwitchWaitMs) >= deadline) {
+    return fail_acquire();
+  }
+  std::this_thread::sleep_for(std::chrono::milliseconds(kMasterSwitchWaitMs));
+
+  Json::Value params(Json::objectValue);
+  params["cmdMode"] = true;
+  if (lease_ms_ > 0) {
+    params["leaseTimeout"] = lease_ms_;
+  }
+
+  Json::Value ret;
+  const auto take_at = std::chrono::steady_clock::now();
+  if (take_at >= deadline) {
+    return fail_acquire();
+  }
+  const auto take_timeout_ms = static_cast<int32_t>(std::max<int64_t>(
+    1,
+    std::chrono::duration_cast<std::chrono::milliseconds>(deadline - take_at).count()));
+  if (!rpc_call(
+      "takeMotionControl",
+      client_id(),
+      params,
+      ret,
+      take_timeout_ms,
+      "takeMotionControl"))
+  {
+    return fail_acquire();
+  }
+
+  if (!ret.isObject() || !ret.isMember("controller") || !ret["controller"].isString()) {
+    return fail_acquire();
+  }
+
+  controller_ = ret["controller"].asString();
+  if (ret.isMember("leaseTimeout") && ret["leaseTimeout"].isNumeric()) {
+    lease_ms_ = ret["leaseTimeout"].asInt();
+  }
+  mark_control_activity();
+  state_ = kControlled;
+  set_error(kNone);
+  start_renew_timer();
+
+  if (connect_callback_) {
+    connect_callback_(kControlled, kNone);
+  }
+  return true;
+}
+
+bool MotionHighLevelClient::releaseControl()
+{
+  if (state_ != kControlled) {
+    set_error(kNotControlled);
+    return false;
+  }
+
+  if (!rpc_send_action(
+      "releaseMotionControl",
+      controller_,
+      null_params(),
+      5000,
+      "releaseMotionControl"))
+  {
+    return false;
+  }
+
+  stop_renew_timer();
+  controller_.clear();
+  state_ = kConnected;
+  set_error(kNone);
+
+  if (connect_callback_) {
+    connect_callback_(kConnected, kNone);
+  }
+  return true;
+}
+
+int32_t MotionHighLevelClient::getState() const
+{
+  return state_;
+}
+
+int32_t MotionHighLevelClient::getLastError() const
+{
+  const auto error = last_error_;
+  last_error_ = kNone;
+  return error;
+}
+
+void MotionHighLevelClient::setConnectCallback(ConnectCallback cb)
+{
+  if (state_ != kDisconnected) {
+    return;
+  }
+  connect_callback_ = std::move(cb);
+}
+
+void MotionHighLevelClient::setEventCallback(EventCallback cb)
+{
+  if (state_ != kDisconnected) {
+    return;
+  }
+  event_callback_ = std::move(cb);
+}
+
+void MotionHighLevelClient::setSensorObservedCallback(SensorObservedCallback cb)
+{
+  if (state_ != kDisconnected) {
+    return;
+  }
+  sensor_observed_callback_ = std::move(cb);
+}
+
+void MotionHighLevelClient::setMotionObservedCallback(MotionObservedCallback cb)
+{
+  if (state_ != kDisconnected) {
+    return;
+  }
+  motion_observed_callback_ = std::move(cb);
+}
+
+bool MotionHighLevelClient::queryCapabilities(std::string & out, int32_t timeout_ms)
+{
+  if (!ensure_connected()) {
+    return false;
+  }
+
+  Json::Value ret;
+  if (!rpc_call(
+      "getMotionCapabilities",
+      client_id(),
+      null_params(),
+      ret,
+      timeout_ms,
+      "getMotionCapabilities"))
+  {
+    return false;
+  }
+
+  return response_to_output(ret, out);
+}
+
+bool MotionHighLevelClient::querySystemStatus(std::string & out, int32_t timeout_ms)
+{
+  if (!ensure_connected()) {
+    return false;
+  }
+
+  Json::Value ret;
+  if (!rpc_call("getSystemStatus", controller_.empty() ? client_id() : controller_, null_params(), ret, timeout_ms,
+      "getSystemStatus"))
+  {
+    return false;
+  }
+
+  return response_to_output(ret, out);
+}
+
+bool MotionHighLevelClient::queryMotionState(std::string & out, int32_t timeout_ms)
+{
+  if (!ensure_connected()) {
+    return false;
+  }
+
+  Json::Value ret;
+  if (!rpc_call("queryMotionState", controller_.empty() ? client_id() : controller_, null_params(), ret, timeout_ms,
+      "queryMotionState"))
+  {
+    return false;
+  }
+
+  return response_to_output(ret, out);
+}
+
+bool MotionHighLevelClient::queryMotorLayout(std::string & out, int32_t timeout_ms)
+{
+  if (!ensure_connected()) {
+    return false;
+  }
+
+  Json::Value ret;
+  if (!rpc_call(
+      "getMotorLayout", client_id(), null_params(), ret, timeout_ms,
+      "getMotorLayout"))
+  {
+    return false;
+  }
+  return response_to_output(ret, out);
+}
+
+bool MotionHighLevelClient::startAction(
+  const std::string & action,
+  const std::string & params_json,
+  int32_t timeout_ms)
+{
+  if (!ensure_controlled()) {
+    return false;
+  }
+
+  Json::Value action_params;
+  if (!parse_params_json(params_json, action_params, "startMotionAction")) {
+    return false;
+  }
+
+  Json::Value params(Json::objectValue);
+  params["action"] = action;
+  if (!action_params.isNull()) {
+    params["params"] = action_params;
+  }
+
+  Json::Value ret;
+  const bool success =
+    rpc_call("startMotionAction", controller_, params, ret, timeout_ms, "startMotionAction");
+  if (success) {
+    mark_control_activity();
+  }
+  return success;
+}
+
+bool MotionHighLevelClient::stopAction(int32_t timeout_ms)
+{
+  if (!ensure_controlled()) {
+    return false;
+  }
+
+  Json::Value ret;
+  const bool success =
+    rpc_call("stopMotionAction", controller_, null_params(), ret, timeout_ms, "stopMotionAction");
+  if (success) {
+    mark_control_activity();
+  }
+  return success;
+}
+
+bool MotionHighLevelClient::setActionParams(
+  const std::string & params_json,
+  int32_t timeout_ms)
+{
+  if (!ensure_controlled()) {
+    return false;
+  }
+
+  Json::Value action_params;
+  if (!parse_params_json(params_json, action_params, "setMotionActionParams")) {
+    return false;
+  }
+
+  Json::Value params(Json::objectValue);
+  if (!action_params.isNull()) {
+    params["params"] = action_params;
+  }
+
+  Json::Value ret;
+  const bool success =
+    rpc_call("setMotionActionParams", controller_, params, ret, timeout_ms, "setMotionActionParams");
+  if (success) {
+    mark_control_activity();
+  }
+  return success;
+}
+
+bool MotionHighLevelClient::emergencyStop(int32_t timeout_ms)
+{
+  if (!ensure_controlled()) {
+    return false;
+  }
+
+  Json::Value ret;
+  const bool success =
+    rpc_call("emergencyStopMotion", controller_, null_params(), ret, timeout_ms, "emergencyStopMotion");
+  if (success) {
+    mark_control_activity();
+  }
+  return success;
+}
+
+bool MotionHighLevelClient::setMotionObservedEnable(bool motion_enable, bool sensor_enable, int32_t timeout_ms)
+{
+  if (!ensure_connected()) {
+    return false;
+  }
+
+  Json::Value params(Json::objectValue);
+  params["motionEnable"] = motion_enable;
+  if (sensor_observed_source_ == "sensor_observed") {
+    params["sensorEnable"] = sensor_enable;
+  }
+
+  // The server starts publishing observations before replying to this RPC. Keep the
+  // high-rate subscriptions out of the single-threaded executor until the reply is
+  // received; this also makes repeated enable/disable calls deterministic.
+  destroy_motion_observed_subscription();
+  destroy_sensor_observed_subscription();
+
+  Json::Value ret;
+  bool result = rpc_call(
+    "setMotionObservedEnable",
+    controller_.empty() ? client_id() : controller_,
+    params,
+    ret,
+    timeout_ms,
+    "setMotionObservedEnable");
+
+  // RobotServer's custom ROS 2 service can discover the request writer before it
+  // discovers a newly-created response reader. This operation is idempotent, so a
+  // single retry safely covers the first-response discovery race.
+  if (!result) {
+    std::this_thread::sleep_for(std::chrono::milliseconds(100));
+    result = rpc_call(
+      "setMotionObservedEnable",
+      controller_.empty() ? client_id() : controller_,
+      params,
+      ret,
+      timeout_ms,
+      "setMotionObservedEnable retry");
+  }
+
+  if (result) {
+    if (motion_enable) {
+      create_motion_observed_subscription();
+    }
+    if (sensor_enable) {
+      create_sensor_observed_subscription();
+    }
+  }
+  return result;
+}
+
+bool MotionHighLevelClient::startAudioPlay(
+  const std::string & params_json,
+  int32_t timeout_ms)
+{
+  if (!ensure_controlled()) {
+    return false;
+  }
+
+  Json::Value params;
+  if (!parse_params_json(params_json, params, "startPlayList")) {
+    return false;
+  }
+
+  Json::Value ret;
+  return rpc_call("startPlayList", controller_, params, ret, timeout_ms, "startPlayList");
+}
+
+bool MotionHighLevelClient::stopAudioPlay(int32_t timeout_ms)
+{
+  if (!ensure_controlled()) {
+    return false;
+  }
+
+  Json::Value ret;
+  return rpc_call("stopPlayList", controller_, null_params(), ret, timeout_ms, "stopPlayList");
+}
+
+bool MotionHighLevelClient::pauseAudioPlay(int32_t timeout_ms)
+{
+  if (!ensure_controlled()) {
+    return false;
+  }
+
+  Json::Value ret;
+  return rpc_call("stopPlayList", controller_, bool_param("pause", true), ret, timeout_ms, "pauseAudioPlay");
+}
+
+bool MotionHighLevelClient::queryAudioPlayDetail(std::string & out, int32_t timeout_ms)
+{
+  if (!ensure_connected()) {
+    return false;
+  }
+
+  Json::Value ret;
+  if (!rpc_call(
+      "getAudioPlayDetail",
+      controller_.empty() ? client_id() : controller_,
+      null_params(),
+      ret,
+      timeout_ms,
+      "getAudioPlayDetail"))
+  {
+    return false;
+  }
+
+  return response_to_output(ret, out);
+}
+
+bool MotionHighLevelClient::queryAudioPlayList(
+  std::string & out,
+  const std::string & params_json,
+  int32_t timeout_ms)
+{
+  if (!ensure_connected()) {
+    return false;
+  }
+
+  Json::Value params;
+  if (!parse_params_json(params_json, params, "getAudioPlayList")) {
+    return false;
+  }
+
+  Json::Value ret;
+  if (!rpc_call(
+      "getAudioPlayList",
+      controller_.empty() ? client_id() : controller_,
+      params,
+      ret,
+      timeout_ms,
+      "getAudioPlayList"))
+  {
+    return false;
+  }
+
+  return response_to_output(ret, out);
+}
+
+bool MotionHighLevelClient::addAudioFile(const std::string & params_json, int32_t timeout_ms)
+{
+  if (!ensure_controlled()) return false;
+  Json::Value params, ret;
+  if (!parse_params_json(params_json, params, "addAudioFile")) return false;
+  return rpc_call("addAudioFile", controller_, params, ret, timeout_ms, "addAudioFile");
+}
+
+bool MotionHighLevelClient::getCameraLightBrightness(std::string & out, int32_t timeout_ms)
+{
+  if (!ensure_controlled()) return false;
+  Json::Value ret;
+  if (!rpc_call("getCameraLightBrightness", controller_, null_params(), ret,
+    timeout_ms, "getCameraLightBrightness")) return false;
+  return response_to_output(ret, out);
+}
+
+bool MotionHighLevelClient::deleteAudioFile(
+  const std::string & params_json,
+  int32_t timeout_ms)
+{
+  if (!ensure_controlled()) {
+    return false;
+  }
+
+  Json::Value params;
+  if (!parse_params_json(params_json, params, "deleteAudioFile")) {
+    return false;
+  }
+
+  Json::Value ret;
+  return rpc_call("deleteAudioFile", controller_, params, ret, timeout_ms, "deleteAudioFile");
+}
+
+bool MotionHighLevelClient::setCameraLightBrightness(int32_t brightness, int32_t timeout_ms)
+{
+  if (!ensure_controlled()) {
+    return false;
+  }
+
+  if (brightness < 0 || brightness > 100) {
+    set_error(kActionRejected);
+    return false;
+  }
+
+  Json::Value params(Json::objectValue);
+  params["brightness"] = brightness;
+  Json::Value ret;
+  return rpc_call("setCameraLightBrightness", controller_, params, ret, timeout_ms, "setCameraLightBrightness");
+}
+
+bool MotionHighLevelClient::ensure_connected()
+{
+  if (state_ == kDisconnected) {
+    set_error(kNotConnected);
+    return false;
+  }
+  return true;
+}
+
+bool MotionHighLevelClient::ensure_controlled()
+{
+  if (state_ != kControlled) {
+    set_error(kNotControlled);
+    return false;
+  }
+  return true;
+}
+
+bool MotionHighLevelClient::parse_params_json(
+  const std::string & params_json,
+  Json::Value & params,
+  const std::string & context)
+{
+  if (params_json.empty()) {
+    params = Json::Value(Json::nullValue);
+    return true;
+  }
+
+  std::string error;
+  if (!parse_json_no_throw(params_json, params, error)) {
+    std::cerr << context << " params JSON parse failed: " << error << std::endl;
+    set_error(kActionRejected);
+    return false;
+  }
+
+  if (params.isNull()) {
+    return true;
+  }
+
+  if (!params.isObject() && !params.isArray()) {
+    std::cerr << context << " params JSON must be an object or array" << std::endl;
+    set_error(kActionRejected);
+    return false;
+  }
+
+  return true;
+}
+
+bool MotionHighLevelClient::rpc_call(
+  const std::string & method,
+  const std::string & rpc_client_id,
+  const Json::Value & params,
+  Json::Value & out,
+  int32_t timeout_ms,
+  const std::string & context)
+{
+  try {
+    const auto response = call(
+      make_call(kRobotAppService, method, params, rpc_client_id),
+      executor_,
+      timeout_from_ms(timeout_ms));
+
+    if (!response) {
+      set_error(kRpcCallFailed);
+      return false;
+    }
+
+    if (response->code != 0) {
+      std::cerr << context << " response code=" << response->code << std::endl;
+      set_error(kRpcCallFailed);
+      return false;
+    }
+
+    Json::Value payload;
+    std::string error;
+    if (!parse_json_no_throw(response->payload, payload, error) || !payload.isObject()) {
+      std::cerr << context << " response payload parse failed: " << error << std::endl;
+      set_error(kRpcCallFailed);
+      return false;
+    }
+
+    out = payload.isMember("params") ? payload["params"] : Json::Value(Json::nullValue);
+    if (payload.isMember("result") && payload["result"].asBool()) {
+      set_error(kNone);
+      return true;
+    }
+
+    set_error(kActionRejected);
+    return false;
+  } catch (const std::exception & e) {
+    std::cerr << context << " RPC failed: " << e.what() << std::endl;
+    set_error(kRpcCallFailed);
+    return false;
+  }
+}
+
+bool MotionHighLevelClient::rpc_send_action(
+  const std::string & method,
+  const std::string & rpc_client_id,
+  const Json::Value & params,
+  int32_t timeout_ms,
+  const std::string & context)
+{
+  Json::Value unused;
+  return rpc_call(method, rpc_client_id, params, unused, timeout_ms, context);
+}
+
+bool MotionHighLevelClient::response_to_output(const Json::Value & payload, std::string & out)
+{
+  out = payload.isNull() ? "{}" : write_json(payload);
+  return true;
+}
+
+void MotionHighLevelClient::set_error(HighLevelError error)
+{
+  last_error_ = error;
+}
+
+std::chrono::milliseconds MotionHighLevelClient::timeout_from_ms(int32_t timeout_ms) const
+{
+  return std::chrono::milliseconds(timeout_ms > 0 ? timeout_ms : 5000);
+}
+
+std::chrono::milliseconds MotionHighLevelClient::renew_interval() const
+{
+  const auto lease = std::chrono::milliseconds(lease_ms_ > 0 ? lease_ms_ : kDefaultLeaseMs);
+  return std::clamp(lease / 3, std::chrono::milliseconds(200), std::chrono::milliseconds(10000));
+}
+
+void MotionHighLevelClient::mark_control_activity()
+{
+  std::lock_guard<std::mutex> lock(control_activity_mutex_);
+  last_control_activity_at_ = std::chrono::steady_clock::now();
+}
+
+std::chrono::steady_clock::time_point MotionHighLevelClient::last_control_activity() const
+{
+  std::lock_guard<std::mutex> lock(control_activity_mutex_);
+  return last_control_activity_at_;
+}
+
+void MotionHighLevelClient::start_renew_timer()
+{
+  stop_renew_timer();
+  renew_timer_ = node_->create_wall_timer(
+    std::chrono::milliseconds(kRenewTimerPeriodMs),
+    [this]() {
+      tick_renew();
+    });
+}
+
+void MotionHighLevelClient::stop_renew_timer()
+{
+  if (renew_timer_) {
+    renew_timer_->cancel();
+    renew_timer_.reset();
+  }
+
+  if (pending_renew_request_id_.has_value()) {
+    (void)remove_pending_request(*pending_renew_request_id_);
+    pending_renew_request_id_.reset();
+  }
+  pending_renew_deadline_.reset();
+}
+
+void MotionHighLevelClient::tick_renew()
+{
+  if (state_ != kControlled || controller_.empty()) {
+    stop_renew_timer();
+    return;
+  }
+
+  const auto now = std::chrono::steady_clock::now();
+  const auto activity_at = last_control_activity();
+  const auto lease_deadline = activity_at +
+    std::chrono::milliseconds(lease_ms_ > 0 ? lease_ms_ : kDefaultLeaseMs);
+  if (pending_renew_request_id_.has_value()) {
+    if (pending_renew_deadline_.has_value() && now >= *pending_renew_deadline_) {
+      (void)remove_pending_request(*pending_renew_request_id_);
+      pending_renew_request_id_.reset();
+      pending_renew_deadline_.reset();
+      if (now >= lease_deadline) {
+        lose_control(kSessionExpired);
+      } else {
+        std::cerr << "renewMotionControl timed out; retrying before lease expiry" << std::endl;
+      }
+    }
+    return;
+  }
+
+  if (now >= lease_deadline) {
+    lose_control(kSessionExpired);
+    return;
+  }
+
+  if (now < activity_at + renew_interval()) {
+    return;
+  }
+
+  const auto sequence = ++renew_sequence_;
+  const auto controller = controller_;
+  try {
+    auto future = async_call(
+      make_call(kRobotAppService, "renewMotionControl", null_params(), controller),
+      [this, sequence, controller](SharedFuture future) {
+        handle_renew_response(sequence, controller, future);
+      });
+    pending_renew_request_id_ = future.request_id;
+    pending_renew_deadline_ = now + std::chrono::milliseconds(kRenewTimeoutMs);
+  } catch (const std::exception & e) {
+    std::cerr << "renewMotionControl async RPC failed: " << e.what() << std::endl;
+    if (std::chrono::steady_clock::now() >= lease_deadline) {
+      lose_control(kSessionExpired);
+    }
+  }
+}
+
+void MotionHighLevelClient::handle_renew_response(
+  std::uint64_t sequence,
+  const std::string & controller,
+  SharedFuture future)
+{
+  if (!pending_renew_request_id_.has_value() || sequence != renew_sequence_) {
+    return;
+  }
+  pending_renew_request_id_.reset();
+  pending_renew_deadline_.reset();
+
+  if (state_ != kControlled || controller != controller_) {
+    return;
+  }
+
+  try {
+    const auto response = future.get();
+    if (!response || response->code != 0) {
+      lose_control(kSessionExpired);
+      return;
+    }
+
+    Json::Value payload;
+    std::string error;
+    if (!parse_json_no_throw(response->payload, payload, error) || !payload.isObject() ||
+      !payload.isMember("result") || !payload["result"].asBool())
+    {
+      lose_control(kSessionExpired);
+      return;
+    }
+
+    if (payload.isMember("params") && payload["params"].isObject() &&
+      payload["params"].isMember("leaseTimeout") && payload["params"]["leaseTimeout"].isNumeric())
+    {
+      lease_ms_ = payload["params"]["leaseTimeout"].asInt();
+    }
+    mark_control_activity();
+    set_error(kNone);
+  } catch (const std::exception & e) {
+    std::cerr << "renewMotionControl response failed: " << e.what() << std::endl;
+    lose_control(kSessionExpired);
+  }
+}
+
+void MotionHighLevelClient::lose_control(HighLevelError error)
+{
+  stop_renew_timer();
+  controller_.clear();
+  state_ = kConnected;
+  set_error(error);
+  if (connect_callback_) {
+    connect_callback_(kConnected, error);
+  }
+}
+
+void MotionHighLevelClient::create_event_subscription()
+{
+  if (event_subscription_ || event_topic_.empty()) {
+    return;
+  }
+
+  event_subscription_ = node_->create_subscription<EventMessage>(
+    event_topic_,
+    rclcpp::QoS(10),
+    [this](const EventMessage::SharedPtr message) {
+      handle_event(*message);
+    });
+}
+
+void MotionHighLevelClient::destroy_event_subscription()
+{
+  event_subscription_.reset();
+}
+
+void MotionHighLevelClient::create_sensor_observed_subscription()
+{
+  if (sensor_observed_source_ == "cere_motion_state") {
+    if (!cere_sensor_reader_ && sensor_observed_callback_) {
+      cere_sensor_reader_ = std::make_unique<CereSensorReader>(node_, cere_motion_topic_, sensor_observed_callback_);
+    }
+    return;
+  }
+  if (sensor_observed_subscription_ || sensor_observed_topic_.empty() ||
+    !sensor_observed_callback_)
+  {
+    return;
+  }
+
+  auto qos = rclcpp::QoS(rclcpp::KeepLast(1));
+  qos.best_effort();
+  qos.durability_volatile();
+  sensor_observed_subscription_ = node_->create_subscription<SensorObserved>(
+    sensor_observed_topic_, qos,
+    [this](const SensorObserved::SharedPtr message) {
+      if (sensor_observed_callback_) {
+        sensor_observed_callback_(*message);
+      }
+    });
+}
+
+void MotionHighLevelClient::destroy_sensor_observed_subscription()
+{
+  cere_sensor_reader_.reset();
+  sensor_observed_subscription_.reset();
+}
+
+void MotionHighLevelClient::create_motion_observed_subscription()
+{
+  if (motion_observed_subscription_ || motion_observed_topic_.empty() ||
+    !motion_observed_callback_)
+  {
+    return;
+  }
+
+  auto qos = rclcpp::QoS(rclcpp::KeepLast(1));
+  qos.best_effort();
+  qos.durability_volatile();
+  motion_observed_subscription_ = node_->create_subscription<MotionObserved>(
+    motion_observed_topic_, qos,
+    [this](const MotionObserved::SharedPtr message) {
+      if (motion_observed_callback_) {
+        motion_observed_callback_(*message);
+      }
+    });
+}
+
+void MotionHighLevelClient::destroy_motion_observed_subscription()
+{
+  motion_observed_subscription_.reset();
+}
+
+void MotionHighLevelClient::handle_event(const EventMessage & event)
+{
+  if (event.magic != kEventMagic) {
+    return;
+  }
+
+  Json::Value payload;
+  std::string error;
+  if (!parse_json_no_throw(event.payload, payload, error) || !payload.isObject()) {
+    if (event_callback_) {
+      event_callback_(event.topic, event.payload);
+    }
+    return;
+  }
+
+  if (event.topic == kControlStatusTopic) {
+    if (state_ != kControlled) {
+      return;
+    }
+
+    const auto controlled = read_controlled(payload);
+    const auto current_controller =
+      payload.isMember("controller") && payload["controller"].isString() ?
+      payload["controller"].asString() : std::string();
+    if (controlled && current_controller == controller_) {
+      return;
+    }
+
+    lose_control(kSessionRevoked);
+    return;
+  }
+
+  if (!event_callback_) {
+    return;
+  }
+
+  if (event.topic == kHostEventTopic &&
+    payload.isMember("event") && payload["event"].isString() &&
+    payload.isMember("detail"))
+  {
+    event_callback_(payload["event"].asString(), write_json(payload["detail"]));
+    return;
+  }
+
+  event_callback_(event.topic, event.payload);
+}
+
+}  // namespace uniubi_motion_client

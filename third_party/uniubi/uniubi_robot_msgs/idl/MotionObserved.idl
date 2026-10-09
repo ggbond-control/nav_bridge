@@ -1,0 +1,106 @@
+
+#ifndef __UNIUBI_DDS_MOTION_OBSERVED_IDL_H_
+#define __UNIUBI_DDS_MOTION_OBSERVED_IDL_H_
+
+#include "MotorState.idl"
+
+module uniubi {
+    module dds_ {
+
+        // IMU 各分量 error 取值（Vector3f / Quaternionf.error）
+        enum IMUDeviceErrno {
+            @value(0)  imuNormal,           // 数据有效
+            @value(1)  imuInvalid,          // IMU 数据无效
+            @value(64) imuControlOffline,   // IMU 控制板离线
+            @value(65) imuControlNotReady,  // 控制板未就绪
+            @value(66) imuControlUpgrade,   // 控制板升级中
+            @value(67) imuControlNotParams, // IMU 模组参数未就绪
+            @value(68) imuNotReady          // IMU 加热 / 未就绪
+        };
+
+        // 电机 error 取值（MotorObserved.error）
+        enum MotorDeviceErrno {
+            @value(0)  motorNormal,           // 正常
+            @value(1)  motorPreDriver,        // 预驱故障
+            @value(2)  motorEcodeError,       // 编码器故障
+            @value(3)  motorOverSpeed,        // 过速
+            @value(4)  motorOverTempe,        // 过温
+            @value(5)  motorOverCurrent,      // 过流
+            @value(6)  motorOverVoltage,      // 过压
+            @value(59) motorPGAbnormality,    // PG 异常
+            @value(60) motorHWUndervoltage,   // 硬件欠压
+            @value(63) motorCommError,        // 通信错误
+            @value(64) motorControlOffline,   // 控制板离线
+            @value(65) controlMotorNotEnable, // 未使能
+            @value(66) motorControlNotReady,  // 控制未就绪
+            @value(67) motorControlUpgrade,   // 升级中
+            @value(68) motorNoCalibrated,     // 未标定
+            @value(69) motorURDFNotMapped     // 标定丢失
+        };
+
+        struct Quaternionf {
+            int8        error;    /**< 错误码,见 IMUDeviceErrno */
+            float       w;        /**< W分量 */
+            float       x;        /**< X分量 */
+            float       y;        /**< Y分量 */
+            float       z;        /**< Z分量 */
+        } ;
+
+        struct Vector3f {
+            int8        error;    /**< 错误码,见 IMUDeviceErrno */
+            float       x;        /**< X轴分量 */
+            float       y;        /**< Y轴分量 */
+            float       z;        /**< Z轴分量 */
+        } ;
+
+        struct IMUState {
+            float           temp;           /**< imu 温度*/
+            Vector3f        accel;          /**< 加速度分量(m/s^2): x: rollAccelSpeed,y:pitchAccelSpeed,z:yawAccelSpeed*/
+            Vector3f        gyro;           /**< 角速度分量（rad/s）：x:rollSpeed,y:pitchSpeed,z:yawSpeed */
+            Vector3f        mag;            /**< 磁力计*/
+            Vector3f        euler;          /**< 欧拉角分量(rad):x:roll[-π, π],y:pitch[-π/2, π/2],z:yaw[-π, π]*/
+            Quaternionf     quaternion;     /**< 四元数*/
+        };
+
+        struct MotorObserved {
+            uint8       enable;       /**< 电机使能*/
+            uint8       online;       /**< 电机在线情况*/
+            uint8       error;        /**< 错误码,见 MotorDeviceErrno */
+            float       position;     /**< 目标位置（弧度） */
+            float       velocity;     /**< 目标角速度（弧度/秒） */
+            float       torque;       /**< 前馈力矩（牛·米） */
+            float       temp;         /**< 温度（摄氏度） */
+            float       voltage;      /**< 电压（伏特） */
+            float       lossRate;     /**< 丢包率(%) */
+            float       maxTorque;    /**< 当前电机最大扭矩 */
+            MotorHeader header;       /**< 电机信息*/
+        };
+
+        struct PowerObserved {
+            float       power;          /**< 当前电池电量,% */
+            float       health;         /**< 健康度,% */
+            float       temper;         /**< 电池温度,℃ */
+            float       chargeCurrent;  /**< 实时电流,A */
+            float       chargeVoltage;  /**< 当前总电压,V */
+        };
+    };
+
+    module msg {
+        module dds_{
+
+            typedef uniubi::dds_::IMUState IMUState;
+            typedef uniubi::dds_::MotorObserved MotorObserved;
+            typedef uniubi::dds_::PowerObserved PowerObserved;
+
+            struct MotionObserved_ {
+                IMUState        imu;                    ///IMU信息
+                int32           motorNum;               ///有效电机数量
+                uint64          timestamp;              ///递增相对时间戳(单位 us,设备内部服务使用,非墙钟)
+                MotorObserved   motor[MAX_MOTOR_NUM];   ///电机观测状态
+                PowerObserved   power;
+            };
+        };
+    };
+};
+
+#endif //__UNIUBI_DDS_MOTION_OBSERVED_IDL_H_

@@ -1,0 +1,64 @@
+#ifndef __UNIUBI_DDS_BRAIN_MOTION_STATE_IDL_H_
+#define __UNIUBI_DDS_BRAIN_MOTION_STATE_IDL_H_
+
+#include "RemoteControl.idl"
+#include "MotionObserved.idl"
+#include "SensorObserved.idl"
+
+module uniubi {
+    module dds_ {
+
+
+        const uint32 MAX_ACITON_LENGTH = 32;    /**< 最大ACTION字段长度*/
+
+        struct TRCState {
+            uint8       running;
+            int32       cmd;
+            octet       action[MAX_ACITON_LENGTH];
+            float       velocity;
+            float       velocityX;
+            float       velocityY;
+        };
+
+        struct TRCStickControl {
+            uint8           back;
+            uint8           start;
+            uint8           lb;
+            uint8           rb;
+            uint8           f1;
+            uint8           f2;
+            uint8           a;
+            uint8           b;
+            uint8           x;
+            uint8           y;
+            uint8           up;
+            uint8           down;
+            uint8           left;
+            uint8           right;
+            uint8           ls;
+            uint8           rs;
+            float           stickLX;
+            float           stickLY;
+            float           stickRX;
+            float           stickRY;
+            float           triggerL;
+            float           triggerR;
+        };
+
+        struct BrainMotionState {
+            IMUState        imu;
+            TRCState        trc;
+            int32           motorNum;               ///有效电机数量
+            uint64          timestamp;              ///相对时间戳-内部服务使用
+            MotorObserved   motor[uniubi::msg::dds_::MAX_MOTOR_NUM];   ///电机观测状态
+            GPSFrame        gps;           ///GPS 观测
+            UWBRawObserved  uwb;           ///UWB 观测
+            MotionOdometry  odom;          ///里程计
+            TRCStickControl stick;         /// trc 控制帧
+            uint8           hasMotion;     ///本周期是否带 motion 观测
+            uint8           hasSensor;     ///本周期是否带 sensor 观测
+            uint8           hasTRCFrame;   ///本周期是否带 trc frame 观测
+        };
+    };
+};
+#endif

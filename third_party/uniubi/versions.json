@@ -1,0 +1,16 @@
+{
+  "sources": {
+    "uniubi_ros2": {
+      "url": "https://github.com/uniubi-ai/uniubi_ros2",
+      "commit": "e497ca0b06ffd20d1f0d088b935fe0bce3459050"
+    },
+    "uniubi_robot_msgs": {
+      "url": "https://github.com/uniubi-ai/uniubi_robot_msgs",
+      "commit": "0716257e262c4b3f5d8424c6ddf284309fcac7fc"
+    }
+  },
+  "mock_reference": {
+    "url": "https://github.com/uniubi-ai/uniubi_robot_mock",
+    "commit": "651e3e8e5dc3ff4775507e434baf66063809c51d"
+  }
+}

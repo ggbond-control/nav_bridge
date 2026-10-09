@@ -1,0 +1,22 @@
+
+#ifndef __UNIUBI_DDS_MOTOR_STATE_IDL_H_
+#define __UNIUBI_DDS_MOTOR_STATE_IDL_H_
+
+module uniubi {
+    module dds_ {
+
+        struct MotorHeader {
+            uint32      limbsNo;      /**< 腿编号*/
+            uint32      jointNo;      /**< 在一条腿中关节编号*/
+        };
+    };
+
+    module msg {
+        module dds_{
+
+            const uint32 MAX_MOTOR_NUM = 16;    /**< 最大电机数量*/
+        };
+    };
+};
+
+#endif //__UNIUBI_DDS_MOTOR_STATE_IDL_H_

@@ -1,0 +1,326 @@
+#ifndef UNIUBI_MOTION_CLIENT__MOTION_HIGH_LEVEL_CLIENT_HPP_
+#define UNIUBI_MOTION_CLIENT__MOTION_HIGH_LEVEL_CLIENT_HPP_
+
+#include <chrono>
+#include <cstdint>
+#include <functional>
+#include <mutex>
+#include <optional>
+#include <string>
+
+#include "json/json.h"
+#include "rclcpp/rclcpp.hpp"
+#include "uniubi/msg/event_message.hpp"
+#include "uniubi/msg/motion_observed.hpp"
+#include "uniubi/msg/sensor_observed.hpp"
+#include "uniubi_motion_client/cere_sensor_reader.hpp"
+#include "uniubi_motion_client/system_rpc_client_base.hpp"
+
+namespace uniubi_motion_client
+{
+
+/**
+ * @brief 基于 uniubi::srv::System 的高级运动控制客户端。
+ *
+ * 该类封装 robotServer 的 robotAppService RPC 接口，接口风格参考 MotionHighLevelClient SDK。
+ * 使用流程：
+ * 1. connect()：初始化客户端状态并订阅事件，不获取控制权。
+ * 2. query*()：可在已连接状态下查询能力、系统状态、音频状态等只读信息。
+ * 3. startControl()：申请高级运动控制权，成功后进入 kControlled。
+ * 4. 动作/音频/灯光等控制类接口必须在 kControlled 状态下调用。
+ * 5. releaseControl()/disconnect()：释放控制权并清理订阅/续约状态。
+ *
+ * 注意：MotionHighLevelClient 内部使用 ROS timer、service response callback 和 subscription callback，
+ * 调用方必须持续 spin 传入的 executor，否则事件处理和控制权租约续约不会执行。
+ */
+class MotionHighLevelClient : public SystemRpcClientBase
+{
+public:
+  /// 高级控制客户端状态。
+  enum HighLevelState
+  {
+    kDisconnected = 0,  ///< 未连接，不能调用需要连接态的接口。
+    kConnected,         ///< 已连接但未持有控制权，可调用只读查询接口。
+    kControlled,        ///< 已持有高级运动控制权，可下发动作/音频/灯光等控制接口。
+  };
+
+  /// 最近一次失败原因，数值保持与 SDK 高级客户端语义一致。
+  enum HighLevelError
+  {
+    kNone = 0,             ///< 无错误。
+    kRpcConnectFailed,     ///< RPC 服务不可用或连接初始化失败。
+    kRpcAcquireRejected,   ///< startControl() 获取控制权失败或被服务端拒绝。
+    kRpcCallFailed,        ///< RPC 调用失败、超时或响应解析失败。
+    kSessionExpired,       ///< 控制权租约续约失败或超时。
+    kSessionRevoked,       ///< 控制权被其他客户端接管或服务端事件显示已失权。
+    kNotConnected,         ///< 未 connect() 时调用了需要连接态的接口。
+    kNotControlled,        ///< 未持有控制权时调用了控制类接口。
+    kActionRejected,       ///< 服务端返回 result=false 或参数不合法。
+  };
+
+  /// 控制权状态变化回调。成功取权、释放、续约失效、被抢权时触发。
+  using ConnectCallback = std::function<void(HighLevelState state, HighLevelError error)>;
+
+  /// 业务事件回调。robotServer.host.event 会被解包后传入内层业务 topic 和 detail JSON。
+  using EventCallback = std::function<void(const std::string & topic, const std::string & payload_json)>;
+
+  /// GPS、UWB 与 Walk 里程计统一传感器观测回调。仅订阅数据，不申请控制权。
+  using SensorObservedCallback = std::function<void(const uniubi::msg::SensorObserved & observed)>;
+
+  /// 电机与 IMU 运控观测回调。仅订阅数据，不申请控制权。
+  using MotionObservedCallback = std::function<void(const uniubi::msg::MotionObserved & observed)>;
+
+  /**
+   * @brief 创建高级运动控制客户端。
+   * @param node ROS 2 节点。
+   * @param executor 用于同步 RPC、timer、service response 和 event subscription 的 executor。
+   * @param ros_service_name ROS 2 System 服务名称，当前默认为 robotServer。
+   * @param device_id 目标设备 ID，多设备场景必须传入。
+   * @param event_topic robotServer 事件 topic。
+   */
+  MotionHighLevelClient(
+    const rclcpp::Node::SharedPtr & node,
+    rclcpp::Executor & executor,
+    const std::string & ros_service_name,
+    const std::string & device_id = "",
+    const std::string & event_topic = "/robotServer/Event",
+    const std::string & sensor_observed_topic = "/sensor/observed",
+    const std::string & motion_observed_topic = "/motion/observed",
+    const std::string & sensor_observed_source = "sensor_observed",
+    const std::string & cere_motion_topic = "rt/cere/motionState");
+
+  ~MotionHighLevelClient() override;
+
+  /**
+   * @brief 进入高级客户端连接态。
+   *
+   * 该函数只等待 ROS service 可用并创建事件订阅，不申请控制权。
+   * lease_ms 是后续 startControl() 申请控制权时传给服务端的期望租约时长；
+   * <=0 时使用默认 60000ms。
+   */
+  bool connect(int32_t lease_ms = 0);
+
+  /// 断开客户端；如果当前持有控制权，会先尝试 releaseControl()。
+  void disconnect();
+
+  /**
+   * @brief 申请高级运动控制权。
+   *
+   * 先将电机运控 master 切回内置小脑并等待切换稳定，再申请 High-level RPC 会话。
+   * 成功后保存服务端返回的 controller，状态切为 kControlled，
+   * 并启动租约维护定时器；成功控制调用会刷新租约，控制空闲时才发送 renewMotionControl。
+   */
+  bool startControl(int32_t timeout_ms = 10000);
+
+  /// 释放高级运动控制权，成功后状态切回 kConnected，并停止续约。
+  bool releaseControl();
+
+  /// 获取当前 HighLevelState。
+  int32_t getState() const;
+
+  /// 获取最近一次失败原因；读取后会清零为 kNone。
+  int32_t getLastError() const;
+
+  /// 注册控制权状态变化回调。应在 connect() 前设置。
+  void setConnectCallback(ConnectCallback cb);
+
+  /// 注册业务事件回调。应在 connect() 前设置。
+  void setEventCallback(EventCallback cb);
+
+  /// 注册完整传感器观测回调。必须在 connect() 前设置，不需要控制权。
+  void setSensorObservedCallback(SensorObservedCallback cb);
+
+  /// 注册电机与 IMU 运控观测回调。必须在 connect() 前设置，不需要控制权。
+  void setMotionObservedCallback(MotionObservedCallback cb);
+
+  /// 查询运动能力列表。已 connect 即可调用，不要求持有控制权。
+  bool queryCapabilities(std::string & out, int32_t timeout_ms = 5000);
+
+  /// 查询系统状态。已 connect 即可调用。
+  bool querySystemStatus(std::string & out, int32_t timeout_ms = 5000);
+
+  /// 查询当前运动状态。已 connect 即可调用。
+  bool queryMotionState(std::string & out, int32_t timeout_ms = 5000);
+
+  /// 查询电机硬件布局。已 connect 即可调用，返回 motorNum/motors JSON。
+  bool queryMotorLayout(std::string & out, int32_t timeout_ms = 5000);
+
+  /**
+   * @brief 启动高级动作。
+   * @param action 动作名称，例如 walking。
+   * @param params_json 动作参数 JSON，字段以 queryCapabilities() 返回为准。
+   *
+   * 必须先 startControl()。不带速度参数时通常只切入动作姿态。
+   */
+  bool startAction(
+    const std::string & action,
+    const std::string & params_json = "",
+    int32_t timeout_ms = 5000);
+
+  /// 停止当前高级动作。必须持有控制权。
+  bool stopAction(int32_t timeout_ms = 5000);
+
+  /// 修改当前动作参数。必须持有控制权。
+  bool setActionParams(
+    const std::string & params_json = "",
+    int32_t timeout_ms = 5000);
+
+  /// 急停。必须持有控制权。
+  bool emergencyStop(int32_t timeout_ms = 5000);
+
+  /// 开关运控/传感器观测量推送。已 connect 即可调用，不强制要求持有控制权。
+  bool setMotionObservedEnable(bool motion_enable, bool sensor_enable = false, int32_t timeout_ms = 5000);
+
+  /**
+   * @brief 启动、恢复或调整音频播放列表。
+   *
+   * params_json 示例：{"list":[{"id":"1"}],"volume":50,"repeat":1}
+   * 必须持有控制权。
+   */
+  bool startAudioPlay(
+    const std::string & params_json,
+    int32_t timeout_ms = 5000);
+
+  /// 停止音频播放。必须持有控制权。
+  bool stopAudioPlay(int32_t timeout_ms = 5000);
+
+  /// 暂停音频播放。必须持有控制权。
+  bool pauseAudioPlay(int32_t timeout_ms = 5000);
+
+  /// 查询当前音频播放详情。已 connect 即可调用。
+  bool queryAudioPlayDetail(std::string & out, int32_t timeout_ms = 5000);
+
+  /// 查询音频文件列表。params_json 可传 {"type":"customVoice"}。
+  bool queryAudioPlayList(
+    std::string & out,
+    const std::string & params_json = "",
+    int32_t timeout_ms = 5000);
+
+  /// 添加音频文件，参数与设备 addAudioFile RPC 一致；必须持有控制权。
+  bool addAudioFile(const std::string & params_json, int32_t timeout_ms = 30000);
+
+  /// 查询灯光亮度；与 SDK 一致，必须持有控制权。
+  bool getCameraLightBrightness(std::string & out, int32_t timeout_ms = 5000);
+
+  /// 删除音频文件。params_json 示例：{"id":"1"}。必须持有控制权。
+  bool deleteAudioFile(
+    const std::string & params_json,
+    int32_t timeout_ms = 5000);
+
+  /// 设置摄像头前灯亮度，取值 0-100。必须持有控制权。
+  bool setCameraLightBrightness(int32_t brightness, int32_t timeout_ms = 5000);
+
+private:
+  using EventMessage = uniubi::msg::EventMessage;
+  using MotionObserved = uniubi::msg::MotionObserved;
+  using SensorObserved = uniubi::msg::SensorObserved;
+  using MotionOdometry = uniubi::msg::MotionOdometry;
+
+  bool ensure_connected();
+
+  bool ensure_controlled();
+
+  /// 解析用户传入的 JSON 参数；空字符串会被视为 JSON null。
+  bool parse_params_json(
+    const std::string & params_json,
+    Json::Value & params,
+    const std::string & context);
+
+  /// 同步调用 robotAppService RPC，并返回响应 payload.params。
+  bool rpc_call(
+    const std::string & method,
+    const std::string & client_id,
+    const Json::Value & params,
+    Json::Value & out,
+    int32_t timeout_ms,
+    const std::string & context);
+
+  /// 当前实现复用同步 RPC 调用，保留该函数用于表达无需业务返回值的 action 语义。
+  bool rpc_send_action(
+    const std::string & method,
+    const std::string & client_id,
+    const Json::Value & params,
+    int32_t timeout_ms,
+    const std::string & context);
+
+  /// 将 payload.params 转成输出 JSON 字符串；null 输出为 {}。
+  bool response_to_output(const Json::Value & payload, std::string & out);
+
+  void set_error(HighLevelError error);
+
+  std::chrono::milliseconds timeout_from_ms(int32_t timeout_ms) const;
+
+  /// 按协议计算续约周期：clamp(leaseTimeout / 3, 200ms, 10s)。
+  std::chrono::milliseconds renew_interval() const;
+
+  /// 记录最近一次被 MotionServer 接受、能够刷新控制权租约的控制 RPC。
+  void mark_control_activity();
+
+  /// 获取最近一次成功控制活动时间，用于计算服务端租约期限。
+  std::chrono::steady_clock::time_point last_control_activity() const;
+
+  /// 启动控制权续约 timer。
+  void start_renew_timer();
+
+  /// 停止续约 timer，并清理在途续约请求。
+  void stop_renew_timer();
+
+  /// timer 回调：控制 RPC 空闲达到续约周期后异步发送 renewMotionControl。
+  void tick_renew();
+
+  /// 处理 renewMotionControl 异步响应。
+  void handle_renew_response(
+    std::uint64_t sequence,
+    const std::string & controller,
+    SharedFuture future);
+
+  /// 统一处理失权：停止续约、清空 controller、切回 kConnected 并触发回调。
+  void lose_control(HighLevelError error);
+
+  /// 创建 robotServer 事件订阅。
+  void create_event_subscription();
+
+  /// 销毁事件订阅。
+  void destroy_event_subscription();
+
+  void create_sensor_observed_subscription();
+
+  void destroy_sensor_observed_subscription();
+
+  void create_motion_observed_subscription();
+
+  void destroy_motion_observed_subscription();
+
+  /// 处理 EventMessage，包含 magic 校验、host.event 解包和 control.status 失权处理。
+  void handle_event(const EventMessage & event);
+
+  rclcpp::Node::SharedPtr node_;
+  rclcpp::Executor & executor_;
+  rclcpp::Subscription<EventMessage>::SharedPtr event_subscription_;
+  rclcpp::Subscription<SensorObserved>::SharedPtr sensor_observed_subscription_;
+  rclcpp::Subscription<MotionObserved>::SharedPtr motion_observed_subscription_;
+  rclcpp::TimerBase::SharedPtr renew_timer_;
+  std::optional<std::int64_t> pending_renew_request_id_;
+  std::optional<std::chrono::steady_clock::time_point> pending_renew_deadline_;
+  mutable std::mutex control_activity_mutex_;
+  std::chrono::steady_clock::time_point last_control_activity_at_;
+  std::uint64_t renew_sequence_;
+  std::string event_topic_;
+  std::string sensor_observed_topic_;
+  std::string sensor_observed_source_;
+  std::string cere_motion_topic_;
+  std::unique_ptr<CereSensorReader> cere_sensor_reader_;
+  std::string motion_observed_topic_;
+  std::string controller_;
+  int32_t lease_ms_;
+  HighLevelState state_;
+  mutable HighLevelError last_error_;
+  ConnectCallback connect_callback_;
+  EventCallback event_callback_;
+  SensorObservedCallback sensor_observed_callback_;
+  MotionObservedCallback motion_observed_callback_;
+};
+
+}  // namespace uniubi_motion_client
+
+#endif  // UNIUBI_MOTION_CLIENT__MOTION_HIGH_LEVEL_CLIENT_HPP_

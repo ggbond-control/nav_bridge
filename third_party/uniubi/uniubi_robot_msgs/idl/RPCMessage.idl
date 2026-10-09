@@ -1,0 +1,34 @@
+
+#ifndef __UNIUBI_DDS_RPC_MESSAGE_IDL__
+#define __UNIUBI_DDS_RPC_MESSAGE_IDL__
+
+#include "Request.idl"
+
+module uniubi {
+    module srv {
+        module dds_ {
+
+            typedef uniubi::dds_::Header Header;
+
+            struct System_Request_ {
+                Header          header;
+                uint64          timestamp;
+                string          service;
+                string          device_id;
+                string          method;
+                string          payload;
+            };
+
+            struct System_Response_ {
+                Header          header;
+                uint32          code;
+                uint64          timestamp;
+                string          device_id;
+                string          payload;
+            };
+        };
+    };
+};
+
+#endif
+
