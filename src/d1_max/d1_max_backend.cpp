@@ -281,6 +281,11 @@ BackendResult D1MaxBackend::move(double vx, double vy, double vyaw) {
     // Do not send SetSpeed() for L_WALK; this is only the local ROS-to-SDK
     // normalization contract.
     if (gait == 32) speed_level = static_cast<int>(robot_sdk::SpeedLevel::SPEED_LEVEL_MEDIUM);
+    // All Stair() mappings use a fixed 1 m/s local velocity contract,
+    // independent of the previous speed level; do not send SDK SetSpeed().
+    else if (gait == 6 || gait == 7 || gait == 8 || gait == 36) {
+        speed_level = static_cast<int>(robot_sdk::SpeedLevel::SPEED_LEVEL_SLOW);
+    }
 
     double max_forward = 1.0;
     if (speed_level == static_cast<int>(robot_sdk::SpeedLevel::SPEED_LEVEL_MEDIUM)) max_forward = 2.0;
