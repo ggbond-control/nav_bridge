@@ -37,6 +37,9 @@ class Robot:
     def __init__(self, node):
         self.node = node
         self.owner = ''
+        self.session_count = 0
+        self.action_started = False
+        self.silent_revoke_code = 0
         self.lease_activity = time.monotonic()
         self.lease_ms = 5000
         self.action = ''
@@ -90,7 +93,7 @@ class Robot:
         value = json.loads(req.payload)
         p = value.get('params') or {}
         method = req.method
-        result, params = True, {}
+        result, params, code = True, {}, 0
         if method == 'getMotionCapabilities':
             params = [{'name': a, 'params': [
                 {'name': n, 'min': -cap, 'max': cap}
@@ -112,7 +115,9 @@ class Robot:
         elif method == 'takeMotionControl':
             result = not self.reject_acquire
             if result:
-                self.owner = 'fixture-controller'
+                self.session_count += 1
+                self.owner = f'fixture-controller-{self.session_count}'
+                self.action_started = False
                 params = {'controller': self.owner, 'leaseTimeout': self.lease_ms}
         elif method == 'setMotionMasterRole':
             pass
@@ -132,6 +137,7 @@ class Robot:
         elif method == 'startMotionAction':
             result = bool(self.owner) and not self.reject_action
             if result:
+                self.action_started = True
                 self.action = p['action']
                 self.velocity = [0., 0., 0.]
                 if self.action == 'walking':
@@ -141,8 +147,13 @@ class Robot:
                 res.device_id = 'different-robot'
             action_params = p.get('params', {})
             self.action_params.append(dict(action_params))
-            result = (bool(self.owner) and not self.reject_velocity and
+            result = (bool(self.owner) and self.action_started and not self.reject_velocity and
                       action_params.get('controlProfile') != self.reject_profile)
+            if self.silent_revoke_code:
+                code, self.silent_revoke_code = self.silent_revoke_code, 0
+                self.owner = ''
+                self.velocity = [0., 0., 0.]
+                result = False
             if result:
                 if action_params.get('controlProfile', self.profile) != self.profile:
                     self.previous_profile = self.profile
@@ -164,7 +175,7 @@ class Robot:
                 'takeMotionControl', 'renewMotionControl', 'startMotionAction',
                 'setMotionActionParams', 'stopMotionAction', 'emergencyStopMotion'):
             self.lease_activity = time.monotonic()
-        res.payload = json.dumps({'result': result, 'params': params})
+        res.payload = json.dumps({'result': result, 'params': params, 'code': code})
         return res
 
     def observed(self):
@@ -300,6 +311,7 @@ def main():
         wait(lambda: messages['/imu/data'].orientation_covariance[0] == -1)
         robot.invalid_quaternion = False
         wait(lambda: messages['/imu/data'].orientation_covariance[0] != -1)
+        robot.action = 'laying'
         robot.wrong_identity = True
         assert not service('stand').success
         robot.wrong_identity = False
@@ -309,6 +321,20 @@ def main():
         assert service('stand').success
         assert robot.profile == 'slow'
         wait(lambda: state()['navigation_ready'] and state()['gait'] == 0)
+        # Stand is idempotent for an owned walk, including a nonzero command.
+        masters = sum(m == 'setMotionMasterRole' for m, _ in robot.calls)
+        starts = sum(m == 'startMotionAction' for m, _ in robot.calls)
+        velocity(.1, .02, .1)
+        wait(lambda: robot.velocity[0] != 0.)
+        assert service('stand').success
+        assert robot.velocity == [0., 0., 0.]
+        assert sum(m == 'setMotionMasterRole' for m, _ in robot.calls) == masters
+        assert sum(m == 'startMotionAction' for m, _ in robot.calls) == starts
+        # A new controller needs the vendor acquisition flow and its own action.
+        assert service('release_control').success
+        assert service('ready').success
+        assert sum(m == 'setMotionMasterRole' for m, _ in robot.calls) == masters+1
+        assert sum(m == 'startMotionAction' for m, _ in robot.calls) == starts+1
         assert not set_gait('MEDIUM').successful
         assert not set_gait(34).successful
         req = SetParameters.Request(parameters=[Parameter(name='speed',
@@ -463,9 +489,11 @@ def main():
         robot.delay_method, robot.delay_seconds = '', 0.
         wait(lambda: robot.velocity == [0., 0., 0.])
         assert service('release_control').success and not robot.owner
+        robot.action = 'laying'
         robot.reject_action = True
         assert not service('stand').success and not robot.owner
         robot.reject_action = False
+        robot.action = 'laying'
         # Stop must preempt a preparation waiting for the vendor master switch.
         client = node.create_client(Trigger, '/nav_bridge_node/stand')
         acquire_count = sum(m == 'setMotionMasterRole' for m, _ in robot.calls)
@@ -494,7 +522,29 @@ def main():
         velocity()
         time.sleep(.2)
         assert not robot.owner
+        masters = sum(m == 'setMotionMasterRole' for m, _ in robot.calls)
+        starts = sum(m == 'startMotionAction' for m, _ in robot.calls)
         assert service('stand').success
+        wait(lambda: state()['navigation_ready'] and not state()['last_error'])
+        assert sum(m == 'setMotionMasterRole' for m, _ in robot.calls) == masters+1
+        assert sum(m == 'startMotionAction' for m, _ in robot.calls) == starts+1
+        # Lost takeover events: permission errors must discard the old token,
+        # stop renewal and inhibit commands until explicit preparation succeeds.
+        for code in (16, 28, 29):
+            acquisitions = sum(m == 'takeMotionControl' for m, _ in robot.calls)
+            old_owner = robot.owner
+            robot.silent_revoke_code = code
+            velocity(.1, 0., 0.)
+            wait(lambda: not state()['control_owned'] and not state()['navigation_ready'])
+            velocity(.1, 0., 0.)
+            settle_until = time.monotonic()+.2
+            wait(lambda: time.monotonic() > settle_until)
+            assert not robot.owner and not state()['command_cached']
+            assert sum(m == 'takeMotionControl' for m, _ in robot.calls) == acquisitions
+            assert service('ready').success
+            wait(lambda: state()['navigation_ready'] and not state()['last_error'])
+            assert robot.owner != old_owner and robot.velocity == [0., 0., 0.]
+        # Transport reconnect remains read-only until explicit ready.
         robot.offline = True
         wait(lambda: not state()['connected'])
         wait(lambda: not state()['battery_valid'])
@@ -514,7 +564,7 @@ def main():
         process.send_signal(signal.SIGTERM)
         process.wait(timeout=15.)
         assert process.returncode == 0 and not robot.owner
-        print('PASS: read-only startup, two vendor profiles/no local clipping/default slow, profile rejection/mismatch/cache discard, invalid telemetry/quaternion/NaN, identity rejection, watchdog, motion stale, fresh-input timeout recovery, explicit rejection/wrong identity no retry, expired-input timeout stop, estop/recovery, rejection, concurrent stop, preemption, reconnect, odom continuity, compatibility, shutdown')
+        print('PASS: read-only startup, two vendor profiles/no local clipping/default slow, profile rejection/mismatch/cache discard, idempotent owned stand, new-session action, takeover event/permission-error recovery, invalid telemetry/quaternion/NaN, identity rejection, watchdog, motion stale, fresh-input timeout recovery, explicit rejection/wrong identity no retry, expired-input timeout stop, estop/recovery, rejection, concurrent stop, preemption, reconnect, odom continuity, compatibility, shutdown')
     finally:
         if process.poll() is None:
             process.send_signal(signal.SIGTERM)

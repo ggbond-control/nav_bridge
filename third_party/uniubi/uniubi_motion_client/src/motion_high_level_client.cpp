@@ -759,7 +759,16 @@ bool MotionHighLevelClient::rpc_call(
       return true;
     }
 
-    set_error(kActionRejected);
+    std::cerr << context << " rejected: " << write_json(payload) << std::endl;
+    // A missed takeover event must not leave an unusable controller token alive.
+    const auto business_code = payload.get("code", 0).asInt();
+    if (state_ == kControlled && rpc_client_id == controller_ &&
+      (business_code == 16 || business_code == 28 || business_code == 29))
+    {
+      lose_control(business_code == 16 ? kSessionExpired : kSessionRevoked);
+    } else {
+      set_error(kActionRejected);
+    }
     return false;
   } catch (const SystemRpcTimeout & e) {
     std::cerr << context << " RPC failed: " << e.what() << std::endl;

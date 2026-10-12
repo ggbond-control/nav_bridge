@@ -106,7 +106,9 @@ sudo nmcli device reapply eth1
 ## 控制语义与 ROS 接口
 
 启动只读：注册回调、连接、查询能力、开启观测，不自动申请控制权。
-只有显式 `stand/ready` 才取权，并启动三轴零速 walking，确认后允许 `/cmd_vel`。
+只有显式 `stand/ready` 才取权，准备并确认三轴零速 walking 后允许 `/cmd_vel`。
+已持权且查询仍为 walking 时，重复调用只更新零速和默认 slow 参数，不重启动作。
+新会话仍执行厂商主控切换和 startMotionAction；不能仅凭查询返回 walking 跳过取权流程。
 所有 SDK 调用与内部 executor 由一个工作线程串行处理，避免同步 RPC 重入。
 停止请求优先，速度只缓存最新一条；失权、断线、停止、切档清空缓存。
 重连只恢复观测，重新运动必须显式调用服务。
@@ -216,6 +218,35 @@ SDK 用独立 SystemRpcTimeout / kRpcTimeout 区分真正 deadline expiry。
 5 s 租约单次等待为 500 ms，留出提前重试机会；没有有效回复或控制动作不延长本地租约。
 真正失权或到期仍封锁。节点将实际 fault 限频输出到终端，避免只看到准备提示。
 
+## 手柄接管与重复站立
+
+手柄接管后，桥接清除缓存速度、停止旧会话续租并保留只读通信。
+RPC 业务错误 16（operatorInvalid）、28（noOperationPerm）、29（controlWasSeized）
+也触发同样的失权处理，避免漏收控制事件后继续使用失效令牌。
+失权日志使用 WARN 并提示恢复方法，成功准备后清除 backend_status 的历史错误。
+
+恢复时先让机器人静止，断开手柄至听到“遥控器连接已断开”，再执行：
+
+```bash
+ros2 service call /nav_bridge_node/ready std_srvs/srv/Trigger '{}'
+```
+
+不需要重启 nav_bridge；手柄释放后不会自动抢权，也不会重放接管前的速度。
+“摇杆回中”不等于手柄断开。当前固件断开手柄或释放会话时可能自行趴下；
+queryMotionState 的 walking 返回值也不能独立证明实际姿态，现场仍需观察。
+
+已有桥接会话的重复 stand/ready 不再重启 walking，适用于 navigation supervisor
+重复 start 时的控制刷新。修改配置导致的完整进程重建、主动 release_control 或
+手柄接管属于新会话，仍保留厂商取权流程，不保证跨会话无姿态变化。
+
+2026-10-12 复验：x86/ARM64 构建和隔离协议测试通过，补充了重复 stand、
+新会话动作初始化以及漏收抢权事件时业务错误 16/28/29 的恢复测试。
+原 /navigation_bringup/start 在无地图 manual 模式连续刷新两次，现场确认始终站立。
+实机手柄接管后零速 RPC 返回 28，桥接清除持权状态而保持连接；手柄断开后，
+同一进程 ready 成功，现场确认重新站立，随后完成 0.1 m/s、5 秒前进及超时零速检查。
+本轮 company2 导航模式启动被初始配准 INITIAL_REGISTRATION_BLOCKED 阻断，
+没有修改定位配置，也未把 manual 复验当作完整定位导航验收。
+
 ## 测试与验收
 
 | 文件（test/cyvet 下） | 用途 |
@@ -282,6 +313,7 @@ uniubi-docs、uniubi_ros2、uniubi_robot_msgs，mock 只作协议参考；Python
 - 同步 RPC、异步续租都检查响应 device_id；错误设备不能授权动作。
 - deadline expiry 独立异常/错误码，原枚举数值保持，允许受限速度恢复。
 - 续租响应等待按实际租约限制，不延长未被确认的租约。
+- 持权 RPC 权限错误立即清理会话，与抢权事件采用同一恢复流程。
 - native DDS BrainMotionState 转换为 SensorObserved，读取设备实际传感器和 Walk 里程计。
 - 只构建运行客户端和 native DDS 测试；删除未使用的 CLI、示例和观测演示程序。
 - JsonCpp 直接编译三个 lib_json 源文件；删除其未调用的独立项目构建模板，保留源码、头文件和许可。

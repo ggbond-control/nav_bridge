@@ -76,8 +76,12 @@ struct CyvetBackend::Impl {
                 cached.control_owned = false;
                 cached.motion_state = BackendMotionState::UNKNOWN;
             }
-            if (error != Client::kNone && !(releasing && error == Client::kSessionRevoked))
-                fault("Control ownership changed", error);
+            if (error != Client::kNone && !(releasing && error == Client::kSessionRevoked)) {
+                const bool lost = error == Client::kSessionRevoked || error == Client::kSessionExpired;
+                fault(lost ? "Control lost; read-only connection retained. Disconnect the handheld, then call stand/ready"
+                           : "Control acquisition failed; disconnect the handheld, then call stand/ready",
+                      error, lost ? 1 : 2);
+            }
         });
         client->setEventCallback([this](const std::string &topic, const std::string &payload) {
             if (topic == "statistics/device_status") {
@@ -149,10 +153,10 @@ struct CyvetBackend::Impl {
         generation.fetch_add(1);
         velocity.reset();
     }
-    void fault(const std::string &message, int code = -1) {
+    void fault(const std::string &message, int code = -1, int severity = 2) {
         FaultCallback callback;
         { std::lock_guard<std::mutex> lock(mutex); last_fault = message; callback = fault_callback; }
-        if (callback) callback({code, 2, message});
+        if (callback) callback({code, severity, message});
     }
     BackendResult error(const std::string &operation) {
         const auto code = client->getLastError();
@@ -358,7 +362,8 @@ struct CyvetBackend::Impl {
     BackendResult acquire(uint64_t token) {
         if (interrupted(token)) return {false, "Control request canceled"};
         if (!state().connected || !capabilities_valid) return {false, "Fresh connection and walking capabilities required"};
-        if (!client->startControl(opts.action_timeout_ms)) return error("Control acquisition rejected");
+        if (!client->startControl(opts.action_timeout_ms))
+            return error("Control acquisition rejected; disconnect the handheld, then call stand/ready");
         if (interrupted(token)) return {false, "Control acquired but action canceled; pending stop will release it"};
         { std::lock_guard<std::mutex> lock(mutex); cached.control_owned = true; }
         return {true, "Control acquired"};
@@ -366,12 +371,26 @@ struct CyvetBackend::Impl {
     BackendResult stand(uint64_t token) {
         if (halt_pending) return {false,"Stop is not yet confirmed; preparation refused"};
         cancelQueries();
+        const bool existing_session = client->getState() == Client::kControlled;
         auto result = acquire(token);
         if (!result.success) return result;
         const auto &profile = opts.default_control_profile;
-        if (!client->startAction("walking", json(velocityParams(0, 0, 0, profile)), opts.rpc_timeout_ms)) {
-            result = error("Walking preparation rejected");
-        } else result = confirm("walking", true, token, true, profile);
+        // Only an existing owned walking session can be prepared with parameters.
+        // A new controller needs startAction even if queryMotionState still reports
+        // the previous session's walk. Never infer physical posture from that alone.
+        std::string value;
+        if (!client->queryMotionState(value, opts.rpc_timeout_ms)) {
+            result = error("Walking preparation state query failed");
+        } else {
+            updateMotion(parse(value));
+            if (interrupted(token)) return {false, "Preparation canceled"};
+            const auto params = json(velocityParams(0, 0, 0, profile));
+            const bool accepted = existing_session && current_action == "walking"
+                ? client->setActionParams(params, opts.rpc_timeout_ms)
+                : client->startAction("walking", params, opts.rpc_timeout_ms);
+            result = accepted ? confirm("walking", true, token, true, profile)
+                              : error("Walking preparation rejected");
+        }
         if (!result.success) {
             // Never enable motion after an unconfirmed action, including an ambiguous ACK timeout.
             if (!interrupted(token) && stop(false).success) releaseSdk();
@@ -382,7 +401,8 @@ struct CyvetBackend::Impl {
             if (interrupted(token)) return {false, "Preparation canceled"};
             selected_profile = profile; cached.mode = profile == "slow" ? 0 : 3;
             acknowledged_profile = profile;
-            velocity.reset(); estop_latched = false; ready.store(true);
+            velocity.reset(); estop_latched = false; velocity_active = false;
+            last_fault.clear(); ready.store(true);
         }
         return {true, "Walking at zero velocity confirmed; navigation ready; " + profileDescription(profile)};
     }
@@ -515,6 +535,14 @@ struct CyvetBackend::Impl {
         velocity_active = true;
         if (!client->setActionParams(json(params), opts.rpc_timeout_ms)) {
             const auto failure = client->getLastError();
+            if (client->getState() != Client::kControlled &&
+                (failure == Client::kSessionExpired || failure == Client::kSessionRevoked)) {
+                // The ownership callback already inhibited input and reported the
+                // recovery instruction. Do not overwrite it with a stop failure
+                // or send commands to the new owner.
+                velocity_active = false;
+                return;
+            }
             if (failure == Client::kRpcTimeout) {
                 { std::lock_guard<std::mutex> lock(mutex); ++velocity_rpc_timeouts; }
                 // A transient device forwarding timeout need not revoke a healthy
