@@ -300,8 +300,14 @@ struct CyvetBackend::Impl {
     BackendResult connectRobot() {
         started.store(true);
         if (client->getState() != Client::kDisconnected) return {true, "Connected (no automatic control acquisition)"};
-        if (!client->wait_for_service(std::chrono::milliseconds(opts.connect_timeout_ms)) ||
-            !client->connect(opts.lease_ms)) return error("RobotServer connection failed");
+        // Keep discovery and session establishment separate in the diagnostic
+        // path.  A missing DDS endpoint is a different failure from a server
+        // that was discovered but rejected the client session, and the bridge
+        // reconnect loop can then recover without acquiring motion control.
+        if (!client->wait_for_service(std::chrono::milliseconds(opts.connect_timeout_ms)))
+            return error("RobotServer DDS service discovery timed out; retrying read-only");
+        if (!client->connect(opts.lease_ms))
+            return error("RobotServer session connection failed; retrying read-only");
         // A failed layout query must not reuse names from a previous connection.
         layout.clear();
         std::string value;
