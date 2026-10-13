@@ -69,7 +69,7 @@ bool read_controlled(const Json::Value & payload)
     return value.asBool();
   }
   if (value.isString()) {
-    return value.asString() != "0";
+    return value.asString() == "1" || value.asString() == "true";
   }
   return false;
 }
@@ -236,7 +236,9 @@ bool MotionHighLevelClient::startControl(int32_t timeout_ms)
     return fail_acquire();
   }
 
-  if (!ret.isObject() || !ret.isMember("controller") || !ret["controller"].isString()) {
+  if (!ret.isObject() || !ret["controller"].isString() || ret["controller"].asString().empty() ||
+    (ret.isMember("leaseTimeout") && (!ret["leaseTimeout"].isInt() || ret["leaseTimeout"].asInt() <= 0)))
+  {
     return fail_acquire();
   }
 
@@ -754,14 +756,14 @@ bool MotionHighLevelClient::rpc_call(
     }
 
     out = payload.isMember("params") ? payload["params"] : Json::Value(Json::nullValue);
-    if (payload.isMember("result") && payload["result"].asBool()) {
+    if (payload["result"].isBool() && payload["result"].asBool()) {
       set_error(kNone);
       return true;
     }
 
     std::cerr << context << " rejected: " << write_json(payload) << std::endl;
     // A missed takeover event must not leave an unusable controller token alive.
-    const auto business_code = payload.get("code", 0).asInt();
+    const auto business_code = payload["code"].isInt() ? payload["code"].asInt() : 0;
     if (state_ == kControlled && rpc_client_id == controller_ &&
       (business_code == 16 || business_code == 28 || business_code == 29))
     {
@@ -933,16 +935,19 @@ void MotionHighLevelClient::handle_renew_response(
     Json::Value payload;
     std::string error;
     if (!parse_json_no_throw(response->payload, payload, error) || !payload.isObject() ||
-      !payload.isMember("result") || !payload["result"].asBool())
+      !payload["result"].isBool() || !payload["result"].asBool())
     {
       lose_control(kSessionExpired);
       return;
     }
 
-    if (payload.isMember("params") && payload["params"].isObject() &&
-      payload["params"].isMember("leaseTimeout") && payload["params"]["leaseTimeout"].isNumeric())
-    {
-      lease_ms_ = payload["params"]["leaseTimeout"].asInt();
+    const auto & params = payload["params"];
+    if (params.isObject() && params.isMember("leaseTimeout")) {
+      if (!params["leaseTimeout"].isInt() || params["leaseTimeout"].asInt() <= 0) {
+        lose_control(kSessionExpired);
+        return;
+      }
+      lease_ms_ = params["leaseTimeout"].asInt();
     }
     mark_control_activity();
     set_error(kNone);

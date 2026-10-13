@@ -8,6 +8,7 @@
 
 #include "rclcpp/rclcpp.hpp"
 #include "rcl_interfaces/srv/set_parameters.hpp"
+#include "rcl_interfaces/msg/parameter_descriptor.hpp"
 #include "geometry_msgs/msg/twist.hpp"
 #include "nav_msgs/msg/odometry.hpp"
 #include "sensor_msgs/msg/imu.hpp"
@@ -23,24 +24,27 @@ class CyvetNavBridgeNode final : public rclcpp::Node {
 public:
     CyvetNavBridgeNode() : Node("nav_bridge_node") {
         CyvetOptions options;
-        options.device_id=declare_parameter<std::string>("device_id", "");
-        options.service_name=declare_parameter<std::string>("robot_service_name", "robotServer");
-        options.event_topic=declare_parameter<std::string>("event_topic", "/robotServer/Event");
-        options.robot_domain_id=declare_parameter<int>("robot_domain_id",42);
-        options.enable_observations=declare_parameter<bool>("enable_observations",true);
-        options.connect_timeout_ms=declare_parameter<int>("connect_timeout_ms",5000);
-        options.reconnect_interval_ms=declare_parameter<int>("reconnect_interval_ms",2000);
-        options.action_timeout_ms=declare_parameter<int>("action_timeout_ms",10000);
-        options.rpc_timeout_ms=declare_parameter<int>("rpc_timeout_ms",200);
-        options.lease_ms=declare_parameter<int>("lease_ms",5000);
-        options.cmd_vel_timeout_ms=declare_parameter<int>("cmd_vel_timeout_ms",500);
-        options.telemetry_timeout_ms=declare_parameter<int>("telemetry_timeout_ms",2000);
-        options.cmd_vel_rate_hz=declare_parameter<double>("cmd_vel_rate_hz",30.0);
-        options.lateral_sign=declare_parameter<double>("lateral_sign",1.0);
-        options.default_control_profile=declare_parameter<std::string>("default_control_profile","slow");
-        imu_frame_=declare_parameter<std::string>("imu_frame_id","imu_link");
-        odom_frame_=declare_parameter<std::string>("odom_frame_id","odom");
-        base_frame_=declare_parameter<std::string>("base_frame_id","base_link");
+        rcl_interfaces::msg::ParameterDescriptor startup_parameter;
+        startup_parameter.read_only = true;
+        startup_parameter.description = "Applied at startup; restart nav_bridge to change";
+        options.device_id=declare_parameter<std::string>("device_id", "",startup_parameter);
+        options.service_name=declare_parameter<std::string>("robot_service_name", "robotServer",startup_parameter);
+        options.event_topic=declare_parameter<std::string>("event_topic", "/robotServer/Event",startup_parameter);
+        options.robot_domain_id=declare_parameter<int>("robot_domain_id",42,startup_parameter);
+        options.enable_observations=declare_parameter<bool>("enable_observations",true,startup_parameter);
+        options.connect_timeout_ms=declare_parameter<int>("connect_timeout_ms",5000,startup_parameter);
+        options.reconnect_interval_ms=declare_parameter<int>("reconnect_interval_ms",2000,startup_parameter);
+        options.action_timeout_ms=declare_parameter<int>("action_timeout_ms",10000,startup_parameter);
+        options.rpc_timeout_ms=declare_parameter<int>("rpc_timeout_ms",200,startup_parameter);
+        options.lease_ms=declare_parameter<int>("lease_ms",5000,startup_parameter);
+        options.cmd_vel_timeout_ms=declare_parameter<int>("cmd_vel_timeout_ms",500,startup_parameter);
+        options.telemetry_timeout_ms=declare_parameter<int>("telemetry_timeout_ms",2000,startup_parameter);
+        options.cmd_vel_rate_hz=declare_parameter<double>("cmd_vel_rate_hz",30.0,startup_parameter);
+        options.lateral_sign=declare_parameter<double>("lateral_sign",1.0,startup_parameter);
+        options.default_control_profile=declare_parameter<std::string>("default_control_profile","slow",startup_parameter);
+        imu_frame_=declare_parameter<std::string>("imu_frame_id","imu_link",startup_parameter);
+        odom_frame_=declare_parameter<std::string>("odom_frame_id","odom",startup_parameter);
+        base_frame_=declare_parameter<std::string>("base_frame_id","base_link",startup_parameter);
         state_pub_=create_publisher<std_msgs::msg::Int32>("/robot_basic_state",10);
         gait_pub_=create_publisher<std_msgs::msg::Int32>("/robot_gait_state",10);
         battery_pub_=create_publisher<std_msgs::msg::UInt8>("/battery/level",10);

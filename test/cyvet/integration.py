@@ -25,7 +25,7 @@ from rclpy.qos import QoSProfile, ReliabilityPolicy
 from geometry_msgs.msg import Twist
 from sensor_msgs.msg import Imu, JointState
 from nav_msgs.msg import Odometry
-from std_msgs.msg import UInt8, String
+from std_msgs.msg import UInt8, String, Int32
 from std_srvs.srv import Trigger
 from rcl_interfaces.msg import Parameter, ParameterValue
 from rcl_interfaces.srv import SetParameters
@@ -70,6 +70,12 @@ class Robot:
         self.profile_override = ''
         self.reject_profile = ''
         self.action_params = []
+        self.battery_online = True
+        self.controller_override = None
+        self.lease_override = None
+        self.result_override_method = ''
+        self.reject_layout = False
+        self.malformed_motion_once = False
         self.service = node.create_service(System, 'robotServer', self.request,
                                           callback_group=ReentrantCallbackGroup())
         qos = QoSProfile(depth=1, reliability=ReliabilityPolicy.BEST_EFFORT)
@@ -100,10 +106,11 @@ class Robot:
                 for n, cap in zip(('lineVelocityX', 'lineVelocityY', 'velocity'), (.15, .08, .25))
             ] if a == 'walking' else []} for a in ('walking', 'laying', 'standing')]
         elif method == 'getMotorLayout':
+            result = not self.reject_layout
             params = {'motors': [{'limbNo': i//3, 'jointNo': i % 3, 'name': f'joint_{i}'}
                                  for i in range(12)]}
         elif method == 'getSystemStatus':
-            params = {'battery': {'online': True, 'power': 73.}}
+            params = {'battery': {'online': self.battery_online, 'power': 73.}}
         elif method == 'queryMotionState':
             params = {'action': self.action, **dict(zip(
                 ('lineVelocityX', 'lineVelocityY', 'velocity'), self.velocity))}
@@ -112,6 +119,9 @@ class Robot:
                 if self.old_profile_ticks:
                     self.old_profile_ticks -= 1
                 params['controlProfile'] = self.profile_override or effective
+            if self.malformed_motion_once and value.get("call", {}).get("clientId") == self.owner:
+                self.malformed_motion_once = False
+                params['lineVelocityX'] = 'invalid-velocity'
         elif method == 'takeMotionControl':
             result = not self.reject_acquire
             if result:
@@ -119,6 +129,10 @@ class Robot:
                 self.owner = f'fixture-controller-{self.session_count}'
                 self.action_started = False
                 params = {'controller': self.owner, 'leaseTimeout': self.lease_ms}
+                if self.controller_override is not None:
+                    params['controller'] = self.controller_override
+                if self.lease_override is not None:
+                    params['leaseTimeout'] = self.lease_override
         elif method == 'setMotionMasterRole':
             pass
         elif method == 'setMotionObservedEnable':
@@ -175,7 +189,8 @@ class Robot:
                 'takeMotionControl', 'renewMotionControl', 'startMotionAction',
                 'setMotionActionParams', 'stopMotionAction', 'emergencyStopMotion'):
             self.lease_activity = time.monotonic()
-        res.payload = json.dumps({'result': result, 'params': params, 'code': code})
+        res.payload = json.dumps({'result': 1 if method == self.result_override_method else result,
+                                  'params': params, 'code': code})
         return res
 
     def observed(self):
@@ -206,12 +221,12 @@ class Robot:
         s.odom.yaw = math.pi/2 if self.epoch == 1 else 0.
         self.sensor.publish(s)
 
-    def revoke(self):
+    def revoke(self, controlled=False):
         self.owner = ''
         e = EventMessage()
         e.magic = 0x53425645
         e.topic = 'robotServer.control.status'
-        e.payload = json.dumps({'controlled': False})
+        e.payload = json.dumps({'controlled': controlled, 'controller': f'fixture-controller-{self.session_count}'})
         for _ in range(5):
             self.event.publish(e)
             time.sleep(.02)
@@ -236,7 +251,8 @@ def main():
     messages, counts = {}, {}
     subscriptions = []
     for topic, typ in [('/battery/level', UInt8), ('/imu/data', Imu), ('/joint_states', JointState),
-                       ('/leg_odom', Odometry), ('/nav_bridge_node/backend_status', String)]:
+                       ('/leg_odom', Odometry), ('/nav_bridge_node/backend_status', String),
+                       ('/robot_basic_state', Int32)]:
         def receive(msg, key=topic):
             messages[key] = msg
             counts[key] = counts.get(key, 0) + 1
@@ -248,7 +264,7 @@ def main():
     log = tempfile.TemporaryFile(mode='w+')
     process = subprocess.Popen([args.executable, '--ros-args', '-p', 'device_id:=cyvet-test',
         '-p', 'robot_domain_id:=174', '-p', 'action_timeout_ms:=4500',
-        '-p', 'telemetry_timeout_ms:=800', '-p', 'rpc_timeout_ms:=200'], env=env, stdout=log, stderr=log)
+        '-p', 'telemetry_timeout_ms:=1500', '-p', 'rpc_timeout_ms:=200'], env=env, stdout=log, stderr=log)
 
     def wait(predicate, timeout=8.):
         end = time.monotonic() + timeout
@@ -295,6 +311,31 @@ def main():
         assert not robot.owner and not any(m == 'takeMotionControl' for m, _ in robot.calls)
         assert messages['/battery/level'].data == 73
         assert abs(messages['/imu/data'].orientation.w - 1) < 1e-6
+        # System offline overrides old/high-rate observation battery values.
+        robot.battery_online = False
+        wait(lambda: not state()['battery_valid'], 3.)
+        settle_until = time.monotonic()+.2
+        wait(lambda: time.monotonic() > settle_until)
+        battery_count = counts['/battery/level']
+        settle_until = time.monotonic()+.4
+        wait(lambda: time.monotonic() > settle_until)
+        assert counts['/battery/level'] == battery_count
+        robot.battery_online = True
+        wait(lambda: state()['battery_valid'])
+        # Read-only stale motion must not masquerade as fresh moving telemetry.
+        robot.action, robot.velocity = 'walking', [.4, 0., 0.]
+        wait(lambda: state()['vx'] == .4)
+        robot.motion_offline = True
+        wait(lambda: not state()['motion_valid'])
+        wait(lambda: messages['/robot_basic_state'].data == 0)
+        assert state()['vx'] == 0. and state()['action'] == '' and state()['connected']
+        robot.motion_offline = False
+        robot.action, robot.velocity = '', [0., 0., 0.]
+        wait(lambda: state()['motion_valid'])
+        # Constructor-only ROS parameters must reject runtime writes.
+        req = SetParameters.Request(parameters=[Parameter(name='cmd_vel_timeout_ms',
+                                    value=ParameterValue(type=2, integer_value=10000))])
+        assert not service('set_parameters', SetParameters, req).results[0].successful
         # Flush old packets before checking that invalid samples are suppressed.
         robot.invalid_imu = robot.invalid_odom = True
         for invalid_count in (0, 13):
@@ -318,6 +359,12 @@ def main():
         robot.reject_acquire = True
         assert not service('stand').success
         robot.reject_acquire = False
+        for attribute, value in (('controller_override', ''), ('lease_override', 0)):
+            setattr(robot, attribute, value)
+            assert not service('stand').success
+            wait(lambda: not state()['control_owned'])
+            setattr(robot, attribute, None)
+            robot.owner = ''
         assert service('stand').success
         assert robot.profile == 'slow'
         wait(lambda: state()['navigation_ready'] and state()['gait'] == 0)
@@ -335,6 +382,10 @@ def main():
         assert service('ready').success
         assert sum(m == 'setMotionMasterRole' for m, _ in robot.calls) == masters+1
         assert sum(m == 'startMotionAction' for m, _ in robot.calls) == starts+1
+        # Legacy string control flags must interpret "false" as revoked.
+        robot.revoke('false')
+        wait(lambda: not state()['control_owned'] and not state()['navigation_ready'])
+        assert service('ready').success
         assert not set_gait('MEDIUM').successful
         assert not set_gait(34).successful
         req = SetParameters.Request(parameters=[Parameter(name='speed',
@@ -361,6 +412,10 @@ def main():
         wait(lambda: state()['control_profile_reported'] == 'fast')
         robot.profile_lag_ticks = 0
         assert service('ready').success and robot.profile == 'slow', 'ready restores default slow'
+        robot.result_override_method = 'setMotionActionParams'
+        assert not set_gait('FAST').successful, 'numeric result=1 is not a protocol success'
+        robot.result_override_method = ''
+        assert service('ready').success
         robot.reject_profile = 'fast'
         assert not set_gait('RUN').successful
         wait(lambda: not state()['navigation_ready'])
@@ -393,6 +448,7 @@ def main():
         wait(lambda: robot.velocity[0] != 0.)
         assert all(abs(a-b)<1e-6 for a,b in zip(robot.velocity,[.6,.4,.8]))
         wait(lambda: robot.velocity == [0.,0.,0.])
+        wait(lambda: not state()['command_cached'])
         assert any(m == 'stopMotionAction' for m,_ in robot.calls), 'watchdog must stop action'
         # A failed stop ACK must trigger an emergency fallback, confirmation,
         # and persistent local inhibit rather than retaining an unsafe action.
@@ -410,12 +466,32 @@ def main():
         time.sleep(.2)
         assert robot.velocity == [0.,0.,0.]
         assert service('ready').success
+        # An emergency stop reported by firmware must survive release/shutdown;
+        # stopMotionAction could otherwise switch it back into walking.
+        wait(lambda: state()['navigation_ready'] and state()['action'] == 'walking')
+        robot.action, robot.velocity = 'emergencyStop', [0., 0., 0.]
+        wait(lambda: state()['action'] == 'emergencyStop' and not state()['navigation_ready'])
+        stop_count = sum(m == 'stopMotionAction' for m, _ in robot.calls)
+        assert service('release_control').success
+        assert robot.action == 'emergencyStop'
+        assert sum(m == 'stopMotionAction' for m, _ in robot.calls) == stop_count
+        assert service('ready').success
         velocity(float('nan'), 0., 0.)
         settle_until = time.monotonic() + .2
         wait(lambda: time.monotonic() > settle_until)
         assert robot.velocity == [0., 0., 0.], 'NaN must never reach the vendor'
+        # Parsing failure during preparation of an existing moving session must
+        # stop the physical action, not merely disable local dispatch.
+        velocity(.1, 0., 0.)
+        wait(lambda: robot.velocity[0] != 0.)
+        robot.malformed_motion_once = True
+        assert not service('stand').success
+        wait(lambda: not state()['navigation_ready'] and not state()['stop_pending'] and
+             robot.velocity == [0., 0., 0.])
+        assert service('ready').success
         # Only an actual timeout may retry, and only newer live input in an
         # unchanged walking/control session. The retry must use the latest axes.
+        wait(lambda: state()['navigation_ready'] and not state()['command_cached'])
         recoveries = state()['velocity_rpc_recoveries']
         robot.delay_method, robot.delay_seconds, robot.delay_remaining = 'setMotionActionParams', .35, 1
         velocity(.1, .03, .1)
@@ -550,8 +626,15 @@ def main():
         wait(lambda: not state()['battery_valid'])
         wait(lambda: not robot.owner, 8.)
         robot.offline = False
+        robot.reject_layout = True
         wait(lambda: state()['connected'], 12.)
         assert not state()['navigation_ready'] and not robot.owner
+        settle_until = time.monotonic()+.3
+        wait(lambda: time.monotonic() > settle_until)
+        joint_count = counts['/joint_states']
+        settle_until = time.monotonic()+.3
+        wait(lambda: time.monotonic() > settle_until)
+        assert counts['/joint_states'] == joint_count, 'failed layout query cannot reuse old joint names'
         req = SetParameters.Request()
         req.parameters = [Parameter(name='gait', value=ParameterValue(type=2,integer_value=33))]
         assert not service('set_gait',SetParameters,req).results[0].successful
@@ -561,10 +644,11 @@ def main():
         assert not service('charge_command',SetParameters,req).results[0].successful
         assert service('lie').success and not robot.owner
         assert service('ready').success
+        robot.malformed_motion_once = True  # Shutdown confirmation must not abort the worker thread.
         process.send_signal(signal.SIGTERM)
         process.wait(timeout=15.)
         assert process.returncode == 0 and not robot.owner
-        print('PASS: read-only startup, two vendor profiles/no local clipping/default slow, profile rejection/mismatch/cache discard, idempotent owned stand, new-session action, takeover event/permission-error recovery, invalid telemetry/quaternion/NaN, identity rejection, watchdog, motion stale, fresh-input timeout recovery, explicit rejection/wrong identity no retry, expired-input timeout stop, estop/recovery, rejection, concurrent stop, preemption, reconnect, odom continuity, compatibility, shutdown')
+        print('PASS: read-only startup, two vendor profiles/no local clipping/default slow, profile rejection/mismatch/cache discard, idempotent owned stand, new-session action, takeover event/permission-error recovery, battery offline/stale motion/expired command, immutable startup parameters, invalid grant/lease/result/control flag, reconnect layout invalidation, external estop/exception stop/exception shutdown, invalid telemetry/quaternion/NaN, identity rejection, watchdog, motion stale, fresh-input timeout recovery, explicit rejection/wrong identity no retry, expired-input timeout stop, estop/recovery, rejection, concurrent stop, preemption, reconnect, odom continuity, compatibility, shutdown')
     finally:
         if process.poll() is None:
             process.send_signal(signal.SIGTERM)

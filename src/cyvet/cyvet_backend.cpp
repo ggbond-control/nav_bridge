@@ -145,7 +145,7 @@ struct CyvetBackend::Impl {
     std::map<std::pair<unsigned, unsigned>, std::string> layout;
     cyvet::ContinuousOdometry continuous_odom;
     bool capabilities_valid{false}, observations_enabled{false}, velocity_active{false},
-         estop_latched{false}, halt_escalated{false}, releasing{false};
+         estop_latched{false}, halt_escalated{false}, releasing{false}, battery_online{true};
 
     void inhibit() {
         std::lock_guard<std::mutex> lock(mutex);
@@ -162,6 +162,16 @@ struct CyvetBackend::Impl {
         const auto code = client->getLastError();
         fault(operation, code);
         return {false, operation + " (error=" + std::to_string(code) + ")"};
+    }
+    void abortOnException(const std::string &message) {
+        inhibit(); fault(message);
+        if (client->getState() != Client::kControlled) return;
+        // A local parsing exception does not cancel the device's last action.
+        // Request emergency stop and keep inhibition until recovery confirms it.
+        velocity_active = false; estop_latched = true; halt_pending.store(true);
+        try {
+            if (!client->emergencyStop(opts.rpc_timeout_ms)) error("Exception fallback emergencyStop failed");
+        } catch (const std::exception &e) { fault(std::string("Exception fallback failed: ")+e.what()); }
     }
     BackendResult submit(std::function<BackendResult(uint64_t)> action, bool priority = false, bool prepare = false) {
         auto job = std::make_shared<Job>();
@@ -199,12 +209,17 @@ struct CyvetBackend::Impl {
     void updateBattery(const Json::Value &root) {
         const auto &battery = root["battery"];
         if (!battery.isObject()) return;
+        std::lock_guard<std::mutex> lock(mutex);
+        if (battery["online"].isBool()) {
+            battery_online = battery["online"].asBool();
+            if (!battery_online) { cached.battery_percent = -1; battery_at = {}; return; }
+        }
+        if (!battery_online) return;
         const auto &power = battery["power"];
         if (!power.isNumeric()) return;
         double value = power.asDouble();
         if (!std::isfinite(value) || value < 0 || value > 100 ||
             (battery.isMember("online") && !battery["online"].asBool())) return;
-        std::lock_guard<std::mutex> lock(mutex);
         cached.battery_percent = value;
         battery_at = Clock::now();
     }
@@ -218,6 +233,9 @@ struct CyvetBackend::Impl {
         const double y = root.get("lineVelocityY", 0.0).asDouble() * opts.lateral_sign;
         const double yaw = root.get("velocity", 0.0).asDouble();
         if (!finite({x, y, yaw})) throw std::runtime_error("Non-finite motion state");
+        // Preserve a firmware/remote emergency stop during release and shutdown,
+        // just as one requested through our own soft_estop service.
+        if (action == "emergencyStop") estop_latched = true;
         if (ready && action != "walking") inhibit();
         std::lock_guard<std::mutex> lock(mutex);
         current_action = action;
@@ -284,6 +302,8 @@ struct CyvetBackend::Impl {
         if (client->getState() != Client::kDisconnected) return {true, "Connected (no automatic control acquisition)"};
         if (!client->wait_for_service(std::chrono::milliseconds(opts.connect_timeout_ms)) ||
             !client->connect(opts.lease_ms)) return error("RobotServer connection failed");
+        // A failed layout query must not reuse names from a previous connection.
+        layout.clear();
         std::string value;
         bool queried = client->queryCapabilities(value, opts.connect_timeout_ms);
         if (!queried) queried = client->queryCapabilities(value, opts.connect_timeout_ms);
@@ -453,6 +473,8 @@ struct CyvetBackend::Impl {
     }
     BackendResult release(bool can_cancel = true) {
         cancelQueries();
+        if (client->getState() != Client::kControlled)
+            return {true, "No owned control session; local input inhibited; physical stop not confirmed"};
         const auto result = stop(can_cancel);
         if (!result.success) return result;  // Do not report release as confirmed stopping.
         if (client->getState() == Client::kControlled && !releaseSdk())
@@ -505,7 +527,8 @@ struct CyvetBackend::Impl {
                     if (response->code != 0 || response->device_id != opts.device_id)
                         throw std::runtime_error("Read-only RPC returned error or wrong identity");
                     const auto value = parse(response->payload);
-                    if (!value.get("result", false).asBool()) throw std::runtime_error("Read-only query rejected");
+                    if (!value["result"].isBool() || !value["result"].asBool())
+                        throw std::runtime_error("Read-only query rejected or malformed");
                     const auto &params = value.isMember("params") ? value["params"] : Json::Value(Json::objectValue);
                     if (method == "queryMotionState") updateMotion(params);
                     else { updateBattery(params); system_reply_at = Clock::now(); }
@@ -520,6 +543,13 @@ struct CyvetBackend::Impl {
         const auto now = Clock::now();
         if (!command || command->generation != generation.load() ||
             now-command->at > std::chrono::milliseconds(opts.cmd_vel_timeout_ms)) {
+            {
+                std::lock_guard<std::mutex> lock(mutex);
+                // A fresh command can arrive while this worker examines the old one.
+                if (velocity && (velocity->generation != generation.load() ||
+                    now-velocity->at > std::chrono::milliseconds(opts.cmd_vel_timeout_ms)))
+                    velocity.reset();
+            }
             if (velocity_active) {
                 velocity_active = false;
                 auto result = stop();
@@ -609,12 +639,19 @@ struct CyvetBackend::Impl {
         if (!result.success) fault(result.message);
         next_halt = Clock::now() + 200ms;
     }
+    BackendState stateLocked(Clock::time_point now) const {
+        auto result = cached;
+        if (now-battery_at > std::chrono::milliseconds(opts.telemetry_timeout_ms))
+            result.battery_percent = -1;
+        if (now-motion_reply_at > std::chrono::milliseconds(opts.telemetry_timeout_ms)) {
+            result.motion_state = BackendMotionState::UNKNOWN;
+            result.vx = result.vy = result.vyaw = 0;
+        }
+        return result;
+    }
     BackendState state() const {
         std::lock_guard<std::mutex> lock(mutex);
-        auto result = cached;
-        if (Clock::now()-battery_at > std::chrono::milliseconds(opts.telemetry_timeout_ms))
-            result.battery_percent = -1;
-        return result;
+        return stateLocked(Clock::now());
     }
     void run() {
         while (!quitting) {
@@ -630,7 +667,7 @@ struct CyvetBackend::Impl {
                     try {
                         job->result.set_value(!job->priority && interrupted(job->generation) ?
                             BackendResult{false, "Superseded by stop or shutdown"} : job->action(job->generation));
-                    } catch (const std::exception &e) { inhibit(); fault(e.what()); job->result.set_value({false, e.what()}); }
+                    } catch (const std::exception &e) { abortOnException(e.what()); job->result.set_value({false, e.what()}); }
                     // Acquisition includes a firmware master-switch wait. Refresh
                     // liveness before evaluating the idle asynchronous query watchdog.
                     if (client->getState() != Client::kDisconnected) {
@@ -672,15 +709,17 @@ struct CyvetBackend::Impl {
                 { std::lock_guard<std::mutex> lock(mutex); callback = state_callback; }
                 if (callback) callback(state());
             } catch (const std::exception &e) {
-                inhibit(); fault(e.what());
+                abortOnException(e.what());
                 std::unique_lock<std::mutex> lock(mutex); cv.wait_for(lock, 100ms);
             }
         }
         // Cleanup while the robot context is still alive (including SIGINT).
         cancelQueries();
         if (client->getState() == Client::kControlled) {
-            auto result = release(false);
-            if (!result.success) { fault(result.message); client->emergencyStop(opts.rpc_timeout_ms); }
+            try {
+                auto result = release(false);
+                if (!result.success) { fault(result.message); client->emergencyStop(opts.rpc_timeout_ms); }
+            } catch (const std::exception &e) { abortOnException(e.what()); }
         }
         if (observations_enabled) client->setMotionObservedEnable(false, false, opts.rpc_timeout_ms);
         client->disconnect();
@@ -696,7 +735,7 @@ struct CyvetBackend::Impl {
         if (std::isfinite(sample.power.power) && sample.power.power >= 0 && sample.power.power <= 100 &&
             std::isfinite(sample.power.charge_voltage) && sample.power.charge_voltage > 0) {
             std::lock_guard<std::mutex> lock(mutex);
-            cached.battery_percent = sample.power.power; battery_at = Clock::now();
+            if (battery_online) { cached.battery_percent = sample.power.power; battery_at = Clock::now(); }
         }
         const auto &a = sample.imu.accel; const auto &g = sample.imu.gyro;
         const auto &q = sample.imu.quaternion;
@@ -796,25 +835,31 @@ BackendResult CyvetBackend::move(double x,double y,double yaw) {
 }
 BackendState CyvetBackend::state() const { return impl_->state(); }
 std::string CyvetBackend::diagnostics() const {
-    const auto state=impl_->state();
     std::lock_guard<std::mutex> lock(impl_->mutex);
+    const auto now=Clock::now();
+    const auto state=impl_->stateLocked(now);
     Json::Value value;
     value["device_id"]=impl_->opts.device_id; value["connected"]=state.connected;
     value["control_owned"]=state.control_owned; value["navigation_ready"]=impl_->ready.load();
     value["stop_pending"]=impl_->halt_pending.load();
-    value["action"]=impl_->current_action;
+    const bool motion_valid = state.connected && now-impl_->motion_reply_at <=
+        std::chrono::milliseconds(impl_->opts.telemetry_timeout_ms);
+    value["motion_valid"]=motion_valid;
+    value["action"]=motion_valid ? impl_->current_action : "";
     value["control_profile_selected"]=impl_->selected_profile;
     value["gait"]=state.mode;
     value["control_profile_acknowledged"]=impl_->acknowledged_profile;
-    value["control_profile_reported"]=impl_->reported_profile;
+    value["control_profile_reported"]=motion_valid ? impl_->reported_profile : "";
     value["vx"]=state.vx; value["vy"]=state.vy; value["yaw_rate"]=state.vyaw;
     value["last_error"]=impl_->last_fault; value["battery_valid"]=state.battery_percent>=0;
     value["command_cached"]=impl_->velocity.has_value();
     value["velocity_rpc_timeouts"]=static_cast<Json::UInt64>(impl_->velocity_rpc_timeouts);
     value["velocity_rpc_recoveries"]=static_cast<Json::UInt64>(impl_->velocity_rpc_recoveries);
     if (impl_->velocity) {
-        value["command_age_ms"]=static_cast<Json::Int64>(std::chrono::duration_cast<std::chrono::milliseconds>(Clock::now()-impl_->velocity->at).count());
-        value["command_current"]=impl_->velocity->generation==impl_->generation.load();
+        value["command_age_ms"]=static_cast<Json::Int64>(std::chrono::duration_cast<std::chrono::milliseconds>(now-impl_->velocity->at).count());
+        value["command_current"]=impl_->ready.load() && state.control_owned &&
+            impl_->velocity->generation==impl_->generation.load() &&
+            now-impl_->velocity->at <= std::chrono::milliseconds(impl_->opts.cmd_vel_timeout_ms);
     }
     return json(value);
 }
