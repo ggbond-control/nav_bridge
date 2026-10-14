@@ -1,0 +1,23 @@
+[Unit]
+Description=NX HTTP and HTTPS proxy via D1M-B
+Wants=network-online.target
+After=network-online.target
+# Retry even if the LAN address becomes available late during boot.
+StartLimitIntervalSec=0
+
+[Service]
+Type=simple
+User=cat
+Group=cat
+WorkingDirectory=/home/cat/Scripts/nx-net-proxy
+ExecStart=/bin/sh /home/cat/Scripts/nx-net-proxy/run.sh
+Restart=always
+RestartSec=5
+KillMode=control-group
+TimeoutStopSec=15
+NoNewPrivileges=true
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target
