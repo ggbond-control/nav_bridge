@@ -292,20 +292,9 @@ BackendResult D1MaxBackend::move(double vx, double vy, double vyaw) {
     else if (speed_level == static_cast<int>(robot_sdk::SpeedLevel::SPEED_LEVEL_HIGH)) max_forward = 3.0;
 
     const double max_lateral = 0.5;
-    double max_yaw = 1.5;
-    const double abs_forward = std::abs(vx);
-    // SDK medium/high rules: lateral motion is disabled above 1 m/s and yaw
-    // is reduced to 1 rad/s; high speed reduces yaw to 0.5 rad/s above 2 m/s.
-    if (speed_level != static_cast<int>(robot_sdk::SpeedLevel::SPEED_LEVEL_SLOW)) {
-        if (abs_forward > 1.0) {
-            vy = 0.0;
-            max_yaw = 1.0;
-        }
-        if (speed_level == static_cast<int>(robot_sdk::SpeedLevel::SPEED_LEVEL_HIGH) &&
-            abs_forward > 2.0) {
-            max_yaw = 0.5;
-        }
-    }
+    // Convert yaw using a fixed input scale. The SDK/firmware owns motion
+    // constraints that couple forward speed with lateral or yaw commands.
+    const double max_yaw = 1.5;
 
     const auto normalize = [](double value, double limit) {
         if (limit <= 0.0) return 0.0;
