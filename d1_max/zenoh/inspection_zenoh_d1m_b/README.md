@@ -77,3 +77,49 @@ that NX address over `eth0` from `192.168.168.111`.
 The systemd deployment is correct, but D1M-B cannot exchange ROS traffic with
 the NX router until its own NX network is connected and routed, or until
 `router_config.json5` is updated with D1M-B's actual reachable NX endpoint.
+
+## Session Configuration Fix: 2026-10-15
+
+The deployment copy `session_config.json5` now matches the validated D1M-B
+configuration: multicast scouting stays enabled and uses only `eth1`
+(`192.168.168.111/24` at verification). This avoids creating discovery sockets
+on transient Wi-Fi/cellular addresses, which caused `Unable to send Hello`
+after an address disappeared. The router configuration and systemd files are
+unchanged.
+
+The original session configuration is preserved byte-for-byte in
+[`originals/20261015_before_eth1/session_config.json5`](originals/20261015_before_eth1/session_config.json5).
+Validation results and limitations are recorded in
+[`reports/20261015_eth1.md`](reports/20261015_eth1.md).
+The original device-side configuration and full evidence are under
+`/home/cat/Workspace/zenoh_ws/validation/20261015_eth1`.
+
+Validation retained all 76 nodes and 328 topics and passed topic, service,
+action and QoS interoperability checks with both original and updated clients.
+No business process or router was restarted. Observed brief message gaps also
+occurred in the original-only control; the checks do not guarantee zero jitter.
+Wi-Fi/cellular multicast discovery is excluded by this configuration. Actual
+network switching was not tested.
+
+For this session-only fix, install only the session file on D1M-B:
+
+```bash
+sudo install -o cat -g cat -m 0644 session_config.json5 \
+  /home/cat/Workspace/zenoh_ws/session_config.json5
+```
+
+Existing ROS processes retain their startup configuration. They load this file
+on their next restart; existing processes may continue to log Hello errors
+until then. A router restart is not required for this session-only update.
+
+To restore the original session configuration, run from this backup directory
+on D1M-B:
+
+```bash
+sudo install -o cat -g cat -m 0644 \
+  originals/20261015_before_eth1/session_config.json5 \
+  /home/cat/Workspace/zenoh_ws/session_config.json5
+```
+
+Rollback likewise takes effect when ROS processes next start. This backup
+update itself does not restart any device processes.
