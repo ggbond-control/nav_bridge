@@ -50,6 +50,7 @@ public:
             owner_.motion_status_ = static_cast<int>(data.motion_status);
             owner_.machine_status_ = static_cast<int>(data.machine_status);
             owner_.charging_pile_connected_ = data.charging_pile_connected;
+            owner_.last_basic_state_time_ = std::chrono::steady_clock::now();
             owner_.battery1_present_ = data.battery.present1;
             owner_.battery2_present_ = data.battery.present2;
             owner_.battery1_power_supply_status_ =
@@ -620,12 +621,21 @@ BackendResult D1MaxBackend::startUndock(int confirmation_timeout_ms) {
             deadline - std::chrono::steady_clock::now()).count()));
     };
     bool recharge_active = false;
+    bool undock_active = false;
+    uint64_t undock_sequence = 0;
     {
         std::lock_guard<std::mutex> lock(mutex_);
         recharge_active = task_type_ == static_cast<int>(robot_sdk::TaskType::RECHARGING) &&
                                      (task_status_ == static_cast<int>(robot_sdk::TaskStatus::STARTING) ||
                                       task_status_ == static_cast<int>(robot_sdk::TaskStatus::RUNNING));
+        undock_active = task_type_ == static_cast<int>(robot_sdk::TaskType::UNDOCK) &&
+            (task_status_ == static_cast<int>(robot_sdk::TaskStatus::STARTING) ||
+             task_status_ == static_cast<int>(robot_sdk::TaskStatus::RUNNING));
+        undock_sequence = task_state_sequence_;
     }
+    // A caller may retry after its own timeout while the SDK is still
+    // undocking. Join that task; never issue a second StartUnDockTask.
+    if (undock_active) return waitForUndockCompleted(undock_sequence, remaining_timeout_ms());
     if (recharge_active) {
         // Unified UNDOCK_START is an exit operation: stop charging first,
         // then start the physical undock task.
@@ -635,7 +645,14 @@ BackendResult D1MaxBackend::startUndock(int confirmation_timeout_ms) {
     {
         std::lock_guard<std::mutex> lock(mutex_);
         if (!charging_pile_connected_) {
-            return {false, "D1 is not connected to a charging pile; undock task was not sent."};
+            // Repeated exit requests and an executor restarted off the dock
+            // are safe no-ops only with recent SDK telemetry and no active
+            // undock. Never treat the initial/default false value as proof.
+            const bool fresh = last_basic_state_time_ != std::chrono::steady_clock::time_point{} &&
+                std::chrono::steady_clock::now() - last_basic_state_time_ < std::chrono::seconds(5);
+            if (fresh && !isChargingLocked())
+                return {true, "D1 is already disconnected from the charging pile; no undock task needed."};
+            return {false, "D1 pile disconnection is unconfirmed or undocking is still active."};
         }
     }
     auto control = takeControl();

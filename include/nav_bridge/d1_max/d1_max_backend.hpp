@@ -1,6 +1,7 @@
 #pragma once
 
 #include <memory>
+#include <chrono>
 #include <condition_variable>
 #include <cstdint>
 #include <mutex>
@@ -99,6 +100,7 @@ private:
     uint32_t undock_failure_error_code_{0};
     uint64_t undock_stopped_sequence_{0};
     bool charging_pile_connected_{false};
+    std::chrono::steady_clock::time_point last_basic_state_time_{};
     bool battery1_present_{false};
     bool battery2_present_{false};
     int battery1_power_supply_status_{0};
