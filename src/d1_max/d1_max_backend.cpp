@@ -622,6 +622,7 @@ BackendResult D1MaxBackend::startUndock(int confirmation_timeout_ms) {
     };
     bool recharge_active = false;
     bool undock_active = false;
+    bool undock_succeeded = false;
     uint64_t undock_sequence = 0;
     {
         std::lock_guard<std::mutex> lock(mutex_);
@@ -632,10 +633,15 @@ BackendResult D1MaxBackend::startUndock(int confirmation_timeout_ms) {
             (task_status_ == static_cast<int>(robot_sdk::TaskStatus::STARTING) ||
              task_status_ == static_cast<int>(robot_sdk::TaskStatus::RUNNING));
         undock_sequence = task_state_sequence_;
+        undock_succeeded = task_type_ == static_cast<int>(robot_sdk::TaskType::UNDOCK) &&
+            task_status_ == static_cast<int>(robot_sdk::TaskStatus::SUCCESS) &&
+            undock_success_sequence_ > 0;
+        if (undock_succeeded) undock_sequence = undock_success_sequence_ - 1;
     }
     // A caller may retry after its own timeout while the SDK is still
     // undocking. Join that task; never issue a second StartUnDockTask.
-    if (undock_active) return waitForUndockCompleted(undock_sequence, remaining_timeout_ms());
+    if (undock_active || undock_succeeded)
+        return waitForUndockCompleted(undock_sequence, remaining_timeout_ms());
     if (recharge_active) {
         // Unified UNDOCK_START is an exit operation: stop charging first,
         // then start the physical undock task.
@@ -723,7 +729,8 @@ BackendResult D1MaxBackend::waitForRechargeStopped(uint64_t min_sequence, int ti
 }
 
 BackendResult D1MaxBackend::waitForUndockCompleted(uint64_t min_sequence, int timeout_ms) {
-    const auto deadline = std::chrono::steady_clock::now() +
+    const auto started = std::chrono::steady_clock::now();
+    const auto deadline = started +
                           std::chrono::milliseconds(std::max(1, timeout_ms));
     std::unique_lock<std::mutex> lock(mutex_);
     while (true) {
@@ -731,15 +738,13 @@ BackendResult D1MaxBackend::waitForUndockCompleted(uint64_t min_sequence, int ti
             return {false, "D1 undock task failed, error_code=" +
                            std::to_string(undock_failure_error_code_)};
         }
-        if (undock_success_sequence_ > min_sequence) {
-            // TaskStateInfo is the SDK's terminal task result. The charging
-            // pile telemetry is deliberately not a success prerequisite: it
-            // may update after SUCCESS or lag the physical departure.
-            return {true, "D1 undock task completed."};
+        if (undock_success_sequence_ > min_sequence &&
+            last_basic_state_time_ >= started && !charging_pile_connected_ && !isChargingLocked()) {
+            return {true, "D1 undock task completed and charging pile disconnection confirmed."};
         }
         if (motion_cv_.wait_until(lock, deadline) == std::cv_status::timeout) break;
     }
-    return {false, "Timed out waiting for D1 undock task completion."};
+    return {false, "Timed out waiting for D1 undock SUCCESS and charging pile disconnection."};
 }
 
 BackendResult D1MaxBackend::waitForUndockStopped(uint64_t min_sequence, int timeout_ms) {

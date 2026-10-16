@@ -53,6 +53,7 @@ public:
     void setFaultCallback(FaultCallback callback) override;
 
 private:
+    friend class D1MaxUndockTest;
     class DataCallback;
     class ControlCallback;
 

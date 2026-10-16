@@ -152,6 +152,11 @@ install(DIRECTORY config
   DESTINATION share/${PROJECT_NAME}/)
 
 if(BUILD_TESTING)
+  if(NAV_BRIDGE_BUILD_D1_MAX)
+    find_package(ament_cmake_gtest REQUIRED)
+    ament_add_gtest(d1_max_undock_test test/d1_max/undock_test.cpp)
+    target_link_libraries(d1_max_undock_test nav_bridge_d1_max_backend)
+  endif()
   find_package(ament_lint_auto REQUIRED)
   set(ament_cmake_copyright_FOUND TRUE)
   set(ament_cmake_cpplint_FOUND TRUE)
