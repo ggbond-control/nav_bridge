@@ -38,8 +38,8 @@ public:
     BackendResult setSpeed(int speed_level) override;
     bool velocityCommandAllowed() const;
     int bodyHeightState() const;
-    // These methods return success only after the SDK confirms the requested
-    // physical/task state, rather than after the command ACK alone.
+    // Success requires the confirmed SDK task/state, not just a command ACK.
+    // An idle robot can confirm charge exit without issuing an undock task.
     BackendResult startRecharge(int confirmation_timeout_ms);
     BackendResult stopRecharge(int confirmation_timeout_ms);
     BackendResult startUndock(int confirmation_timeout_ms);
@@ -63,6 +63,8 @@ private:
     BackendResult waitForUndockCompleted(uint64_t min_sequence, int timeout_ms);
     BackendResult waitForUndockStopped(uint64_t min_sequence, int timeout_ms);
     bool isChargingLocked() const;
+    bool chargeExitStateConfirmedLocked() const;
+    void logChargeState(const char *phase) const;
     void updateState(const BackendState &state);
 
     std::string host_ip_;
@@ -97,10 +99,14 @@ private:
     // before a synchronous ROS service wakes up.
     uint64_t recharge_stopped_sequence_{0};
     uint64_t undock_success_sequence_{0};
+    std::chrono::steady_clock::time_point undock_success_time_{};
     uint64_t undock_failure_sequence_{0};
     uint32_t undock_failure_error_code_{0};
     uint64_t undock_stopped_sequence_{0};
+    // SDK reports the pile's Bluetooth link, not physical docking.
     bool charging_pile_connected_{false};
+    // STOP or a full battery does not by itself complete an undock.
+    bool undock_required_{false};
     std::chrono::steady_clock::time_point last_basic_state_time_{};
     bool battery1_present_{false};
     bool battery2_present_{false};

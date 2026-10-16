@@ -162,9 +162,12 @@ public:
         ready_srv_ = create_service<std_srvs::srv::Trigger>(
             "~/ready", [this](const std::shared_ptr<std_srvs::srv::Trigger::Request> /*request*/,
                                std::shared_ptr<std_srvs::srv::Trigger::Response> response) {
+                RCLCPP_INFO(get_logger(), "D1 ready request received; calling backend stand");
                 action_in_progress_.store(true);
                 const auto result = backend_->stand();
                 action_in_progress_.store(false);
+                RCLCPP_INFO(get_logger(), "D1 ready request completed: success=%d reason=%s",
+                            result.success, result.message.c_str());
                 fillResponse(response, result);
             });
         gait_srv_ = create_service<rcl_interfaces::srv::SetParameters>(
@@ -234,6 +237,9 @@ public:
         charge_command_srv_ = create_service<rcl_interfaces::srv::SetParameters>(
             "~/charge_command", [this](const std::shared_ptr<rcl_interfaces::srv::SetParameters::Request> request,
                                          std::shared_ptr<rcl_interfaces::srv::SetParameters::Response> response) {
+                const auto started = std::chrono::steady_clock::now();
+                RCLCPP_INFO(get_logger(), "D1 charge service request received: parameters=%zu",
+                            request->parameters.size());
                 rcl_interfaces::msg::SetParametersResult result;
                 if (request->parameters.size() != 1 || request->parameters[0].name != "charge_command") {
                     result.successful = false;
@@ -255,6 +261,8 @@ public:
                     else if (name == "UNDOCK_START") command = 4;
                     else if (name == "UNDOCK_STOP") command = 5;
                 }
+                RCLCPP_INFO(get_logger(), "D1 charge service dispatch: command=%d confirmation_timeout_sec=%d",
+                            command, charge_task_confirmation_timeout_sec_);
                 if (command == 3) {
                     result.successful = true;
                     result.reason = "D1 charge state=" + std::to_string(backend_->chargeState());
@@ -270,6 +278,10 @@ public:
                     result.successful = backend_result.success;
                     result.reason = backend_result.message;
                 }
+                RCLCPP_INFO(get_logger(), "D1 charge service completed: command=%d success=%d elapsed_ms=%lld reason=%s",
+                            command, result.successful,
+                            static_cast<long long>(std::chrono::duration_cast<std::chrono::milliseconds>(
+                                std::chrono::steady_clock::now() - started).count()), result.reason.c_str());
                 response->results.push_back(result);
             });
 
