@@ -13,6 +13,8 @@ nav_bridge_node:
     # Physical charging/undock confirmation wait; D1 may need 30-60 seconds
     # to approach, dock, or leave the charging pile.
     charge_task_confirmation_timeout_sec: 60
+    # Wait for the pile connection before starting recharge (normally 30-60 s).
+    charge_pile_connection_timeout_sec: 90
     # Prefer the navigation host's 200 Hz IMU driver; SDK remains available as a fallback.
     imu_source: "imu_driver"
     imu_driver_topic: "/imu_shm_publisher/imu_central"

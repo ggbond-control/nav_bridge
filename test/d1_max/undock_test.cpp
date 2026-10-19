@@ -11,13 +11,15 @@
 using namespace std::chrono_literals;
 
 // Interpose only the SDK calls exercised here. Real backend callbacks and
-// startUndock() run unchanged, without a robot connection or network commands.
+// charge methods run unchanged, without a robot connection or network commands.
 namespace sdk_charge_test {
 std::weak_ptr<robot_sdk::IDataCallback> callback;
 std::atomic<bool> connected{true};
 std::atomic<int> undock_calls{0};
 std::atomic<int> stop_calls{0};
 std::atomic<int> control_calls{0};
+std::atomic<int> move_calls{0};
+std::atomic<int> recharge_calls{0};
 std::atomic<bool> acknowledge_stop{true};
 std::function<void()> on_stop;
 
@@ -53,6 +55,16 @@ std::error_code SDKClient::TakeControl(int, WriteHandler) {
     ++sdk_charge_test::control_calls;
     return {};
 }
+std::error_code SDKClient::Move(float, float, float, int, WriteHandler) {
+    ++sdk_charge_test::move_calls;
+    return {};
+}
+std::error_code SDKClient::StartRechargeTask(int, WriteHandler) {
+    ++sdk_charge_test::recharge_calls;
+    sdk_charge_test::task(TaskType::RECHARGING, TaskStatus::RUNNING);
+    sdk_charge_test::basic(true, PowerSupplyStatus::CHARGING);
+    return {};
+}
 std::error_code SDKClient::StopRechargeTask(int, WriteHandler) {
     ++sdk_charge_test::stop_calls;
     if (sdk_charge_test::acknowledge_stop)
@@ -83,6 +95,8 @@ protected:
         sdk_charge_test::undock_calls = 0;
         sdk_charge_test::stop_calls = 0;
         sdk_charge_test::control_calls = 0;
+        sdk_charge_test::move_calls = 0;
+        sdk_charge_test::recharge_calls = 0;
         sdk_charge_test::acknowledge_stop = true;
         sdk_charge_test::on_stop = {};
     }
@@ -122,6 +136,76 @@ protected:
         basic(bluetooth, power);
     }
 };
+
+TEST_F(D1MaxUndockTest, RechargeRequiresPileConnectionBeforeAnySdkCommand) {
+    basic(false);
+    const auto result = backend.startRecharge(50, 50);
+    EXPECT_FALSE(result.success);
+    EXPECT_NE(result.message.find("Timed out waiting"), std::string::npos);
+    EXPECT_EQ(sdk_charge_test::control_calls, 0);
+    EXPECT_EQ(sdk_charge_test::move_calls, 0);
+    EXPECT_EQ(sdk_charge_test::recharge_calls, 0);
+}
+
+TEST_F(D1MaxUndockTest, MissingOrStalePileConnectionPreventsRecharge) {
+    const auto missing = backend.startRecharge(50, 50);
+    EXPECT_FALSE(missing.success);
+    EXPECT_NE(missing.message.find("Timed out waiting"), std::string::npos);
+    basic(true);
+    stale();
+    const auto expired = backend.startRecharge(50, 50);
+    EXPECT_FALSE(expired.success);
+    EXPECT_NE(expired.message.find("Timed out waiting"), std::string::npos);
+    EXPECT_EQ(sdk_charge_test::control_calls, 0);
+    EXPECT_EQ(sdk_charge_test::move_calls, 0);
+    EXPECT_EQ(sdk_charge_test::recharge_calls, 0);
+}
+
+TEST_F(D1MaxUndockTest, ConnectedPileStartsRechargeAndConfirmsBatteryCharging) {
+    basic(true);
+    EXPECT_TRUE(backend.startRecharge(50, 50).success);
+    EXPECT_EQ(sdk_charge_test::control_calls, 1);
+    EXPECT_EQ(sdk_charge_test::move_calls, 1);
+    EXPECT_EQ(sdk_charge_test::recharge_calls, 1);
+}
+
+TEST_F(D1MaxUndockTest, ConnectedPileCannotBypassDisconnectedSdk) {
+    basic(true);
+    sdk_charge_test::connected = false;
+    EXPECT_FALSE(backend.startRecharge(50, 50).success);
+    EXPECT_EQ(sdk_charge_test::control_calls, 0);
+    EXPECT_EQ(sdk_charge_test::move_calls, 0);
+    EXPECT_EQ(sdk_charge_test::recharge_calls, 0);
+}
+
+TEST_F(D1MaxUndockTest, RechargeWaitsForPileConnectionBeforeSendingCommands) {
+    basic(false);
+    auto result = std::async(std::launch::async, [this] { return backend.startRecharge(50, 1000); });
+    EXPECT_EQ(result.wait_for(30ms), std::future_status::timeout);
+    basic(false);
+    EXPECT_EQ(result.wait_for(30ms), std::future_status::timeout);
+    EXPECT_EQ(sdk_charge_test::control_calls, 0);
+    EXPECT_EQ(sdk_charge_test::move_calls, 0);
+    EXPECT_EQ(sdk_charge_test::recharge_calls, 0);
+    basic(true);
+    EXPECT_TRUE(result.get().success);
+    EXPECT_EQ(sdk_charge_test::recharge_calls, 1);
+}
+
+TEST_F(D1MaxUndockTest, RechargeWaitsForFirstOrRefreshedPileState) {
+    auto first = std::async(std::launch::async, [this] { return backend.startRecharge(50, 1000); });
+    EXPECT_EQ(first.wait_for(30ms), std::future_status::timeout);
+    basic(true);
+    EXPECT_TRUE(first.get().success);
+
+    stale();
+    auto refreshed = std::async(std::launch::async, [this] { return backend.startRecharge(50, 1000); });
+    EXPECT_EQ(refreshed.wait_for(30ms), std::future_status::timeout);
+    EXPECT_EQ(sdk_charge_test::recharge_calls, 1);
+    basic(true);
+    EXPECT_TRUE(refreshed.get().success);
+    EXPECT_EQ(sdk_charge_test::recharge_calls, 2);
+}
 
 TEST_F(D1MaxUndockTest, StandingOffDockWithBluetoothNeedsNoSdkCommand) {
     basic(true);

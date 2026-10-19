@@ -597,8 +597,19 @@ BackendResult D1MaxBackend::setSpeed(int speed_level) {
     return result;
 }
 
-BackendResult D1MaxBackend::startRecharge(int confirmation_timeout_ms) {
+BackendResult D1MaxBackend::startRecharge(int confirmation_timeout_ms, int pile_connection_timeout_ms) {
     if (!client_ || !client_->IsConnected()) return {false, "D1 SDK is not connected."};
+    {
+        std::unique_lock<std::mutex> lock(mutex_);
+        if (!motion_cv_.wait_for(lock, std::chrono::milliseconds(std::max(1, pile_connection_timeout_ms)), [&] {
+                return charging_pile_connected_ &&
+                    last_basic_state_time_ != std::chrono::steady_clock::time_point{} &&
+                    std::chrono::steady_clock::now() - last_basic_state_time_ < std::chrono::seconds(5);
+            })) {
+            return {false, "Timed out waiting for D1 charging pile connection; recharge was not started."};
+        }
+    }
+    if (!client_->IsConnected()) return {false, "D1 SDK is not connected."};
     auto control = takeControl();
     if (!control.success) return control;
     auto stop = fromError(client_->Move(0.0F, 0.0F, 0.0F, connect_timeout_ms_));

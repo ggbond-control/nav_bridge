@@ -35,6 +35,8 @@ public:
         cmd_vel_timeout_ms_ = declare_parameter<int>("cmd_vel_timeout_ms", 500);
         charge_task_confirmation_timeout_sec_ =
             declare_parameter<int>("charge_task_confirmation_timeout_sec", 60);
+        charge_pile_connection_timeout_sec_ =
+            declare_parameter<int>("charge_pile_connection_timeout_sec", 90);
         imu_source_ = declare_parameter<std::string>("imu_source", "imu_driver");
         imu_driver_topic_ = declare_parameter<std::string>("imu_driver_topic", "/imu_driver/imu_central");
         if (imu_source_ != "imu_driver" && imu_source_ != "sdk") {
@@ -261,8 +263,8 @@ public:
                     else if (name == "UNDOCK_START") command = 4;
                     else if (name == "UNDOCK_STOP") command = 5;
                 }
-                RCLCPP_INFO(get_logger(), "D1 charge service dispatch: command=%d confirmation_timeout_sec=%d",
-                            command, charge_task_confirmation_timeout_sec_);
+                RCLCPP_INFO(get_logger(), "D1 charge service dispatch: command=%d confirmation_timeout_sec=%d pile_connection_timeout_sec=%d",
+                            command, charge_task_confirmation_timeout_sec_, charge_pile_connection_timeout_sec_);
                 if (command == 3) {
                     result.successful = true;
                     result.reason = "D1 charge state=" + std::to_string(backend_->chargeState());
@@ -270,7 +272,8 @@ public:
                     BackendResult backend_result;
                     const int confirmation_timeout_ms =
                         std::max(1, charge_task_confirmation_timeout_sec_) * 1000;
-                    if (command == 0) backend_result = backend_->startRecharge(confirmation_timeout_ms);
+                    if (command == 0) backend_result = backend_->startRecharge(
+                        confirmation_timeout_ms, std::max(1, charge_pile_connection_timeout_sec_) * 1000);
                     else if (command == 1) backend_result = backend_->stopRecharge(confirmation_timeout_ms);
                     else if (command == 4) backend_result = backend_->startUndock(confirmation_timeout_ms);
                     else if (command == 5) backend_result = backend_->stopUndock(confirmation_timeout_ms);
@@ -374,6 +377,7 @@ private:
     int cmd_vel_rate_hz_{50};
     int cmd_vel_timeout_ms_{500};
     int charge_task_confirmation_timeout_sec_{60};
+    int charge_pile_connection_timeout_sec_{90};
     std::string imu_source_{"imu_driver"};
     std::string imu_driver_topic_{"/imu_driver/imu_central"};
     mutable std::mutex state_mutex_;

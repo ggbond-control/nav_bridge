@@ -40,7 +40,7 @@ public:
     int bodyHeightState() const;
     // Success requires the confirmed SDK task/state, not just a command ACK.
     // An idle robot can confirm charge exit without issuing an undock task.
-    BackendResult startRecharge(int confirmation_timeout_ms);
+    BackendResult startRecharge(int confirmation_timeout_ms, int pile_connection_timeout_ms);
     BackendResult stopRecharge(int confirmation_timeout_ms);
     BackendResult startUndock(int confirmation_timeout_ms);
     BackendResult stopUndock(int confirmation_timeout_ms);
