@@ -394,6 +394,44 @@ TEST_F(D1MaxUndockTest, ConfirmedExitClearsHistoricalFailureForExecutorIdleCheck
     EXPECT_EQ(backend.chargeState(), 0);
 }
 
+TEST_F(D1MaxUndockTest, ConfirmedDisconnectedExitPublishesIdleDespiteRetainedChargingBit) {
+    basic(false, PowerSupplyStatus::CHARGING);
+    task(TaskType::RECHARGING, TaskStatus::FAILURE);
+    ASSERT_TRUE(backend.startUndock(50).success);
+    EXPECT_EQ(backend.chargeState(), 0);
+    basic(false, PowerSupplyStatus::CHARGING);
+    EXPECT_EQ(backend.chargeState(), 0);
+    EXPECT_FALSE(required());
+    EXPECT_EQ(sdk_charge_test::undock_calls, 0);
+    basic(true, PowerSupplyStatus::CHARGING);
+    EXPECT_TRUE(required());
+    EXPECT_NE(backend.chargeState(), 0);
+}
+
+TEST_F(D1MaxUndockTest, NewSdkActivityInvalidatesConfirmedExitEvenWithoutBluetooth) {
+    basic(false, PowerSupplyStatus::CHARGING);
+    ASSERT_TRUE(backend.startUndock(50).success);
+    task(TaskType::UNDOCK, TaskStatus::RUNNING);
+    EXPECT_EQ(backend.chargeState(), 3);
+    auto result = exit();
+    EXPECT_EQ(result.wait_for(20ms), std::future_status::timeout);
+    succeed(false, PowerSupplyStatus::CHARGING);
+    ASSERT_TRUE(result.get().success);
+    EXPECT_EQ(backend.chargeState(), 0);
+    basic(false, PowerSupplyStatus::CHARGING);
+    EXPECT_EQ(backend.chargeState(), 0);
+    task(TaskType::RECHARGING, TaskStatus::RUNNING);
+    EXPECT_NE(backend.chargeState(), 0);
+}
+
+TEST_F(D1MaxUndockTest, StaleTelemetryCannotReuseConfirmedExitAsIdle) {
+    basic(false, PowerSupplyStatus::CHARGING);
+    ASSERT_TRUE(backend.startUndock(50).success);
+    stale();
+    EXPECT_NE(backend.chargeState(), 0);
+    EXPECT_FALSE(backend.startUndock(50).success);
+}
+
 TEST_F(D1MaxUndockTest, CompletedUndockCannotSatisfyLaterFullBatteryChargeSession) {
     beginUndock();
     auto first = exit();

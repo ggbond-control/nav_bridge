@@ -58,7 +58,9 @@ public:
                 static_cast<int>(data.battery.power_supply_status1);
             owner_.battery2_power_supply_status_ =
                 static_cast<int>(data.battery.power_supply_status2);
-            if (owner_.isChargingLocked() || data.machine_status == robot_sdk::MachineStatus::RECHARGE)
+            if (!owner_.chargeExitStateConfirmedLocked()) owner_.charge_exit_confirmed_ = false;
+            if (!owner_.charge_exit_confirmed_ &&
+                (owner_.isChargingLocked() || data.machine_status == robot_sdk::MachineStatus::RECHARGE))
                 owner_.undock_required_ = true;
         }
         state.control_owned = data.control_source == robot_sdk::CtrlSource::CTRL_SOURCE_SDK;
@@ -92,8 +94,10 @@ public:
                  data.task_type == robot_sdk::TaskType::UNDOCK) &&
                 (data.task_status == robot_sdk::TaskStatus::STARTING ||
                  data.task_status == robot_sdk::TaskStatus::RUNNING ||
-                 data.task_status == robot_sdk::TaskStatus::FAILURE))
+                 data.task_status == robot_sdk::TaskStatus::FAILURE)) {
+                owner_.charge_exit_confirmed_ = false;
                 owner_.undock_required_ = true;
+            }
             if (data.task_type == robot_sdk::TaskType::RECHARGING &&
                 data.task_status == robot_sdk::TaskStatus::STOPPED) {
                 owner_.recharge_stopped_sequence_ = sequence;
@@ -617,6 +621,7 @@ BackendResult D1MaxBackend::startRecharge(int confirmation_timeout_ms, int pile_
     uint64_t sequence;
     {
         std::lock_guard<std::mutex> lock(mutex_);
+        charge_exit_confirmed_ = false;
         sequence = task_state_sequence_;
     }
     const auto start = fromError(client_->StartRechargeTask(connect_timeout_ms_));
@@ -711,6 +716,7 @@ BackendResult D1MaxBackend::startUndock(int confirmation_timeout_ms) {
         // only after active SDK tasks above have completed or stopped.
         if (chargeExitStateConfirmedLocked() && (!charging_pile_connected_ || !undock_required_)) {
             undock_required_ = false;
+            charge_exit_confirmed_ = true;
             undock_success_sequence_ = 0;
             std::fprintf(stderr, "[D1 charge] branch=already_exited; no SDK undock command\n");
             return {true, "D1 charge exit confirmed; no undock task needed."};
@@ -732,6 +738,7 @@ BackendResult D1MaxBackend::startUndock(int confirmation_timeout_ms) {
     {
         std::lock_guard<std::mutex> lock(mutex_);
         undock_required_ = true;
+        charge_exit_confirmed_ = false;
         sequence = task_state_sequence_;
     }
     std::fprintf(stderr, "[D1 charge] calling SDK StartUnDockTask timeout_ms=%d\n", connect_timeout_ms_);
@@ -834,6 +841,7 @@ BackendResult D1MaxBackend::waitForUndockCompleted(uint64_t min_sequence, int ti
             last_basic_state_time_ >= std::max(started, undock_success_time_) &&
             chargeExitStateConfirmedLocked()) {
             undock_required_ = false;
+            charge_exit_confirmed_ = true;
             // This terminal event has completed its handoff. A later charge
             // session must not reuse it to skip its own physical undock.
             undock_success_sequence_ = 0;
@@ -878,6 +886,10 @@ int D1MaxBackend::chargeState() const {
     std::lock_guard<std::mutex> lock(mutex_);
     using robot_sdk::TaskStatus;
     using robot_sdk::TaskType;
+    // Use the same confirmed handoff condition as command 4. In particular,
+    // disconnected pile Bluetooth can coexist with a retained CHARGING bit.
+    // New SDK charge/undock activity or contradictory telemetry invalidates it.
+    if (charge_exit_confirmed_ && chargeExitStateConfirmedLocked()) return 0;
     // SDK can retain the last task's failure after a confirmed charge exit.
     if (undock_required_ && task_status_ == static_cast<int>(TaskStatus::FAILURE)) return 4;
     if (task_type_ == static_cast<int>(TaskType::UNDOCK) &&

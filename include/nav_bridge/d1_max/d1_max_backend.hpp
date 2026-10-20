@@ -107,6 +107,7 @@ private:
     bool charging_pile_connected_{false};
     // STOP or a full battery does not by itself complete an undock.
     bool undock_required_{false};
+    bool charge_exit_confirmed_{false};
     std::chrono::steady_clock::time_point last_basic_state_time_{};
     bool battery1_present_{false};
     bool battery2_present_{false};
