@@ -18,7 +18,7 @@ def launch_node(context):
     if robot_type == 'x30':
         executable = 'x30_nav_bridge_node'
         params_file = os.path.join(pkg_dir, 'config', 'x30_params.yaml')
-    elif robot_type == 'd1_max':
+    elif robot_type in ('d1m', 'd1_max'):
         executable = 'd1_max_nav_bridge_node'
         params_file = os.path.join(pkg_dir, 'config', 'd1_max_params.yaml')
     elif robot_type == 'cyvet':
