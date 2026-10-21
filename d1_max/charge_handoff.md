@@ -18,6 +18,10 @@
 修改只在 D1 backend 内，上层服务、调用顺序、步态实现及 X30 backend 不变。
 日志中的 `pile_bluetooth_connected` 明确表示蓝牙连接。
 
+充电命令（含 `3 / QUERY`）串行执行。若 START 的响应在传输层丢失，上层可等待一个成功的 QUERY 响应确认前一服务调用已收尾，然后发送 `4 / UNDOCK_START`；QUERY 成功本身不表示脱桩完成。X30 的充电服务也使用相同的串行约束。
+
+D1 bringup 的充电服务等待为 180 秒，覆盖蓝牙连接 90 秒、充电确认 60 秒及 SDK 调用余量。D1 systemd 配置通过 `ZENOH_CONFIG_OVERRIDE=queries_default_timeout=600000` 将会话查询超时设为 600 秒，覆盖独立交接及取消收尾；现有备份的 session/router 同样调整为 600 秒。更新 `config/models/d1m/services.yaml` 后，需用 bringup 服务管理脚本重新安装服务包装脚本使环境变量生效；仅重新编译节点不足以更新已安装包装脚本。
+
 本地验证：
 
 ```bash

@@ -1,6 +1,6 @@
 {
   mode: "router",
-  queries_default_timeout: 120000,
+  queries_default_timeout: 180000,
   listen: {
     endpoints: [
       "tcp/0.0.0.0:7447"

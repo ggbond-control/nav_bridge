@@ -1,5 +1,5 @@
 {
-  "queries_default_timeout": 120000,
+  "queries_default_timeout": 180000,
   "transport": {
     "shared_memory": {
       "enabled": false

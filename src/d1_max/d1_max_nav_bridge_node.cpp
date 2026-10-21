@@ -239,6 +239,9 @@ public:
         charge_command_srv_ = create_service<rcl_interfaces::srv::SetParameters>(
             "~/charge_command", [this](const std::shared_ptr<rcl_interfaces::srv::SetParameters::Request> request,
                                          std::shared_ptr<rcl_interfaces::srv::SetParameters::Response> response) {
+                // QUERY also takes this lock, allowing an upper caller to
+                // synchronize after a previous service response was lost.
+                std::lock_guard<std::mutex> charge_lock(charge_service_mutex_);
                 const auto started = std::chrono::steady_clock::now();
                 RCLCPP_INFO(get_logger(), "D1 charge service request received: parameters=%zu",
                             request->parameters.size());
@@ -400,6 +403,7 @@ private:
     rclcpp::Service<std_srvs::srv::Trigger>::SharedPtr stand_srv_, lie_srv_, estop_srv_, release_srv_, ready_srv_;
     rclcpp::Service<rcl_interfaces::srv::SetParameters>::SharedPtr gait_srv_, speed_srv_;
     rclcpp::Service<rcl_interfaces::srv::SetParameters>::SharedPtr body_height_srv_, charge_command_srv_;
+    std::mutex charge_service_mutex_;
     rclcpp::TimerBase::SharedPtr timer_;
 };
 
