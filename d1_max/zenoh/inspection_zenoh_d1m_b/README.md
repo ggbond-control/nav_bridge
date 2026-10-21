@@ -1,125 +1,30 @@
-# D1M-B Inspection Zenoh Service
+# D1M-A Zenoh 部署配置备份
 
-This directory is the deployment backup for `inspection-zenoh.service` on:
+本目录当前保存 **D1M-A** 的配置快照，覆盖前的 D1M-B 备份已归档。
+目录名 `inspection_zenoh_d1m_b` 按要求保留；当前配置来源以本说明和 `backup_record.json` 为准。
 
-```text
-D1M-B: cat@10.0.40.195
-```
+- 来源：`cat@47.99.202.196:20004`，主机名 `ZN`。
+- 采集时间：`2026-10-21T10:28:42.093597+00:00`。
+- 本次仅只读获取设备配置；没有修改设备文件或重启服务。
+- 覆盖前本地完整备份（不递归复制已有 `originals`）：[`originals/20261021T102843Z_before_d1m_a_overwrite/`](originals/20261021T102843Z_before_d1m_a_overwrite/)。已有历史归档保留。
 
-The service runs the Jazzy `rmw_zenohd` router as user `cat`. It listens on
-TCP port `7447` and connects to the D1 navigation host router at
-`192.168.168.100:7447`.
+| 本地文件 | D1M-A 原始路径 |
+|---|---|
+| `router_config.json5` | `/home/cat/Workspace/zenoh_ws/router_config.json5` |
+| `session_config.json5` | `/home/cat/Workspace/zenoh_ws/session_config.json5` |
+| `inspection-zenoh.service` | `/etc/systemd/system/inspection-zenoh.service` |
+| `inspection-zenoh.service.d/priority.conf` | `/etc/systemd/system/inspection-zenoh.service.d/priority.conf` |
 
-## Domain
+## 当前配置
 
-At deployment, D1M-B's interactive `~/.zshrc` resolved these values:
+- 中间件：`rmw_zenoh_cpp`，服务：`inspection-zenoh.service`。
+- Router：查询超时 `120000` ms；监听 `tcp/0.0.0.0:7447`；连接 `tcp/192.168.168.100:7447`；multicast 和 gossip 均关闭；adminspace 启用。
+- Session：查询超时 `120000` ms；连接 `tcp/127.0.0.1:7447`；共享内存关闭；没有显式配置 scouting 或固定 `eth1`。
+- 服务环境：`ROS_DOMAIN_ID=28`；设备业务进程此前只读核查为 `ROS_DOMAIN_ID=24`。备份保留设备原始值。
+- 服务优先级：`Nice=-5`、`CPUWeight=600`。
 
-```text
-ROS_DOMAIN_ID=28
-RMW_IMPLEMENTATION=rmw_zenoh_cpp
-ZENOH_ROUTER_CONFIG_URI=/home/cat/Workspace/zenoh_ws/router_config.json5
-ZENOH_SESSION_CONFIG_URI=/home/cat/Workspace/zenoh_ws/session_config.json5
-```
+逐文件 SHA-256、来源路径、源文件修改时间及采集时服务状态见 [`backup_record.json`](backup_record.json)。四个部署文件均按设备原始字节保存，并在覆盖前再次核验源文件哈希。
 
-Systemd does not source an interactive shell configuration. The unit therefore
-sets the same values explicitly. If D1M-B's `~/.zshrc` later changes its ROS
-domain, update `Environment=ROS_DOMAIN_ID=...` in the unit to the new value and
-restart the service.
+## 历史记录
 
-## Install Or Restore
-
-```bash
-sudo install -o root -g root -m 0644 inspection-zenoh.service \
-  /etc/systemd/system/inspection-zenoh.service
-sudo install -d -o root -g root -m 0755 \
-  /etc/systemd/system/inspection-zenoh.service.d
-sudo install -o root -g root -m 0644 inspection-zenoh.service.d/priority.conf \
-  /etc/systemd/system/inspection-zenoh.service.d/priority.conf
-sudo install -o cat -g cat -m 0644 router_config.json5 \
-  /home/cat/Workspace/zenoh_ws/router_config.json5
-sudo install -o cat -g cat -m 0644 session_config.json5 \
-  /home/cat/Workspace/zenoh_ws/session_config.json5
-sudo systemctl daemon-reload
-sudo systemctl enable inspection-zenoh.service
-sudo systemctl restart inspection-zenoh.service
-```
-
-## Verify
-
-```bash
-systemctl status inspection-zenoh.service --no-pager
-systemctl is-enabled inspection-zenoh.service
-systemctl show inspection-zenoh.service -p Nice -p CPUWeight
-ss -ltnp | grep ':7447'
-sudo journalctl -u inspection-zenoh.service -n 100 --no-pager
-```
-
-The router process must be owned by `cat`; do not additionally start
-`ros2 run rmw_zenoh_cpp rmw_zenohd` in an SSH shell, because it would conflict
-with the service on port `7447`.
-
-The priority drop-in sets `Nice=-5` and `CPUWeight=600`. On D1M-B, this keeps
-Zenoh below localization/navigation (`Nice=-10`) but above the gimbal
-(`Nice=5`). Restarting Zenoh briefly interrupts ROS connections.
-
-## Deployment Result: 2026-09-22
-
-The service was installed, enabled, and verified active on D1M-B. Its router
-listens on `0.0.0.0:7447` and its process environment has
-`ROS_DOMAIN_ID=28`, matching the value resolved from D1M-B's `~/.zshrc`.
-
-At verification time, D1M-B had only `wlan0` (`10.0.40.195/24`) and a default
-route through `10.0.40.1`. It had no interface or route in
-`192.168.168.0/24`, so its configured NX connection
-`192.168.168.100:7447` remained in `SYN-SENT`. By comparison, D1M-A reaches
-that NX address over `eth0` from `192.168.168.111`.
-
-The systemd deployment is correct, but D1M-B cannot exchange ROS traffic with
-the NX router until its own NX network is connected and routed, or until
-`router_config.json5` is updated with D1M-B's actual reachable NX endpoint.
-
-## Session Configuration Fix: 2026-10-15
-
-The deployment copy `session_config.json5` now matches the validated D1M-B
-configuration: multicast scouting stays enabled and uses only `eth1`
-(`192.168.168.111/24` at verification). This avoids creating discovery sockets
-on transient Wi-Fi/cellular addresses, which caused `Unable to send Hello`
-after an address disappeared. The router configuration and systemd files are
-unchanged.
-
-The original session configuration is preserved byte-for-byte in
-[`originals/20261015_before_eth1/session_config.json5`](originals/20261015_before_eth1/session_config.json5).
-Validation results and limitations are recorded in
-[`reports/20261015_eth1.md`](reports/20261015_eth1.md).
-The original device-side configuration and full evidence are under
-`/home/cat/Workspace/zenoh_ws/validation/20261015_eth1`.
-
-Validation retained all 76 nodes and 328 topics and passed topic, service,
-action and QoS interoperability checks with both original and updated clients.
-No business process or router was restarted. Observed brief message gaps also
-occurred in the original-only control; the checks do not guarantee zero jitter.
-Wi-Fi/cellular multicast discovery is excluded by this configuration. Actual
-network switching was not tested.
-
-For this session-only fix, install only the session file on D1M-B:
-
-```bash
-sudo install -o cat -g cat -m 0644 session_config.json5 \
-  /home/cat/Workspace/zenoh_ws/session_config.json5
-```
-
-Existing ROS processes retain their startup configuration. They load this file
-on their next restart; existing processes may continue to log Hello errors
-until then. A router restart is not required for this session-only update.
-
-To restore the original session configuration, run from this backup directory
-on D1M-B:
-
-```bash
-sudo install -o cat -g cat -m 0644 \
-  originals/20261015_before_eth1/session_config.json5 \
-  /home/cat/Workspace/zenoh_ws/session_config.json5
-```
-
-Rollback likewise takes effect when ROS processes next start. This backup
-update itself does not restart any device processes.
+`reports/20261015_eth1.md` 及 `originals/20261015_before_eth1/` 是此前 D1M-B 的历史材料，不代表当前 D1M-A 配置。原始 D1M-B README 和全部覆盖前文件已存入上述归档目录。
