@@ -74,7 +74,8 @@ launch 优先继承终端 XML；没有环境配置时使用包内 `config/cyvet_
 
 NetworkManager 连接 `cyvet-link` 使用静态有线地址、自动连接、never-default，
 保留 Wi-Fi 管理默认路由。机器人外部网口不提供 DHCP。
-业务 XML 的环回/大消息配置限定于 Domain 81，机器人域 42 绑定 eth1 并开启多播。
+业务 XML 的环回/大消息配置限定于 Domain 81，机器人域 42 绑定 eth1；
+当前 A 只开启发现多播，见下面的双机配置。
 当前业务域只能从板端访问，远程操作通过 SSH 到开发板。
 
 DDS 还会广播机器人 Wi-Fi locator。绑定 eth1 不等于所有远端单播都从 eth1 发出，
@@ -99,9 +100,79 @@ sudo nmcli connection modify cyvet-link +ipv4.routes '10.0.40.244/32 169.254.216
 sudo nmcli device reapply eth1
 ```
 
-机器人 IP 变化时须更新路由。该跨接口访问方案只在本设备验证。
+机器人 IP 变化时须更新路由。该跨接口访问方案不能作为所有设备的通用配置；
+2026-10-13 双机测试中，A 在关闭底盘 Wi-Fi 并限制 DDS 发现后仍需保留该路由。
 移除该路由可把 `+ipv4.routes` 改为 `-ipv4.routes` 后 reapply。
 此前尝试 prefer_multicast=true 导致 RPC 全部失败，没有采用。
+
+### 双机部署与有线隔离（2026-10-13）
+
+机器人协议域保持 42，不能仅修改开发板域号而不修改服务端。
+业务域使用 A=81、B=82；`~/.zshrc` 的 `ROS_DOMAIN_ID` 必须与
+`~/Config/cyclonedds_large_message.xml` 的业务 Domain 一致。
+业务 Domain 保留原有环回、大消息缓冲配置，机器人 Domain 单独配置。
+
+Cyvet-B：SN `E03C1CBAB5C3A101`，机器人有线 `169.254.181.195`，
+开发板 eth1 `169.254.181.1/16`。B 已验证并持久化以下机器人域配置：
+
+```xml
+<Domain Id="42">
+  <General>
+    <Interfaces><NetworkInterface name="eth1" presence_required="true"/></Interfaces>
+    <AllowMulticast>false</AllowMulticast>
+    <DontRoute>true</DontRoute>
+  </General>
+  <Discovery>
+    <ParticipantIndex>auto</ParticipantIndex>
+    <Peers><Peer Address="169.254.181.195:17910"/></Peers>
+  </Discovery>
+</Domain>
+```
+
+`DontRoute` 排除非直连网段的远端 locator；单独绑定 eth1 或关闭多播不足以做到这一点。
+显式 Peer 将开发板发现目标限定为本机有线地址。端口 17910 来自当前 Domain 42、
+机器人实际广播的元数据单播 locator；服务端端口变化时须重新抓包确认。
+关闭开发板 Wi-Fi 不等于关闭机器人本体 Wi-Fi；B 查询仍曾显示底盘 Wi-Fi 在线。
+仅在开发板侧限制发现也不能隔离机器人之间的无线发现。
+
+双机开机时，B 连续只读 RPC 16+32 次成功；实际桥接节点只读启动收到电量和 IMU，
+没有取权。原业务 XML 中错误的 Domain 81 已改为 82。
+配置修改前的副本为 `~/Config/cyclonedds_large_message.xml.before-dual-cyvet-20261013`。
+修改 XML 后须重启读取该文件的进程，新建节点才使用新配置。
+
+A、B 抓包的机器人 GUID 不同。A 有线 ping 正常且能收到 SPDP 广播，
+但早期测试无法完成服务发现。现场关闭两台底盘 Wi-Fi 后，A、B 原配置均恢复查询；
+同时 A 仍不能采用 B 的纯单播与 `DontRoute=true` 配置。
+A 已验证 32 次连续查询的配置如下；保留前述 Wi-Fi 地址经有线网关访问的路由。
+这里的 Wi-Fi 地址是服务公布的 locator，不表示开发板恢复使用无线链路。
+
+```xml
+<Domain Id="42">
+  <General>
+    <Interfaces><NetworkInterface name="eth1" presence_required="true"/></Interfaces>
+    <AllowMulticast>spdp</AllowMulticast>
+  </General>
+  <Discovery>
+    <ParticipantIndex>auto</ParticipantIndex>
+    <Peers><Peer Address="169.254.216.210:17910"/></Peers>
+  </Discovery>
+</Domain>
+```
+
+A 只允许 eth1 上的参与者发现多播，数据使用单播；默认 `DontRoute=false`，
+否则会丢弃其实际仍需访问的非直连 locator。A 配置同样保存于原有 XML，备份文件名同 B。
+两台均保持底盘 Wi-Fi 关闭，通过独立有线链路通信；5G 隧道仅用于管理开发板。
+不能仅根据域号相同认定根因，也不能把 B 的纯有线配置直接复制给 A。
+尚未检查固件内部的 DDS 监听、路由与无线转发；重新开启底盘 Wi-Fi 的并存行为未验收。
+A 临时备用地址已删除。以上验证均未发送站立或速度指令。
+
+最终两台真实节点同时运行，连续三轮重新启动，每轮只读观测 20 秒：
+A、B 各收到 603 条电量及约 2960 条 IMU；设备编号各自正确，未取权、未发生 RPC 错误。
+A 的 navigation_supervisor 环境已核对为 Domain 81 和上述原有 XML 路径，
+后续启动桥接会读取更新配置。本次未调用 `/navigation_bringup/start`，
+因其会继续调用 stand；导航运动和断电后的恢复仍需现场复验。
+官方大脑登录示例使用 `develop`；A 提供的 App 密码尝试登录被拒绝，
+不能作为已确认的 SSH 凭据。密码未写入本仓库或交付文档。
 
 ## 控制语义与 ROS 接口
 
