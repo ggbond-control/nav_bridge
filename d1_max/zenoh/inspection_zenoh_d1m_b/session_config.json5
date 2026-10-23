@@ -1,13 +1,33 @@
 {
-  queries_default_timeout: 120000,
+  mode: "peer",
+
+  queries_default_timeout: 180000,
+
   transport: {
     shared_memory: {
       enabled: false
     }
   },
+
   connect: {
     endpoints: [
       "tcp/127.0.0.1:7447"
     ]
+  },
+
+  listen: {
+    endpoints: [
+      "tcp/192.168.168.111:0"
+    ]
+  },
+
+  scouting: {
+    multicast: {
+      enabled: true,
+      interface: "eth1"
+    },
+    gossip: {
+      enabled: false
+    }
   }
 }
