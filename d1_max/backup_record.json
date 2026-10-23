@@ -1,0 +1,174 @@
+{
+  "schema_version": 1,
+  "local_sync_at_utc": "2026-10-23T06:34:28.967268+00:00",
+  "baseline_date": "2026-10-23",
+  "scope": "Configuration, wrappers, documentation and robot-launch snapshots only. Cloud source and CV applications/models/runtime dependencies are backed up separately.",
+  "remote_access_during_local_sync": false,
+  "sources": {
+    "zenoh": "zenoh/inspection_zenoh_d1m_b/backup_record.json",
+    "A_robot_launch": {
+      "remote_path": "/home/robot/.robot_egg_launch.yaml",
+      "local_source": "/tmp/d1m-migration-20261023/A-nx-before.txt",
+      "method": "Extracted final eggs mapping from pre-migration audit. All 19 A eggs remained unchanged, as verified by the migration summary.",
+      "snapshot": "robot_launch/robot_supervisor/snapshots/20261023/D1M-A.robot_egg_launch.yaml"
+    },
+    "B_robot_launch": {
+      "remote_path": "/home/robot/.robot_egg_launch.yaml",
+      "local_source": "/home/jazzy/d1m_migration_20261023/B-robot_egg_launch-current.yaml",
+      "snapshot": "robot_launch/robot_supervisor/snapshots/20261023/D1M-B.robot_egg_launch.yaml"
+    },
+    "standalone_eggs": "/home/jazzy/d1m_migration_20261023/B-egg-{name}.yaml",
+    "CV_wrappers": {
+      "host": "D1M-A NX; copied unchanged to D1M-B NX during migration",
+      "remote_directory": "/home/robot/CV/bin",
+      "local_source": "/tmp/d1m-migration-20261023/A-nx-payload.tar.gz",
+      "method": "Only the two detector shell scripts were read and copied; Java wrappers retained and confirmed identical. No application, model, environment archive or secret configuration was added."
+    },
+    "cloud_start_script": "Existing local backup retained; previously verified against A during migration.",
+    "proxy": "Existing implementation retained; used for B deployment. README corrected for A/B targets.",
+    "migration_verification": "/home/jazzy/d1m_migration_20261023/verification-summary.json"
+  },
+  "historical_policy": "Existing originals/reports/legacy/before-cloud-merge content unchanged. Pre-sync main unit/README and supervisor YAML additionally archived under originals/20261023_*.",
+  "files": [
+    {
+      "file": "README.md",
+      "sha256": "d629d7c80065be1db6c40bdd67e40c63bd3c265f3f1dd6f8380276f9b643a523",
+      "bytes": 3314
+    },
+    {
+      "file": "nx-net-proxy/README.md",
+      "sha256": "2dabd61bf6275eab54894441970b5700ddfb902a2933526a6de1511bcf4f5a41",
+      "bytes": 5301
+    },
+    {
+      "file": "nx-net-proxy/install.sh",
+      "sha256": "a339e97e20ff99ffe6c71bfcfc8c267d6e5a1365a68b5201f443e0c0402a7522",
+      "bytes": 1093
+    },
+    {
+      "file": "nx-net-proxy/nx-net-proxy.service",
+      "sha256": "643cd863ac40ffb59cfa6585efeaec6e509f127449740631c7eb412db592d0be",
+      "bytes": 520
+    },
+    {
+      "file": "nx-net-proxy/proxy.py-2.4.10-py3-none-any.whl",
+      "sha256": "ef3a31f6ef3be6ff78559c0e68198523bfe2fb1e820bb16686750c1bb5baf9e8",
+      "bytes": 227130
+    },
+    {
+      "file": "nx-net-proxy/run.sh",
+      "sha256": "3a4628f1eb1b2e0329242a456752c5e82a5fd94890d84fbb7f4b05855044ef55",
+      "bytes": 542
+    },
+    {
+      "file": "nx-net-proxy/start.sh",
+      "sha256": "a63da94e65370c44bc35253e09169059443518232c8f6faa7d8b4bb6e054707f",
+      "bytes": 218
+    },
+    {
+      "file": "nx-net-proxy/stop.sh",
+      "sha256": "ba3a385b40b6ea184f0dc08ec4b00063ae08e65215ed96b7772fb2854f4e4977",
+      "bytes": 142
+    },
+    {
+      "file": "robot_launch/README.md",
+      "sha256": "a76927d82600ecf7b2c605e66a15ec27d7d135a2424301d6d07d074a75d7e287",
+      "bytes": 5554
+    },
+    {
+      "file": "robot_launch/cv_services/README.md",
+      "sha256": "d25f81747542963090186c1ae28991d7a29cbfbaab43a4483d066ac5df14a462",
+      "bytes": 3712
+    },
+    {
+      "file": "robot_launch/cv_services/robot_egg_entries.yaml",
+      "sha256": "2dcb883ae420dfabd8e8a4dfc0e81dd7c6856e0e0c9ff6f8e81aec45a2ed5ed3",
+      "bytes": 1093
+    },
+    {
+      "file": "robot_launch/cv_services/run_algorithm_center.sh",
+      "sha256": "1fadc97d82ac3d21217d7ab09ea085e3a5a04ac9a5db12636bd196b78f65e9fd",
+      "bytes": 190
+    },
+    {
+      "file": "robot_launch/cv_services/run_cable_damage_detect.sh",
+      "sha256": "99b14259609e1e94711847e3f2c20762386636d23fbe7711e82f11639778557c",
+      "bytes": 930
+    },
+    {
+      "file": "robot_launch/cv_services/start_algorithm_center.sh",
+      "sha256": "c8ae9775a1caa6ff6f26b6bca48789423e87e98b4e2514d1a6ddab712cb03bb2",
+      "bytes": 421
+    },
+    {
+      "file": "robot_launch/cv_services/start_cable_damage_detect.sh",
+      "sha256": "f162e12f30d5edfd677760ed07a4dbc2631050d55fe6ae990ef3a376cd170da1",
+      "bytes": 428
+    },
+    {
+      "file": "robot_launch/eggs/algorithm-center.yaml",
+      "sha256": "4b4cf25dad24f80276b36725876c9403fa4414bd48e5f92f0bec473965f9e5a9",
+      "bytes": 302
+    },
+    {
+      "file": "robot_launch/eggs/cable-damage-detect.yaml",
+      "sha256": "f590907fbcd84d0da35b854ce1f366b400552a26b03ee392c45a1cbfc0b0ec66",
+      "bytes": 314
+    },
+    {
+      "file": "robot_launch/eggs/cloud-merge.yaml",
+      "sha256": "e240e8fba620d4f0a8fc1d9907b11bb6919f5686ee5acb21b8cd35e7d278ccee",
+      "bytes": 299
+    },
+    {
+      "file": "robot_launch/robot_supervisor/robot_egg_launch.yaml",
+      "sha256": "83f1b9d990a405aa2769624e9151eacde49ec6fa5b67a56ab55da3e74d9f04e2",
+      "bytes": 5252
+    },
+    {
+      "file": "robot_launch/robot_supervisor/snapshots/20261023/D1M-A.robot_egg_launch.yaml",
+      "sha256": "83f1b9d990a405aa2769624e9151eacde49ec6fa5b67a56ab55da3e74d9f04e2",
+      "bytes": 5252
+    },
+    {
+      "file": "robot_launch/robot_supervisor/snapshots/20261023/D1M-B.robot_egg_launch.yaml",
+      "sha256": "89c08981ea725f6ef7aec7ebbd254e9044455b9d73fb7653582d83b7a1d37deb",
+      "bytes": 5020
+    },
+    {
+      "file": "robot_launch/start_cloud_merge.sh",
+      "sha256": "08391c2ecc8cb12b663bf0aad8cc5bd51c383d35f57a8b8724cafe86e53bb7bd",
+      "bytes": 486
+    },
+    {
+      "file": "zenoh/inspection_zenoh_d1m_b/README.md",
+      "sha256": "5a40429696929aa9a2f2e3d9fb91c416cb061fcf3adc02acf7bfe5ae0a3b1ddc",
+      "bytes": 3170
+    },
+    {
+      "file": "zenoh/inspection_zenoh_d1m_b/backup_record.json",
+      "sha256": "e7cd3c9071e3ce20bde8baec47bd89e68e7a6da949028005add6b92b97daf150",
+      "bytes": 2675
+    },
+    {
+      "file": "zenoh/inspection_zenoh_d1m_b/inspection-zenoh.service",
+      "sha256": "52b7d00db9b493c4c485983bb3d5f6820c339de6c4603af693f3bf545c474117",
+      "bytes": 806
+    },
+    {
+      "file": "zenoh/inspection_zenoh_d1m_b/inspection-zenoh.service.d/priority.conf",
+      "sha256": "6aa3417ee7326289cf347a603af2175a4fa537dd00bc1396c3f8f8bcdd87a90a",
+      "bytes": 32
+    },
+    {
+      "file": "zenoh/inspection_zenoh_d1m_b/router_config.json5",
+      "sha256": "1bfa4de6c9519dd977e9c6507d641da3dc0e91eec2938889e39bf1ff1ab5cf20",
+      "bytes": 380
+    },
+    {
+      "file": "zenoh/inspection_zenoh_d1m_b/session_config.json5",
+      "sha256": "98af80006d023d23e7b7eef6de93d178014d9dd60f533e6aaef4167e68e4364a",
+      "bytes": 394
+    }
+  ]
+}

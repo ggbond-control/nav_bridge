@@ -1,0 +1,12 @@
+command: bash /home/robot/CV/bin/start_algorithm_center.sh
+name: algorithm-center
+id: 18
+state:
+  status: Running
+  start_time: null
+  try_count: 0
+  error: ''
+  pid: 0
+paths:
+  stdout: /home/robot/robot_launch_log/algorithm-center.stdout
+  stderr: /home/robot/robot_launch_log/algorithm-center.stderr

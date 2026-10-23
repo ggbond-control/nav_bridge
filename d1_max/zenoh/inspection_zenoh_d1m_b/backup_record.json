@@ -1,0 +1,81 @@
+{
+  "schema_version": 1,
+  "local_sync_at_utc": "2026-10-23T06:34:28.967268+00:00",
+  "configuration_baseline": "2026-10-23 post-migration",
+  "method": "Local sync against existing migration snapshots; no remote access in this update. Remote mtime was not collected.",
+  "verified_at_utc": "2026-10-23T05:36:02.941689+00:00",
+  "verified_state": {
+    "D1M-A": {
+      "active": true,
+      "enabled": true,
+      "domain": 24,
+      "nice": -5,
+      "cpu_weight": 600
+    },
+    "D1M-B": {
+      "active": true,
+      "enabled": true,
+      "domain": 24,
+      "nice": -5,
+      "cpu_weight": 600
+    }
+  },
+  "files": [
+    {
+      "file": "inspection-zenoh.service",
+      "remote_path": "/etc/systemd/system/inspection-zenoh.service",
+      "sha256": "52b7d00db9b493c4c485983bb3d5f6820c339de6c4603af693f3bf545c474117",
+      "matches_snapshots": [
+        "D1M-A",
+        "D1M-B"
+      ],
+      "snapshot_sources": [
+        "/home/jazzy/d1m_migration_20261023/zenoh_A/inspection-zenoh.service",
+        "/home/jazzy/d1m_migration_20261023/zenoh_B/inspection-zenoh.service"
+      ],
+      "remote_mtime": null
+    },
+    {
+      "file": "inspection-zenoh.service.d/priority.conf",
+      "remote_path": "/etc/systemd/system/inspection-zenoh.service.d/priority.conf",
+      "sha256": "6aa3417ee7326289cf347a603af2175a4fa537dd00bc1396c3f8f8bcdd87a90a",
+      "matches_snapshots": [
+        "D1M-A",
+        "D1M-B"
+      ],
+      "snapshot_sources": [
+        "/home/jazzy/d1m_migration_20261023/zenoh_A/inspection-zenoh.service.d/priority.conf",
+        "/home/jazzy/d1m_migration_20261023/zenoh_B/inspection-zenoh.service.d/priority.conf"
+      ],
+      "remote_mtime": null
+    },
+    {
+      "file": "router_config.json5",
+      "remote_path": "/home/cat/Workspace/zenoh_ws/router_config.json5",
+      "sha256": "1bfa4de6c9519dd977e9c6507d641da3dc0e91eec2938889e39bf1ff1ab5cf20",
+      "matches_snapshots": [
+        "D1M-A",
+        "D1M-B"
+      ],
+      "snapshot_sources": [
+        "/home/jazzy/d1m_migration_20261023/zenoh_A/router_config.json5",
+        "/home/jazzy/d1m_migration_20261023/zenoh_B/router_config.json5"
+      ],
+      "remote_mtime": null
+    },
+    {
+      "file": "session_config.json5",
+      "remote_path": "/home/cat/Workspace/zenoh_ws/session_config.json5",
+      "sha256": "98af80006d023d23e7b7eef6de93d178014d9dd60f533e6aaef4167e68e4364a",
+      "matches_snapshots": [
+        "D1M-A",
+        "D1M-B"
+      ],
+      "snapshot_sources": [
+        "/home/jazzy/d1m_migration_20261023/zenoh_A/session_config.json5",
+        "/home/jazzy/d1m_migration_20261023/zenoh_B/session_config.json5"
+      ],
+      "remote_mtime": null
+    }
+  ]
+}

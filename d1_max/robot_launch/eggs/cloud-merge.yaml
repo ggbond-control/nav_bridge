@@ -1,0 +1,12 @@
+command: bash /home/robot/Workspace/driver_ws/bin/start_cloud_merge.sh
+name: cloud-merge
+id: 17
+state:
+  status: Running
+  start_time: null
+  try_count: 0
+  error: ''
+  pid: 0
+paths:
+  stdout: /home/robot/robot_launch_log/cloud-merge.stdout
+  stderr: /home/robot/robot_launch_log/cloud-merge.stderr

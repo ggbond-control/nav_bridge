@@ -1,4 +1,5 @@
-# Append these entries under the existing top-level "eggs:" mapping.
+# Reference fragment: merge only missing entries under the existing "eggs:" mapping.
+# Do not pass this fragment to collect; use ../eggs/<name>.yaml for single-egg collect.
 # The wrappers use setpriv because robot-launch itself runs as root, while the
 # CV applications must retain robot ownership for their model, upload and log files.
   algorithm-center:

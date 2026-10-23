@@ -1,0 +1,12 @@
+command: bash /home/robot/CV/bin/start_cable_damage_detect.sh
+name: cable-damage-detect
+id: 19
+state:
+  status: Running
+  start_time: null
+  try_count: 0
+  error: ''
+  pid: 0
+paths:
+  stdout: /home/robot/robot_launch_log/cable-damage-detect.stdout
+  stderr: /home/robot/robot_launch_log/cable-damage-detect.stderr

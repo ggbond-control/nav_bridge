@@ -1,193 +1,113 @@
-# D1 Max `cloud_merge` / `robot-launch` 配置备份
+# D1 Max NX 的 robot-launch 配置备份
 
-本目录是从 D1 Max 导航主机 `robot@192.168.168.100` 导出的配置备份。备份对象原先位于导航主机的 `~/Workspace/driver_ws` 和 `~/.robot_egg_launch.yaml`，用于固件升级后恢复；固件升级可能删除第三方 ROS 包、启动脚本和 `robot-launch` egg 配置。
+本目录保存 2026-10-23 迁移完成后适用于 D1M-A/B 的启动脚本、三个额外 egg 的独立配置和各自的启动 YAML 快照。NX 直接运行在机器人上，应用的注册、启停和重启必须通过 robot-launch；不要重启整个管理服务或手动再启动一份应用。
 
-## bot 主机 WIFI 设置
-
-```
-wpa_passphrase FHZN FHZN1234 >  ~/FHZN_WIFI.conf
-```
+cloud_merge 源码、标定配置以及 CV 程序、模型和运行依赖在其他位置备份，本目录不重复收录。恢复这些材料后，再使用本目录的启动脚本和 egg 配置。
 
 ## 目录内容
 
 ```text
-cloud_merge/
-  package.xml
-  CMakeLists.txt
-  src/cloud_merge_node.cpp
-  launch/cloud_merge.launch.py
-  config/cloud_merge.yaml
-  rviz/cloud_merge.rviz
 start_cloud_merge.sh
+eggs/                                  # 三个单 egg YAML，供 collect 使用
+  cloud-merge.yaml
+  algorithm-center.yaml
+  cable-damage-detect.yaml
+cv_services/                           # CV 启动脚本和部署说明
 robot_supervisor/
-  robot_egg_launch.yaml                 # 当前配置，含 cloud-merge
-  robot_egg_launch.yaml.before-cloud-merge # 添加 cloud-merge 前的基线
+  robot_egg_launch.yaml                 # A 的 19 项快照，兼容旧文件名
+  snapshots/20261023/
+    D1M-A.robot_egg_launch.yaml          # A 的启动配置快照
+    D1M-B.robot_egg_launch.yaml          # B 的启动配置快照
+  robot_egg_launch.yaml.before-cloud-merge
+  originals/20261023_before_extra_eggs_sync/robot_egg_launch.yaml
 ```
 
-当前 cloud merge 的主要参数为：
+完整 YAML 只供核对。A/B 原有条目状态存在差异，例如 `robot-forward`：A 为 Stopped，B 为 Running。恢复时保留目标机器或新固件的原有条目，仅补所需的 17–19，不能用 A 的完整文件覆盖 B，也不能用快照覆盖新固件配置。快照内的 PID 0、启动时间等不是实时运行状态。
 
-- 输入：`/front_lidar`、`/rear_lidar`
-- 原始合并输出：`/lidar/airy/origin`
-- 体素降采样输出：`/lidar/airy`
-- 基座坐标系：`d1m_base`
-- 前后雷达坐标系：`rslidar_head`、`rslidar_tail`
+## 登录目标 NX
 
-## 固件升级后恢复
-
-以下命令在导航主机（NX）执行。NX 需要先通过 cat 主机登录：
+在开发机选择其中一条，NX 必须经所属机器人跳转：
 
 ```bash
-ssh cat@10.0.40.226
-ssh robot@192.168.168.100
+# A 的 NX
+ssh -J cat@47.99.202.196:20004 robot@192.168.168.100
+# B 的 NX
+ssh -J cat@10.0.40.237 robot@192.168.168.100
 ```
 
-### 1. 恢复源码
+## 恢复程序和启动脚本
 
-将本目录中的 `cloud_merge` 复制到导航主机：
-
-```bash
-mkdir -p ~/Workspace/driver_ws/src
-scp -r <备份目录>/cloud_merge ~/Workspace/driver_ws/src/
-```
-
-如果备份目录位于代码仓库，可在开发机执行（通过 cat 跳转时使用 ProxyJump 或等价的 ProxyCommand）：
-
-```bash
-scp -r d1_max/robot_launch/cloud_merge \
-  robot@192.168.168.100:~/Workspace/driver_ws/src/
-```
-
-确认目录结构为 `~/Workspace/driver_ws/src/cloud_merge/{package.xml,CMakeLists.txt,src,launch,config,rviz}`。
-
-### 2. 编译并安装
+先从另存备份恢复 cloud_merge 到 `~/Workspace/driver_ws/src/cloud_merge`，按目标 NX 的 ROS Humble 环境编译；已验证可用的 ARM 安装产物可复用。若需编译：
 
 ```bash
 cd ~/Workspace/driver_ws
 source /opt/ros/humble/setup.bash
-colcon build --packages-select cloud_merge --symlink-install
-source install/setup.bash
-```
-
-如果工作区中没有 `colcon` 或依赖包，先按设备提供的 ROS 环境恢复依赖；不要把本备份链接到开发机的绝对路径。
-
-### 3. 恢复启动脚本
-
-```bash
-mkdir -p ~/Workspace/driver_ws/bin
-cp <备份目录>/start_cloud_merge.sh ~/Workspace/driver_ws/bin/
-chmod +x ~/Workspace/driver_ws/bin/start_cloud_merge.sh
-```
-
-脚本内容等价于：
-
-```bash
-#!/usr/bin/env bash
-set -e
-source /opt/runtime/env.bash
-source /opt/ros/humble/setup.bash
-source /home/robot/Workspace/driver_ws/install/cloud_merge/share/cloud_merge/local_setup.bash
-cloud_merge_prefix=/home/robot/Workspace/driver_ws/install/cloud_merge
-export AMENT_PREFIX_PATH="${cloud_merge_prefix}:${AMENT_PREFIX_PATH:-}"
-export CMAKE_PREFIX_PATH="${cloud_merge_prefix}:${CMAKE_PREFIX_PATH:-}"
-exec /opt/ros/humble/bin/ros2 launch cloud_merge cloud_merge.launch.py use_rviz:=false
-```
-
-若工作区路径改变，只需同步修改脚本中的 `source` 路径。
-
-### 4. 将 cloud merge 加回 `robot-launch`
-
-`robot-launch` 使用用户目录下的 `~/.robot_egg_launch.yaml`。在 `eggs:` 下加入以下条目（`id` 必须与现有条目不重复）：
-
-```yaml
-  cloud-merge:
-    command: bash /home/robot/Workspace/driver_ws/bin/start_cloud_merge.sh
-    name: cloud-merge
-    id: 17
-    state:
-      status: Running
-      start_time: null
-      try_count: 0
-      error: ''
-      pid: 0
-    paths:
-      stdout: /home/robot/robot_launch_log/cloud-merge.stdout
-      stderr: /home/robot/robot_launch_log/cloud-merge.stderr
-```
-
-建议先保留升级前的配置副本：
-
-```bash
-cp ~/.robot_egg_launch.yaml ~/.robot_egg_launch.yaml.before-cloud-merge
-```
-
-配置写入后，重启 `robot-launch` 管理的 egg：
-
-```bash
-robot-launch list
-robot-launch collect cloud-merge
-# 若 cloud-merge 已存在但停止：
-robot-launch start cloud-merge
-# 若已运行且需要重新加载脚本：
-robot-launch restart cloud-merge
-```
-
-不同固件版本的 `robot-launch` 子命令可能略有差异；以 `robot-launch --help` 为准。`robot-launch server` 应由系统已有服务启动，不要重复启动多个 server。
-
-### 5. 手动启动（不接入 robot-launch）
-
-用于首次验证或排查配置时：
-
-```bash
-source /opt/runtime/env.bash
-source /opt/ros/humble/setup.bash
-source ~/Workspace/driver_ws/install/cloud_merge/share/cloud_merge/local_setup.bash
-bash ~/Workspace/driver_ws/bin/start_cloud_merge.sh
-```
-
-在刷机后的 NX 环境中，`driver_ws` 可能使用 isolated install，顶层
-`install/setup.bash` 可能为空；启动脚本因此直接 source
-`install/cloud_merge/share/cloud_merge/local_setup.bash`，并显式加入该包前缀。
-如果手动启动，不要只 source 顶层
-setup，至少执行：
-
-```bash
-source /opt/runtime/env.bash
-source /opt/ros/humble/setup.bash
-source ~/Workspace/driver_ws/install/cloud_merge/share/cloud_merge/local_setup.bash
-```
-
-确认可执行文件不是空文件，并在源码变更或刷机后重新编译：
-
-```bash
-cd ~/Workspace/driver_ws
 colcon build --packages-select cloud_merge --symlink-install \
   --event-handlers console_direct+ \
   --cmake-args -DCMAKE_BUILD_TYPE=Release
 file build/cloud_merge/cloud_merge_node
 ```
 
-`file` 应显示 `ELF 64-bit ... ARM aarch64`，不能是 `empty` 或 `Exec format error`。
+可执行文件应是 ARM aarch64 ELF，不能是空文件或开发机的 x86 文件。将本目录 `start_cloud_merge.sh` 放到 `/home/robot/Workspace/driver_ws/bin/` 并赋予执行权限。脚本直接 source isolated install 中的 `install/cloud_merge/share/cloud_merge/local_setup.bash`，并设置包前缀，避免仅 source 空的顶层 setup。
 
-验证话题：
+CV 程序、GPU 环境和四个脚本的恢复前提见 [cv_services/README.md](cv_services/README.md)。所有程序和配置就绪后再注册 egg。
+
+## 通过 robot-launch 增量恢复
+
+以下命令在 NX 的 robot 用户会话中执行。先查看 `robot-launch list` 和 `/home/robot/.robot_egg_launch.yaml`，确认名称及 ID 没有冲突。17、18、19 分别对应 cloud-merge、algorithm-center、cable-damage-detect；已存在的 egg 不重复 collect。
+
+先保存目标机原配置：
 
 ```bash
-ros2 node list | grep cloud_merge
-ros2 topic list | grep -E '/(front_lidar|rear_lidar|lidar/airy)'
+cp -p /home/robot/.robot_egg_launch.yaml \
+  "/home/robot/.robot_egg_launch.yaml.before-extra-eggs-$(date +%Y%m%dT%H%M%S)"
+robot-launch list
+```
+
+将本目录的 `eggs/` 放到 NX 的 `/home/robot/robot-launch-backup/eggs/`。对确认缺失的项逐项执行；collect 会安排启动，执行一项并确认正常后再继续下一项：
+
+```bash
+robot-launch collect /home/robot/robot-launch-backup/eggs/cloud-merge.yaml
+robot-launch egg 17
+robot-launch collect /home/robot/robot-launch-backup/eggs/algorithm-center.yaml
+robot-launch egg 18
+robot-launch collect /home/robot/robot-launch-backup/eggs/cable-damage-detect.yaml
+robot-launch egg 19
+```
+
+`collect` 的参数是**单个 egg 的 YAML 文件路径**，不是 egg 名称，也不是顶层含 `eggs:` 的完整文件。固件版本变化时先查看 `robot-launch --help` 及对应子命令帮助。
+
+注册后核对 `/home/robot/.robot_egg_launch.yaml`：三个条目必须持久化在顶层 `eggs:` 下，各出现一次；如当前版本未自动保存，仅将缺失条目合并进去，不改原有条目。现有 egg 更新脚本后，如需重启，只通过 robot-launch 重启对应 ID，并按该版本帮助执行。不要重启整个 `robot-launch.service`，也不要另起 `robot-launch server`。
+
+## 验证
+
+```bash
+robot-launch list
+robot-launch egg 17
+robot-launch egg 18
+robot-launch egg 19
+```
+
+点云检查需要使用目标 NX 的 ROS 环境，保持 `ROS_DOMAIN_ID=24`、`RMW_IMPLEMENTATION=rmw_zenoh_cpp`：
+
+```bash
+source /opt/runtime/env.bash
+source /opt/ros/humble/setup.bash
+source ~/Workspace/driver_ws/install/cloud_merge/share/cloud_merge/local_setup.bash
+export ROS_DOMAIN_ID=24
+export RMW_IMPLEMENTATION=rmw_zenoh_cpp
 ros2 topic hz /lidar/airy
 ros2 topic echo --once /lidar/airy/header
 ```
 
-确认输入雷达驱动已启动、输出频率稳定且 `frame_id` 为 `d1m_base`。若输出为空，优先检查输入话题名称、时间戳同步容差和 TF/标定参数，而不是修改 `robot-launch`。
+当前参数：输入 `/front_lidar`、`/rear_lidar`，原始输出 `/lidar/airy/origin`，降采样输出 `/lidar/airy`，基座 `d1m_base`，前后雷达坐标系 `rslidar_head`、`rslidar_tail`。迁移时输出约 8–10 Hz，frame_id 为 `d1m_base`。输出为空时检查输入、时间同步和标定配置。
 
-## 固件升级后的推荐顺序
+CV 的端口、健康检查和代理/授时限制见 [CV 说明](cv_services/README.md)；整体验证基线见 [上级说明](../README.md)。历史目录及 `before-cloud-merge` 原样保留。
 
-1. 升级完成并重启 NX。
-2. 恢复 `cloud_merge` 源码到 `~/Workspace/driver_ws/src/cloud_merge`。
-3. 编译工作区并恢复 `start_cloud_merge.sh`。
-4. 从本备份的 `robot_egg_launch.yaml` 中复制 `cloud-merge` 条目到新的 `~/.robot_egg_launch.yaml`；不要整体覆盖新固件生成的配置，以免丢失新版本 egg。
-5. `robot-launch collect cloud-merge` 或 `restart cloud-merge`。
-6. 按上面的 ROS 话题命令验证；确认无误后再启动导航算法。
+## bot 主机 WIFI 设置（原有参考）
 
-## 备份完整性与版本说明
+```bash
+wpa_passphrase FHZN FHZN1234 > ~/FHZN_WIFI.conf
+```
 
-本备份保留了当前设备上的源码和标定参数，不代表新固件一定兼容。升级后若雷达驱动更换了话题名、坐标系或 PointCloud2 字段布局，应只修改 `config/cloud_merge.yaml` 中对应参数，并保留原始备份以便回滚。
+本次本地备份同步未调整 WIFI 服务。
