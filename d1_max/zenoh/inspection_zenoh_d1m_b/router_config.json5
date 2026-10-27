@@ -1,31 +1,27 @@
 {
-  mode: "router",
-
-  queries_default_timeout: 180000,
-
-  listen: {
-    endpoints: [
+  "mode": "router",
+  "queries_default_timeout": 180000,
+  "listen": {
+    "endpoints": [
       "tcp/127.0.0.1:7447",
       "tcp/192.168.168.111:7447"
     ]
   },
-
-  connect: {
-    endpoints: [
+  "connect": {
+    "endpoints": [
       "tcp/192.168.168.100:7447"
     ]
   },
-
-  scouting: {
-    multicast: {
-      enabled: false
+  "scouting": {
+    "multicast": {
+      "enabled": false,
+      "listen": false
     },
-    gossip: {
-      enabled: false
+    "gossip": {
+      "enabled": false
     }
   },
-
-  adminspace: {
-    enabled: true
+  "adminspace": {
+    "enabled": true
   }
 }

@@ -1,44 +1,72 @@
-# D1M-A / D1M-B Zenoh 配置备份
+# D1M-A / D1M-B Zenoh 固定连接配置
 
-本目录的四个部署文件与 **2026-10-23 迁移完成后的 A/B 配置快照一致**，可作为两台 cat 主机的共同配置。目录名 `inspection_zenoh_d1m_b` 保留，不能据此判断文件只适用于 B。本次本地同步未连接或修改机器人。
+本目录保存 **2026-10-27 关闭自动发现并应用到两狗后的 cat 配置**。目标是保留每只狗内部 cat ↔ NX 的 ROS 2 通信，同时避免经 Wi-Fi/5G 自动发现另一只狗。两狗目前仍使用 DOMAIN 24；本次没有修改 NX。
 
-| 机器 | cat 登录方式 | NX 登录方式 |
+| 机器 | cat 登录方式 | NX 跳转（地址参考，本次未操作） |
 |---|---|---|
-| D1M-A | `ssh -p 20004 cat@47.99.202.196` | `ssh -J cat@47.99.202.196:20004 robot@192.168.168.100` |
-| D1M-B | `ssh cat@10.0.40.237` | `ssh -J cat@10.0.40.237 robot@192.168.168.100` |
+| A | `ssh -p 20008 cat@121.41.75.74` | `ssh -J cat@121.41.75.74:20008 robot@192.168.168.100` |
+| B | `ssh -p 20007 cat@121.41.75.74` | `ssh -J cat@121.41.75.74:20007 robot@192.168.168.100` |
 
-两台机器各自使用 `.111`（cat）和 `.100`（NX）。每台 cat 连接自己的 NX；相同内网地址不表示两台机器人共用一块 NX。
+各自的 `.111`（cat）与 `.100`（NX）属于各自机器人内网，相同地址不代表共用设备。每台 Router 连接自己 NX，未增加 A/B Router 之间的连接。
 
-| 本地文件 | cat 主机部署路径 |
+## 部署文件和通信路径
+
+| 本地文件 | cat 部署路径 |
 |---|---|
-| `router_config.json5` | `/home/cat/Workspace/zenoh_ws/router_config.json5` |
-| `session_config.json5` | `/home/cat/Workspace/zenoh_ws/session_config.json5` |
 | `inspection-zenoh.service` | `/etc/systemd/system/inspection-zenoh.service` |
 | `inspection-zenoh.service.d/priority.conf` | `/etc/systemd/system/inspection-zenoh.service.d/priority.conf` |
+| `router_config.json5` | `/home/cat/Workspace/zenoh_ws/router_config.json5` |
+| `session_config.json5` | `/home/cat/Workspace/zenoh_ws/session_config.json5` |
 
-## 当前配置
+```text
+本狗 cat 的 ROS 节点（client）
+  → tcp/127.0.0.1:7447（本狗 cat Router）
+    → tcp/192.168.168.100:7447（本狗 NX Router）
+```
 
-- 中间件为 `rmw_zenoh_cpp`，系统服务为 `inspection-zenoh.service`，运行在 cat 主机。
-- Router 查询超时 `180000` ms；监听 `tcp/127.0.0.1:7447` 和 `tcp/192.168.168.111:7447`；连接本机 NX 的 `tcp/192.168.168.100:7447`；multicast、gossip 关闭；adminspace 启用。
-- Session 查询超时 `180000` ms；连接 `tcp/127.0.0.1:7447`；监听 `tcp/192.168.168.111:0`；共享内存关闭；multicast 开启且接口固定为 `eth1`；gossip 关闭。
-- 服务环境为 `ROS_DOMAIN_ID=24`，与各自 NX 和当前 ROS 业务进程保持一致。A/B 均使用 24；机器人之间的隔离依赖各自网络和 Zenoh 连接范围，不能仅靠相同或不同的 DOMAIN 数字判断。Router 的该环境变量也不构成跨域过滤规则。
-- 优先级配置为 `Nice=-5`、`CPUWeight=600`。恢复时必须同时恢复 `priority.conf`，只复制主 service 文件会漏掉优先级。
+- **Router**：`mode=router`，只监听 `127.0.0.1:7447` 和 `192.168.168.111:7447`；固定连接所属 NX；multicast 和 gossip 均关闭，并关闭 multicast scout 响应。不会在 Wi-Fi/5G 地址或 IPv6 通配地址监听。
+- **Session**：`mode=client`，只连接本机 `127.0.0.1:7447`；`listen.endpoints=[]`，不接受入站连接；multicast 和 gossip 均关闭，并关闭 multicast scout 响应。ROS 节点发现和话题通信仍通过固定 Router 路径进行。
+- Router/Session 文件的查询超时恢复为原备份的 `180000` ms；共享内存关闭，Router adminspace 保持启用。现机部分启动脚本另有 `ZENOH_CONFIG_OVERRIDE=queries_default_timeout=600000`，这些进程的有效查询超时仍为 600000 ms；该覆盖只改变超时，不重新开启自动发现，本次未改启动脚本。
+- 系统服务保持 `ROS_DOMAIN_ID=24`、`RMW_IMPLEMENTATION=rmw_zenoh_cpp`、`Nice=-5`、`CPUWeight=600`，并启用开机自启。
 
-2026-10-23 的验证记录显示 A/B 服务均为 active、enabled，DOMAIN 和优先级均已生效。这是当时状态，不代表实时查询结果。恢复后应在目标 cat 上检查：
+本次以原备份的限定监听和固定 NX 连接为基础，进一步关闭自动发现。Session 采用 client 模式，使所有本机节点通过 Router 通信；在当前版本上，保留 peer 模式同时关闭发现的试验导致本机节点互相可见性不完整，因此没有作为最终版本。
+
+## 生效方式与验证
+
+用户明确允许后，分别停止两台 cat 原先运行的 `inspection-system`、`inspection-navigation`、`inspection-hardware`，重载 Zenoh，再恢复这些服务；没有重启整机或操作 NX 服务，也没有发送导航启动请求。既有导航任务会因服务重启中止，不能把服务恢复理解为自动恢复原导航任务。
+
+只改配置文件不会让已有 ROS Session 自动重读；今后更新时需在合适窗口重启依赖该 Session 的相关进程。NX 业务继续由 robot-launch 管理，不应套用 cat 的 systemd 操作。
+
+验收结果：
+
+- 本地和 A/B 的四个部署文件 SHA-256 一致，配置均通过板上实际 Zenoh 库解析。
+- 两台 cat 的 Zenoh、导航入口、巡检和硬件服务均 active；Zenoh active/enabled，优先级 -5/600 已生效。
+- Router 仅有上述两个监听地址，已建立到所属 NX `192.168.168.100:7447` 的连接；cat ROS Session 没有新增 TCP 监听。已有媒体 HTTP、相机和 MQTT 业务网络连接未修改，不属于 Zenoh 监听。
+- A/B 本机的巡检节点、`navigation_supervisor`、NX 的雷达、IMU、`cloud_merge` 均可见；`/navigation_bringup/start` 可发现，未调用它。
+- 24 秒订阅 `/lidar/airy`：A 收到 240 帧，B 收到 241 帧，frame_id 均为 `d1m_base`。
+- 临时探针各自可见、另一只狗的探针不可见。但两狗当前位于不同楼层，未验证是否处于同一可达网络，**不能用这次结果证明接入同网后的隔离效果**。本次确认的是配置约束、实际监听范围和本狗 NX 数据正常；同网实测另行安排。
+
+隔离前提是两套机器人内网保持独立，全部相关 ROS 进程使用本目录配置且没有其他跨狗 Router/桥接连接。DOMAIN 24 不是安全边界；本次未增加防火墙、鉴权或核改 NX 配置。
+
+只读检查命令（在目标 cat 的 ROS 环境执行）：
 
 ```bash
 systemctl show inspection-zenoh.service \
   -p ActiveState -p UnitFileState -p Environment -p Nice -p CPUWeight
+ss -ltn | grep ':7447'
+ss -tn | grep '192.168.168.100:7447'
+ros2 node list --no-daemon --spin-time 8
+ros2 topic hz /lidar/airy
 ```
 
-上述 cat 服务与 NX 的 robot-launch 管理范围不同。NX 的应用服务操作必须通过 robot-launch，不能套用 cat 的 systemd 恢复方式。
+## 来源、回退和历史
 
-## 来源与历史
+逐文件 SHA-256、部署路径及验证状态见 [backup_record.json](backup_record.json)。本地操作、配置快照和验证原始输出位于 `/home/jazzy/d1m_zenoh_isolation_20261027/`。
 
-逐文件 SHA-256、远端路径和本地快照来源见 [backup_record.json](backup_record.json)。本次依据已有迁移快照同步，未重新采集远端修改时间。
+两台 cat 的修改前备份均在 `/home/cat/d1m-migration-backups/20261027-before-static-isolation/`。B 另有 `20261027-before-static-isolation-client-mode/`，保存验证期间的中间 peer 版本；如需回到本次操作前，应使用前一个备份。回退也需配合相关 Session 进程重载，不能只恢复文件。
 
-- `originals/20261023_before_domain24_sync/` 保存本次同步前的主 service（DOMAIN 28）和说明文档，供回溯。
-- `originals/20261021T102843Z_before_d1m_a_overwrite/` 实际保留 router/session 两个文件，不是完整恢复包。
-- `reports/20261015_eth1.md` 和 `originals/20261015_before_eth1/` 是此前 B 的历史材料，不代表当前配置。
+- `originals/20261027_before_static_isolation/`：本次关闭发现前的本地四个部署文件及文档、校验记录。
+- `originals/20261027_before_B_reference_sync/`：此前按 B 现机同步前的本地备份，含 180000 ms 和 eth1 组播的旧配置。
+- 其他 `originals/`、`reports/` 保存更早材料，原样保留，不代表当前部署。
 
-总体范围和迁移限制见 [上级备份说明](../../README.md)。
+总体范围见 [上级备份说明](../../README.md)。

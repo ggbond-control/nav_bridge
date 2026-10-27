@@ -1,9 +1,9 @@
 {
   "schema_version": 1,
-  "local_sync_at_utc": "2026-10-23T06:34:28.967268+00:00",
+  "local_sync_at_utc": "2026-10-27T03:06:24.059642+00:00",
   "baseline_date": "2026-10-23",
   "scope": "Configuration, wrappers, documentation and robot-launch snapshots only. Cloud source and CV applications/models/runtime dependencies are backed up separately.",
-  "remote_access_during_local_sync": false,
+  "remote_access_during_local_sync": true,
   "sources": {
     "zenoh": "zenoh/inspection_zenoh_d1m_b/backup_record.json",
     "A_robot_launch": {
@@ -32,8 +32,8 @@
   "files": [
     {
       "file": "README.md",
-      "sha256": "d629d7c80065be1db6c40bdd67e40c63bd3c265f3f1dd6f8380276f9b643a523",
-      "bytes": 3314
+      "sha256": "0b7d32bfa33c0638ae1223cf6bc5ca490a080481fd3297de0509921ae7b3c6c8",
+      "bytes": 4073
     },
     {
       "file": "nx-net-proxy/README.md",
@@ -142,13 +142,13 @@
     },
     {
       "file": "zenoh/inspection_zenoh_d1m_b/README.md",
-      "sha256": "5a40429696929aa9a2f2e3d9fb91c416cb061fcf3adc02acf7bfe5ae0a3b1ddc",
-      "bytes": 3170
+      "sha256": "eaf7deb866be5448f94f17c94a5bc72703288c88436595be7abfd32397743e97",
+      "bytes": 5819
     },
     {
       "file": "zenoh/inspection_zenoh_d1m_b/backup_record.json",
-      "sha256": "e7cd3c9071e3ce20bde8baec47bd89e68e7a6da949028005add6b92b97daf150",
-      "bytes": 2675
+      "sha256": "37c70e77f86face5f7eb229e33e3ded8d9ea418c5ed49d4b5fa88a7bc7168d54",
+      "bytes": 4520
     },
     {
       "file": "zenoh/inspection_zenoh_d1m_b/inspection-zenoh.service",
@@ -162,13 +162,40 @@
     },
     {
       "file": "zenoh/inspection_zenoh_d1m_b/router_config.json5",
-      "sha256": "1bfa4de6c9519dd977e9c6507d641da3dc0e91eec2938889e39bf1ff1ab5cf20",
-      "bytes": 380
+      "sha256": "ac08b4a687dcb9d78f97ceacc066140599e6fd64ea37ef484334f46ed3598d2d",
+      "bytes": 424
     },
     {
       "file": "zenoh/inspection_zenoh_d1m_b/session_config.json5",
-      "sha256": "98af80006d023d23e7b7eef6de93d178014d9dd60f533e6aaef4167e68e4364a",
-      "bytes": 394
+      "sha256": "da36dba839cbf7173e302f1a56eb7f563696d74c6a797156670dab628b7e36fc",
+      "bytes": 383
+    }
+  ],
+  "component_updates": {
+    "zenoh": {
+      "date": "2026-10-27",
+      "source": "Local static isolation configuration, based on original restricted endpoints",
+      "target": [
+        "D1M-A cat@121.41.75.74:20008",
+        "D1M-B cat@121.41.75.74:20007"
+      ],
+      "scope": "Both cat Router/Session configs deployed and relevant cat services reloaded with user authorization; NX unchanged.",
+      "manifest": "zenoh/inspection_zenoh_d1m_b/backup_record.json",
+      "verification": "/home/jazzy/d1m_zenoh_isolation_20261027/verification.json",
+      "same_network_cross_robot_tested": false,
+      "remaining_components": "Other application backup components retain their previous baseline."
+    }
+  },
+  "remote_access_note": "2026-10-27 static isolation deployed on both cat boards; authorized relevant cat service restarts, no NX access.",
+  "component_history": [
+    {
+      "date": "2026-10-27",
+      "source": "D1M-B cat@121.41.75.74:20007",
+      "target": "D1M-A replacement cat@121.41.75.74:20008",
+      "scope": "Installed and enabled A Zenoh; A/B four deployment files match. No other service restart, no NX access.",
+      "manifest": "zenoh/inspection_zenoh_d1m_b/backup_record.json",
+      "verification": "/home/jazzy/d1m_zenoh_20261027/verification.json",
+      "remaining_components": "Other components retain the 2026-10-23 backup baseline and were not re-collected."
     }
   ]
 }
