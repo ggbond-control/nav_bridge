@@ -309,6 +309,14 @@ TEST_F(D1MaxUndockTest, BluetoothConnectedDoesNotBlockSuccessfulUndock) {
     EXPECT_EQ(sdk_charge_test::undock_calls, 0);
 }
 
+TEST_F(D1MaxUndockTest, SuccessfulSdkTaskAcceptsUnknownBatteryWhileBluetoothConnected) {
+    beginUndock();
+    auto result = exit();
+    std::this_thread::sleep_for(20ms);
+    succeed(true, PowerSupplyStatus::UNKNOWN);
+    EXPECT_TRUE(result.get().success);
+}
+
 TEST_F(D1MaxUndockTest, BluetoothDisconnectCannotBypassRunningSdkTask) {
     beginUndock(false);
     auto result = exit();

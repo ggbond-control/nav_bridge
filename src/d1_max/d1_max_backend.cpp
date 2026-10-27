@@ -714,7 +714,8 @@ BackendResult D1MaxBackend::startUndock(int confirmation_timeout_ms) {
         if (!fresh) return {false, "D1 charge exit requires fresh SDK robot telemetry."};
         // Bluetooth disconnection satisfies the charge-side condition, but
         // only after active SDK tasks above have completed or stopped.
-        if (chargeExitStateConfirmedLocked() && (!charging_pile_connected_ || !undock_required_)) {
+        if (chargeExitStateConfirmedLocked() && canSkipUndockLocked() &&
+            (!charging_pile_connected_ || !undock_required_)) {
             undock_required_ = false;
             charge_exit_confirmed_ = true;
             undock_success_sequence_ = 0;
@@ -771,8 +772,19 @@ bool D1MaxBackend::chargeExitStateConfirmedLocked() const {
     if (last_basic_state_time_ == std::chrono::steady_clock::time_point{} ||
         std::chrono::steady_clock::now() - last_basic_state_time_ >= std::chrono::seconds(5))
         return false;
+    // The SDK's pile flag is only the Bluetooth link, not physical docking.
+    // A disconnected link is already sufficient for the exit handoff.
     if (!charging_pile_connected_) return true;
-    // Unknown or absent batteries must not look like confirmed non-charging.
+    // Once the current UNDOCK task has succeeded, the only charge-side
+    // blocker is an explicit CHARGING report. UNKNOWN battery status must not
+    // keep navigation blocked when no battery reports that it is charging.
+    return !isChargingLocked();
+}
+
+bool D1MaxBackend::canSkipUndockLocked() const {
+    if (!charging_pile_connected_) return true;
+    // Before an UNDOCK task has run, a connected pile and UNKNOWN battery
+    // status are insufficient evidence to skip the physical exit command.
     const auto not_charging = [](int status) {
         return status == static_cast<int>(robot_sdk::PowerSupplyStatus::DISCHARGING) ||
                status == static_cast<int>(robot_sdk::PowerSupplyStatus::FULL);

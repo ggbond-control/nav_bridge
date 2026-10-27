@@ -64,6 +64,7 @@ private:
     BackendResult waitForUndockStopped(uint64_t min_sequence, int timeout_ms);
     bool isChargingLocked() const;
     bool chargeExitStateConfirmedLocked() const;
+    bool canSkipUndockLocked() const;
     void logChargeState(const char *phase) const;
     void updateState(const BackendState &state);
 
