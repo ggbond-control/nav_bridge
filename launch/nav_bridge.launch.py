@@ -24,6 +24,9 @@ def launch_node(context):
     elif robot_type == 'cyvet':
         executable = 'cyvet_nav_bridge_node'
         params_file = os.path.join(pkg_dir, 'config', 'cyvet_params.yaml')
+    elif robot_type == 'tank':
+        executable = 'tank_nav_bridge_node'
+        params_file = os.path.join(pkg_dir, 'config', 'tank_params.yaml')
     else:
         raise RuntimeError(f'Unsupported robot_type: {robot_type}')
 

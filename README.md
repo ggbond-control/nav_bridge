@@ -1,5 +1,9 @@
 # Nav Bridge — ROS2 ↔ 绝影 X30 UDP 导航桥接节点
 
+项目也支持按平台选择的 D1 Max、Cyvet 和 TANK 后端。
+TANK 四轮巡检车的 HTTP 控制、参数、服务语义与验证方式见 [TANK.md](TANK.md)，
+通过 `robot_type:=tank` 启动；以下章节主要描述 X30。
+
 `nav_bridge` 是一个基于 C++ 的 ROS2 节点，用来把上层导航系统的标准接口桥接到绝影 X30 的 UDP 控制协议上。
 
 它主要完成两件事：

@@ -1,0 +1,31 @@
+nav_bridge_node:
+  ros__parameters:
+    # Startup parameters: change this file/CLI and restart to apply.
+    host_ip: "49.235.44.225"
+    host_port: 10050
+    connect_timeout_ms: 500
+    http_timeout_ms: 3000
+    move_timeout_ms: 1000       # HTTP response deadline, not the send period
+    move_failure_limit: 3      # Consecutive transport failures before disconnect
+    state_failure_limit: 3
+    move_failure_timeout_ms: 2000  # Max unacknowledged motion age, checked between requests
+    reconnect_interval_ms: 2000
+
+    # Device requires >= ~3 Hz. Each tick uses the latest command; no backlog.
+    cmd_vel_rate_hz: 10.0
+    cmd_vel_timeout_ms: 500
+    max_linear_speed: 1.2       # m/s; may be reduced, never exceed 1.2
+    max_angular_speed: 1.0      # rad/s; provisional, confirm on hardware
+
+    state_poll_interval_ms: 1000
+    battery_poll_interval_ms: 3000
+    raw_vel_poll_rate_hz: 10.0  # Observed chassis velocity; independent HTTP polling
+    raw_vel_timeout_ms: 500
+    # Must exceed state_poll_interval_ms + 2 * http_timeout_ms.
+    telemetry_timeout_ms: 10000
+    state_publish_rate_hz: 10.0
+    # Start control only if Idle is confirmed and existing brake is OFF.
+    # Only an explicit ready/stand clears the software brake.
+    startup_acquire_control: true
+    # false = query-only diagnosis: no control requests, even zero speed or teardown.
+    enable_motion_output: true

@@ -1,0 +1,17 @@
+nav_bridge_node:
+  ros__parameters:
+    # For endpoint diagnosis only. No mode/brake/velocity control is sent,
+    # including startup, reconnection, services, and shutdown.
+    host_ip: "49.235.44.225"
+    host_port: 10050
+    enable_motion_output: false
+    startup_acquire_control: false
+    connect_timeout_ms: 500
+    http_timeout_ms: 3000
+    telemetry_timeout_ms: 10000
+    reconnect_interval_ms: 2000
+    state_poll_interval_ms: 1000
+    battery_poll_interval_ms: 3000
+    raw_vel_poll_rate_hz: 10.0
+    raw_vel_timeout_ms: 500
+    state_publish_rate_hz: 10.0

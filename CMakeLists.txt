@@ -142,6 +142,33 @@ if(NAV_BRIDGE_BUILD_CYVET)
   install(FILES CYVET.md DESTINATION share/${PROJECT_NAME})
 endif()
 
+option(NAV_BRIDGE_BUILD_TANK "Build the TANK HTTP chassis backend" OFF)
+if(NAV_BRIDGE_BUILD_TANK)
+  find_package(CURL REQUIRED)
+  find_package(PkgConfig REQUIRED)
+  pkg_check_modules(TANK_JSONCPP REQUIRED IMPORTED_TARGET jsoncpp)
+  add_library(nav_bridge_tank_backend STATIC src/tank/tank_backend.cpp)
+  target_include_directories(nav_bridge_tank_backend PUBLIC
+    $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
+    $<INSTALL_INTERFACE:include>)
+  target_link_libraries(nav_bridge_tank_backend PUBLIC CURL::libcurl PkgConfig::TANK_JSONCPP Threads::Threads)
+  add_executable(tank_nav_bridge_node src/tank/tank_nav_bridge_node.cpp)
+  ament_target_dependencies(tank_nav_bridge_node
+    rclcpp geometry_msgs std_msgs std_srvs rcl_interfaces)
+  target_link_libraries(tank_nav_bridge_node nav_bridge_tank_backend)
+  install(TARGETS nav_bridge_tank_backend ARCHIVE DESTINATION lib)
+  install(TARGETS tank_nav_bridge_node DESTINATION lib/${PROJECT_NAME})
+  install(FILES TANK.md DESTINATION share/${PROJECT_NAME})
+  if(BUILD_TESTING)
+    find_package(ament_cmake_test REQUIRED)
+    ament_add_test(tank_protocol_integration
+      GENERATE_RESULT_FOR_RETURN_CODE_ZERO
+      COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/test/tank/integration.py"
+        --executable "$<TARGET_FILE:tank_nav_bridge_node>"
+      TIMEOUT 120)
+  endif()
+endif()
+
 install(DIRECTORY include/
   DESTINATION include)
 
