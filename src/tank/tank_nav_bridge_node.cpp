@@ -122,6 +122,8 @@ public:
             diagnostics.data = backend_->diagnostics();
             diagnostics_pub_->publish(diagnostics);
         });
+        RCLCPP_INFO(get_logger(), "TANK connecting to http://%s:%d",
+                    options.host_ip.c_str(), options.host_port);
         const auto result = backend_->connect();
         RCLCPP_INFO(get_logger(), "TANK initial connection: %s; failed connections retry in background",
                     result.message.c_str());
