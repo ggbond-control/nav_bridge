@@ -169,6 +169,30 @@ if(NAV_BRIDGE_BUILD_TANK)
   endif()
 endif()
 
+option(NAV_BRIDGE_BUILD_R750 "Build the R750 serial chassis backend" OFF)
+if(NAV_BRIDGE_BUILD_R750)
+  add_library(nav_bridge_r750_backend STATIC src/r750/r750_backend.cpp)
+  target_include_directories(nav_bridge_r750_backend PUBLIC
+    $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
+    $<INSTALL_INTERFACE:include>)
+  target_link_libraries(nav_bridge_r750_backend PUBLIC Threads::Threads)
+  add_executable(r750_nav_bridge_node src/r750/r750_nav_bridge_node.cpp)
+  ament_target_dependencies(r750_nav_bridge_node
+    rclcpp geometry_msgs std_msgs std_srvs rcl_interfaces)
+  target_link_libraries(r750_nav_bridge_node nav_bridge_r750_backend)
+  install(TARGETS nav_bridge_r750_backend ARCHIVE DESTINATION lib)
+  install(TARGETS r750_nav_bridge_node DESTINATION lib/${PROJECT_NAME})
+  install(FILES R750.md DESTINATION share/${PROJECT_NAME})
+  if(BUILD_TESTING)
+    find_package(ament_cmake_test REQUIRED)
+    ament_add_test(r750_protocol_integration
+      GENERATE_RESULT_FOR_RETURN_CODE_ZERO
+      COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/test/r750/integration.py"
+        --executable "$<TARGET_FILE:r750_nav_bridge_node>"
+      TIMEOUT 120)
+  endif()
+endif()
+
 install(DIRECTORY include/
   DESTINATION include)
 

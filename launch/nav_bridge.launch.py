@@ -27,6 +27,9 @@ def launch_node(context):
     elif robot_type == 'tank':
         executable = 'tank_nav_bridge_node'
         params_file = os.path.join(pkg_dir, 'config', 'tank_params.yaml')
+    elif robot_type == 'r750':
+        executable = 'r750_nav_bridge_node'
+        params_file = os.path.join(pkg_dir, 'config', 'r750_params.yaml')
     else:
         raise RuntimeError(f'Unsupported robot_type: {robot_type}')
 

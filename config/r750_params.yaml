@@ -1,0 +1,28 @@
+nav_bridge_node:
+  ros__parameters:
+    # Startup parameters: change this file/CLI and restart to apply.
+    # TARKBOT OpenCTR 主控串口（独占使用，勿与 tarkbot_robot 同时运行）。
+    serial_port: "/dev/ttyACM0"
+    serial_baud: 230400
+    connect_timeout_ms: 5000      # 打开串口后等待首帧遥测的时间
+    reconnect_interval_ms: 2000   # 链路失效后的重开间隔
+
+    # 下位机需要持续速度帧；每拍只发最新指令，无积压、无补发。
+    cmd_vel_rate_hz: 10.0         # 允许 3..100 Hz
+    cmd_vel_timeout_ms: 500       # 上层速度有效时间，超时后改发零速度
+    max_linear_speed: 0.7         # m/s，发送前限幅
+    max_angular_speed: 0.8        # rad/s，发送前限幅
+
+    # 0x10 遥测失效时间（标称 50 Hz），超时判定断链并重开串口。
+    telemetry_timeout_ms: 1000
+    state_publish_rate_hz: 10.0   # ROS 状态/诊断发布频率，允许 (0,100]
+
+    # true: 遥测连通后自动允许输出并开始发送零速度；
+    # 断线重连不会重新允许输出，只有显式 ready/stand 会。
+    startup_acquire_control: true
+    # false = 只读诊断：不发送任何速度帧，包括启动与退出。
+    enable_motion_output: true
+
+    # 3S 锂电池电压-电量线性映射区间。
+    battery_empty_voltage: 9.9
+    battery_full_voltage: 12.6
