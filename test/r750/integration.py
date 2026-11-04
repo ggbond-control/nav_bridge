@@ -192,7 +192,7 @@ def main():
     base_parameters = ['serial_baud:=230400', 'connect_timeout_ms:=3000',
                        'reconnect_interval_ms:=400', 'telemetry_timeout_ms:=800',
                        'cmd_vel_rate_hz:=10.0', 'cmd_vel_timeout_ms:=250',
-                       'max_linear_speed:=0.7', 'max_angular_speed:=0.8',
+                       'max_linear_speed:=0.7', 'max_angular_speed:=3.5',
                        'state_publish_rate_hz:=10.0']
 
     def node_command(port, extra=()):
@@ -330,9 +330,9 @@ def main():
         # (2) clamping at the configured speed limits.
         command_value[0] = (5.0, 9.0, 4.0)
         wait_for(lambda: decode(mock.frames[-1][1])[0] > .69, 'clamped linear command')
-        assert decode(mock.frames[-1][1]) == (.7, 0., .8), mock.frames[-1]
-        command_value[0] = (0., 0., -3.)
-        wait_for(lambda: decode(mock.frames[-1][1]) == (0., 0., -.8), 'clamped angular sign kept')
+        assert decode(mock.frames[-1][1]) == (.7, 0., 3.5), mock.frames[-1]
+        command_value[0] = (0., 0., -5.)
+        wait_for(lambda: decode(mock.frames[-1][1]) == (0., 0., -3.5), 'clamped angular sign kept')
 
         # Non-finite input clears the previous command.
         command_value[0] = (math.nan, 0., 0.)

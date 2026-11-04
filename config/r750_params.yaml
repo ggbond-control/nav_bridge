@@ -11,7 +11,7 @@ nav_bridge_node:
     cmd_vel_rate_hz: 10.0         # 允许 3..100 Hz
     cmd_vel_timeout_ms: 500       # 上层速度有效时间，超时后改发零速度
     max_linear_speed: 0.7         # m/s，发送前限幅
-    max_angular_speed: 0.8        # rad/s，发送前限幅
+    max_angular_speed: 3.5        # rad/s，发送前限幅
 
     # 0x10 遥测失效时间（标称 50 Hz），超时判定断链并重开串口。
     telemetry_timeout_ms: 1000

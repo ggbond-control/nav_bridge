@@ -16,7 +16,7 @@ struct R750Options {
     double cmd_vel_rate_hz{10.0};
     int cmd_vel_timeout_ms{500};
     double max_linear_speed{0.7};
-    double max_angular_speed{0.8};
+    double max_angular_speed{3.5};
     int telemetry_timeout_ms{1000};
     double state_publish_rate_hz{10.0};
     bool startup_acquire_control{true};
