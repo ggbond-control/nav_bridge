@@ -391,8 +391,8 @@ BackendResult D1MaxBackend::stand() {
     }
 
     // The unified /stand contract means standing in MOUNTAIN, not merely any
-    // generic locomotion state. Reuse setGait(33) so the SDK command and
-    // feedback wait are identical to the explicit gait service.
+    // generic locomotion state. Reuse setGait(33) so both entrypoints apply
+    // the same high-speed mapping for normal Move() commands.
     const auto mountain = setGait(33);
     if (!mountain.success) return mountain;
     return {true, "D1 Max is standing in the general navigation mode (MOUNTAIN), high speed."};
@@ -556,32 +556,29 @@ BackendResult D1MaxBackend::setGait(int gait) {
                          connect_timeout_ms_)) {
             return {false, "Timeout waiting for D1 stair mode."};
         }
-    } else {
+    } else if (gait == 32) {
         ec = client_->Gait(connect_timeout_ms_);
         if (ec) return fromError(ec);
         if (!wait_status({static_cast<int>(MotionStatus::MOTION_STATUS_GAIT),
                           static_cast<int>(MotionStatus::MOTION_STATUS_WALK),
                           static_cast<int>(MotionStatus::MOTION_STATUS_BALANCE_STAND)},
                          connect_timeout_ms_)) {
-            return {false, "Timeout waiting for D1 general gait mode."};
+            return {false, "Timeout waiting for D1 Gait posture."};
         }
-        // L_WALK is represented by the SDK's dedicated Gait posture. It is
-        // intentionally not followed by SetSpeed(SLOW): SDK Gait is a distinct
-        // mode, not merely the low-speed variant of the general posture.
-        if (gait != 32) {
-            int speed = static_cast<int>(robot_sdk::SpeedLevel::SPEED_LEVEL_MEDIUM);
-            if (gait == 0) speed = static_cast<int>(robot_sdk::SpeedLevel::SPEED_LEVEL_SLOW);
-            else if (gait == 3 || gait == 33) {
-                speed = static_cast<int>(robot_sdk::SpeedLevel::SPEED_LEVEL_HIGH);
-            }
-            auto speed_result = setSpeed(speed);
-            if (!speed_result.success) return speed_result;
-        } else {
-            // Keep the local velocity contract at general-mode medium speed,
-            // without sending SetSpeed() to the dedicated Gait posture.
-            std::lock_guard<std::mutex> lock(mutex_);
-            speed_level_ = static_cast<int>(robot_sdk::SpeedLevel::SPEED_LEVEL_MEDIUM);
+        // L_WALK uses the dedicated Gait posture without SetSpeed(). Keep
+        // its local ROS-to-SDK velocity contract at general-mode medium speed.
+        std::lock_guard<std::mutex> lock(mutex_);
+        speed_level_ = static_cast<int>(robot_sdk::SpeedLevel::SPEED_LEVEL_MEDIUM);
+    } else {
+        // Normal locomotion uses Move() with a speed level. Gait() selects
+        // the separate fine-grained posture reserved above for L_WALK.
+        int speed = static_cast<int>(robot_sdk::SpeedLevel::SPEED_LEVEL_MEDIUM);
+        if (gait == 0) speed = static_cast<int>(robot_sdk::SpeedLevel::SPEED_LEVEL_SLOW);
+        else if (gait == 3 || gait == 33) {
+            speed = static_cast<int>(robot_sdk::SpeedLevel::SPEED_LEVEL_HIGH);
         }
+        auto speed_result = setSpeed(speed);
+        if (!speed_result.success) return speed_result;
     }
 
     {

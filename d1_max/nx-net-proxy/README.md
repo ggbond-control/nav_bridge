@@ -21,6 +21,13 @@
 
 2026-10-23 迁移时 B 已部署并启用此服务，复用了本目录的程序和服务实现。下述日常操作均在目标 **cat 主机**执行；NX 上的应用仍必须由 robot-launch 管理。
 
+2026-10-30 已在 A 的 `/home/cat/Scripts/nx-net-proxy/` 部署与 B 校验一致的
+启动脚本、服务文件及 proxy.py 2.4.10 离线依赖，服务状态为 `active`、`enabled`。
+NX-A 经 `192.168.168.111:18080` 访问百度 HTTPS 返回 200、DashScope 根路径
+返回 404（已连通站点，不代表 API 鉴权或模型调用验证），APT 成功下载 Ubuntu
+jammy Release（269 kB）。未修改 NX 网络或应用配置；未重启整机验证自启。
+服务 Description 仍保留与 B 一致的 “via D1M-B” 文本，不影响 A 上运行。
+
 ## cat 日常操作
 
 以下命令在目标 cat 上以 `cat` 用户执行。启停需要 sudo 权限，可能提示
@@ -57,26 +64,27 @@ sudo systemctl enable --now nx-net-proxy.service
 
 ## 从本目录重新部署
 
-在本机本目录执行。A 的地址为 `47.99.202.196`、端口 `20004`；B 的地址为 `10.0.40.237`、端口 `22`。SSH 密码通过交互输入。选择目标机器对应的一组命令。
+在本机本目录执行。当前 A、B 的公网地址均为 `121.41.75.74`，A 的端口为
+`20008`，B 的端口为 `20007`。SSH 密码通过交互输入。选择目标机器对应的一组命令。
 
 部署到 **B**：
 
 ```bash
-ssh cat@10.0.40.237 'mkdir -p ~/Scripts/nx-net-proxy/legacy'
-scp run.sh start.sh stop.sh install.sh nx-net-proxy.service README.md \
-  proxy.py-2.4.10-py3-none-any.whl cat@10.0.40.237:/home/cat/Scripts/nx-net-proxy/
-scp legacy/*.sh cat@10.0.40.237:/home/cat/Scripts/nx-net-proxy/legacy/
-ssh -t cat@10.0.40.237 'sh ~/Scripts/nx-net-proxy/install.sh'
+ssh -p 20007 cat@121.41.75.74 'mkdir -p ~/Scripts/nx-net-proxy/legacy'
+scp -P 20007 run.sh start.sh stop.sh install.sh nx-net-proxy.service README.md \
+  proxy.py-2.4.10-py3-none-any.whl cat@121.41.75.74:/home/cat/Scripts/nx-net-proxy/
+scp -P 20007 legacy/*.sh cat@121.41.75.74:/home/cat/Scripts/nx-net-proxy/legacy/
+ssh -t -p 20007 cat@121.41.75.74 'sh ~/Scripts/nx-net-proxy/install.sh'
 ```
 
 部署到 **A**：
 
 ```bash
-ssh -p 20004 cat@47.99.202.196 'mkdir -p ~/Scripts/nx-net-proxy/legacy'
-scp -P 20004 run.sh start.sh stop.sh install.sh nx-net-proxy.service README.md \
-  proxy.py-2.4.10-py3-none-any.whl cat@47.99.202.196:/home/cat/Scripts/nx-net-proxy/
-scp -P 20004 legacy/*.sh cat@47.99.202.196:/home/cat/Scripts/nx-net-proxy/legacy/
-ssh -t -p 20004 cat@47.99.202.196 'sh ~/Scripts/nx-net-proxy/install.sh'
+ssh -p 20008 cat@121.41.75.74 'mkdir -p ~/Scripts/nx-net-proxy/legacy'
+scp -P 20008 run.sh start.sh stop.sh install.sh nx-net-proxy.service README.md \
+  proxy.py-2.4.10-py3-none-any.whl cat@121.41.75.74:/home/cat/Scripts/nx-net-proxy/
+scp -P 20008 legacy/*.sh cat@121.41.75.74:/home/cat/Scripts/nx-net-proxy/legacy/
+ssh -t -p 20008 cat@121.41.75.74 'sh ~/Scripts/nx-net-proxy/install.sh'
 ```
 
 安装脚本在缺少依赖时解压本地 wheel，不需要联网安装系统软件。
@@ -89,9 +97,9 @@ ssh -t -p 20004 cat@47.99.202.196 'sh ~/Scripts/nx-net-proxy/install.sh'
 
 ```bash
 # A 的 NX
-ssh -J cat@47.99.202.196:20004 robot@192.168.168.100
+ssh -J cat@121.41.75.74:20008 -o HostKeyAlias=nx-a robot@192.168.168.100
 # B 的 NX
-ssh -J cat@10.0.40.237 robot@192.168.168.100
+ssh -J cat@121.41.75.74:20007 -o HostKeyAlias=nx-b robot@192.168.168.100
 ```
 
 在 NX 上单次请求：

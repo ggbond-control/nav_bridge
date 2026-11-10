@@ -310,10 +310,10 @@ private:
         switch (gait) {
         case 32: return "Gait() [L_WALK], ROS limit=general MEDIUM";
         case 6: case 7: case 8: case 36: return "Stair()";
-        case 0: return "Gait()+SetSpeed(SLOW)";
-        case 3: return "Gait()+SetSpeed(HIGH)";
-        case 33: return "Gait()+SetSpeed(HIGH)";
-        case 34: return "Gait()+SetSpeed(MEDIUM)";
+        case 0: return "Move()+SetSpeed(SLOW)";
+        case 3: return "Move()+SetSpeed(HIGH)";
+        case 33: return "Move()+SetSpeed(HIGH)";
+        case 34: return "Move()+SetSpeed(MEDIUM)";
         default: return "unsupported";
         }
     }
