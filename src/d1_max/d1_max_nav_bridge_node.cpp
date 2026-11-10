@@ -314,10 +314,10 @@ private:
         switch (gait) {
         case 32: return "Gait() [L_WALK], ROS limit=general MEDIUM";
         case 6: case 7: case 8: case 36: return "Stair()";
-        case 0: return "Move()+SetSpeed(SLOW)";
-        case 3: return "Move()+SetSpeed(HIGH)";
+        case 0: return "normal WALK (StandUp if needed)+SetSpeed(SLOW), feedback confirmed";
+        case 3: return "normal WALK (StandUp if needed)+SetSpeed(HIGH), feedback confirmed";
         case 33: return "Gait()+SetSpeed(HIGH)";
-        case 34: return "Move()+SetSpeed(MEDIUM)";
+        case 34: return "normal WALK (StandUp if needed)+SetSpeed(MEDIUM), feedback confirmed";
         case d1_max_gait::CRAWL_WALK: return "CrawlWalk()";
         case d1_max_gait::CLIMB: return "Climb()";
         case d1_max_gait::SLIM: return "Slim()";

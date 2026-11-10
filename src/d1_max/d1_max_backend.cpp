@@ -49,6 +49,8 @@ public:
             std::lock_guard<std::mutex> lock(owner_.mutex_);
             state.mode = owner_.navigation_gait_;
             owner_.motion_status_ = static_cast<int>(data.motion_status);
+            owner_.reported_speed_level_ = static_cast<int>(data.speed_level);
+            ++owner_.robot_state_sequence_;
             owner_.machine_status_ = static_cast<int>(data.machine_status);
             owner_.charging_pile_connected_ = data.charging_pile_connected;
             owner_.last_basic_state_time_ = std::chrono::steady_clock::now();
@@ -548,6 +550,8 @@ BackendResult D1MaxBackend::setGait(int gait) {
     };
     const int current = status();
     if (current == static_cast<int>(MotionStatus::MOTION_STATUS_WALK) ||
+        current == static_cast<int>(MotionStatus::MOTION_STATUS_GAIT) ||
+        current == static_cast<int>(MotionStatus::MOTION_STATUS_BALANCE_STAND) ||
         current == static_cast<int>(MotionStatus::MOTION_STATUS_CRAWL_WALK) ||
         current == static_cast<int>(MotionStatus::MOTION_STATUS_CLIMB) ||
         current == static_cast<int>(MotionStatus::MOTION_STATUS_SLIM) ||
@@ -614,15 +618,44 @@ BackendResult D1MaxBackend::setGait(int gait) {
             speed_level_ = static_cast<int>(robot_sdk::SpeedLevel::SPEED_LEVEL_MEDIUM);
         }
     } else {
-        // Normal locomotion uses Move() with a speed level. Gait() selects
-        // the separate fine-grained posture used above for L_WALK and MOUNTAIN.
+        // SetSpeed() does not leave Gait/Stair or another special posture.
+        // StandUp() selects normal locomotion and must finish in WALK.
+        auto sequence = [this]() {
+            std::lock_guard<std::mutex> lock(mutex_);
+            return robot_state_sequence_;
+        };
+        if (status() != static_cast<int>(MotionStatus::MOTION_STATUS_WALK)) {
+            const auto before_stand = sequence();
+            ec = client_->StandUp(connect_timeout_ms_);
+            if (ec) return fromError(ec);
+            std::unique_lock<std::mutex> lock(mutex_);
+            if (!motion_cv_.wait_for(lock, std::chrono::milliseconds(connect_timeout_ms_), [&]() {
+                    return robot_state_sequence_ > before_stand &&
+                           motion_status_ == static_cast<int>(MotionStatus::MOTION_STATUS_WALK);
+                })) {
+                return {false, "Timeout waiting for D1 normal WALK posture after StandUp."};
+            }
+        }
         int speed = static_cast<int>(robot_sdk::SpeedLevel::SPEED_LEVEL_MEDIUM);
         if (gait == 0) speed = static_cast<int>(robot_sdk::SpeedLevel::SPEED_LEVEL_SLOW);
         else if (gait == 3) {
             speed = static_cast<int>(robot_sdk::SpeedLevel::SPEED_LEVEL_HIGH);
         }
-        auto speed_result = setSpeed(speed);
-        if (!speed_result.success) return speed_result;
+        // A synchronous SDK return confirms sending, not application. Require
+        // fresh RobotState feedback for both posture and speed before committing
+        // the bridge gait or the velocity normalization scale.
+        const auto before_speed = sequence();
+        ec = client_->SetSpeed(speed, connect_timeout_ms_);
+        if (ec) return fromError(ec);
+        std::unique_lock<std::mutex> lock(mutex_);
+        if (!motion_cv_.wait_for(lock, std::chrono::milliseconds(connect_timeout_ms_), [&]() {
+                return robot_state_sequence_ > before_speed &&
+                       motion_status_ == static_cast<int>(MotionStatus::MOTION_STATUS_WALK) &&
+                       reported_speed_level_ == speed;
+            })) {
+            return {false, "Timeout waiting for D1 normal WALK posture and speed level feedback."};
+        }
+        speed_level_ = speed;
     }
 
     {

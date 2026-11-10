@@ -471,7 +471,14 @@ ros2 service call /nav_bridge_node/set_gait rcl_interfaces/srv/SetParameters \
 ```
 
 `MOUNTAIN(33)` 保持 `Gait()` + `SetSpeed(HIGH)`，`L_WALK(32)` 保持仅调用
-`Gait()`，楼梯类步态保持调用 `Stair()`。普通 `WALK/RUN/SILENT` 只调整对应速度档位。
+`Gait()`，楼梯类步态保持调用 `Stair()`。
+
+普通 `WALK/RUN/SILENT` 分别使用低/高/中速档。切换时先发送零速；
+若当前不是 SDK 的 `MOTION_STATUS_WALK`，调用 `StandUp()` 并等待新的
+`WALK` 反馈，以退出 `Gait()`、楼梯等姿态。随后发送 `SetSpeed()`，
+等待新的 `RobotState` 同时确认 `WALK` 和目标速度档位，才保存目标步态并返回成功。
+姿态或速度未确认时返回失败，不把命令发送成功视为切换完成。
+`/cmd_vel` 继续通过已有 `Move()` 链路执行，速度归一化逻辑保持不变。
 
 ### 8.3 按 YAML 启动
 
