@@ -18,6 +18,15 @@ class IControlCallback;
 
 namespace nav_bridge {
 
+// Bridge gait IDs for D1-only postures, separate from the shared gait IDs
+// and the SDK's MotionStatus values. Published on /robot_gait_state.
+namespace d1_max_gait {
+constexpr int CRAWL_WALK = 100;
+constexpr int CLIMB = 101;
+constexpr int SLIM = 102;
+constexpr int DSB = 103;
+}  // namespace d1_max_gait
+
 class D1MaxBackend final : public RobotBackend {
 public:
     D1MaxBackend(std::string host_ip, int host_port, bool auto_reconnect,

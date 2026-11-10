@@ -190,7 +190,11 @@ public:
                         static const std::map<std::string, int> names = {
                             {"WALK", 0}, {"RUN", 3}, {"STAIR_SOLID", 6}, {"STAIR_ACC", 7},
                             {"STAIR45_ACC", 8}, {"L_WALK", 32}, {"MOUNTAIN", 33},
-                            {"SILENT", 34}, {"L_STAIR", 36}, {"STAIR", 6}};
+                            {"SILENT", 34}, {"L_STAIR", 36}, {"STAIR", 6},
+                            {"CRAWL_WALK", d1_max_gait::CRAWL_WALK},
+                            {"CRAWLWALK", d1_max_gait::CRAWL_WALK},
+                            {"CLIMB", d1_max_gait::CLIMB}, {"SLIM", d1_max_gait::SLIM},
+                            {"DSB", d1_max_gait::DSB}};
                         const auto it = names.find(name);
                         if (it != names.end()) gait = it->second;
                     }
@@ -312,8 +316,12 @@ private:
         case 6: case 7: case 8: case 36: return "Stair()";
         case 0: return "Move()+SetSpeed(SLOW)";
         case 3: return "Move()+SetSpeed(HIGH)";
-        case 33: return "Move()+SetSpeed(HIGH)";
+        case 33: return "Gait()+SetSpeed(HIGH)";
         case 34: return "Move()+SetSpeed(MEDIUM)";
+        case d1_max_gait::CRAWL_WALK: return "CrawlWalk()";
+        case d1_max_gait::CLIMB: return "Climb()";
+        case d1_max_gait::SLIM: return "Slim()";
+        case d1_max_gait::DSB: return "DSB()";
         default: return "unsupported";
         }
     }

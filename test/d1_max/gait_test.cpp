@@ -18,12 +18,22 @@ int stand_calls = 0;
 std::vector<int> speeds;
 std::vector<std::array<float, 3>> moves;
 std::error_code speed_error;
+std::vector<robot_sdk::MotionStatus> special_postures;
+std::error_code posture_error;
+bool acknowledge_posture = true;
 
 void posture(robot_sdk::MotionStatus status) {
     robot_sdk::RobotState data{};
     data.motion_status = status;
     data.control_source = robot_sdk::CtrlSource::CTRL_SOURCE_SDK;
     callback.lock()->OnRobotStateData(data);
+}
+
+std::error_code selectPosture(robot_sdk::MotionStatus status) {
+    special_postures.push_back(status);
+    if (posture_error) return posture_error;
+    if (acknowledge_posture) posture(status);
+    return {};
 }
 }  // namespace sdk_gait_test
 
@@ -57,9 +67,32 @@ std::error_code SDKClient::StandUp(int, WriteHandler) {
     sdk_gait_test::posture(MotionStatus::MOTION_STATUS_WALK);
     return {};
 }
+std::error_code SDKClient::CrawlWalk(int, WriteHandler) {
+    return sdk_gait_test::selectPosture(MotionStatus::MOTION_STATUS_CRAWL_WALK);
+}
+std::error_code SDKClient::Climb(int, WriteHandler) {
+    return sdk_gait_test::selectPosture(MotionStatus::MOTION_STATUS_CLIMB);
+}
+std::error_code SDKClient::Slim(int, WriteHandler) {
+    return sdk_gait_test::selectPosture(MotionStatus::MOTION_STATUS_SLIM);
+}
+std::error_code SDKClient::DSB(int, WriteHandler) {
+    return sdk_gait_test::selectPosture(MotionStatus::MOTION_STATUS_DSB);
+}
 }  // namespace robot_sdk
 
 namespace nav_bridge {
+struct SpecialPostureMapping {
+    int gait;
+    robot_sdk::MotionStatus status;
+};
+constexpr SpecialPostureMapping special_mappings[] = {
+    {d1_max_gait::CRAWL_WALK, robot_sdk::MotionStatus::MOTION_STATUS_CRAWL_WALK},
+    {d1_max_gait::CLIMB, robot_sdk::MotionStatus::MOTION_STATUS_CLIMB},
+    {d1_max_gait::SLIM, robot_sdk::MotionStatus::MOTION_STATUS_SLIM},
+    {d1_max_gait::DSB, robot_sdk::MotionStatus::MOTION_STATUS_DSB},
+};
+
 class D1MaxGaitTest : public testing::Test {
 protected:
     D1MaxBackend backend{"127.0.0.1", 8082, false, 100, 100, false};
@@ -71,6 +104,9 @@ protected:
         sdk_gait_test::speeds.clear();
         sdk_gait_test::moves.clear();
         sdk_gait_test::speed_error = {};
+        sdk_gait_test::special_postures.clear();
+        sdk_gait_test::posture_error = {};
+        sdk_gait_test::acknowledge_posture = true;
         sdk_gait_test::posture(robot_sdk::MotionStatus::MOTION_STATUS_WALK);
     }
 
@@ -86,7 +122,7 @@ protected:
 
 TEST_F(D1MaxGaitTest, NormalGaitsUseSpeedAndMoveWithoutSelectingPosture) {
     struct Mapping { int gait; int speed; };
-    for (const auto mapping : {Mapping{0, 1}, Mapping{3, 3}, Mapping{33, 3}, Mapping{34, 2}}) {
+    for (const auto mapping : {Mapping{0, 1}, Mapping{3, 3}, Mapping{34, 2}}) {
         SCOPED_TRACE(mapping.gait);
         sdk_gait_test::speeds.clear();
         sdk_gait_test::moves.clear();
@@ -111,6 +147,15 @@ TEST_F(D1MaxGaitTest, LWalkKeepsDedicatedGaitAndMediumNormalization) {
     expectMove(2.0);
 }
 
+TEST_F(D1MaxGaitTest, MountainSelectsGaitAndHighSpeed) {
+    ASSERT_TRUE(backend.setGait(33).success);
+    EXPECT_EQ(sdk_gait_test::gait_calls, 1);
+    EXPECT_EQ(sdk_gait_test::stair_calls, 0);
+    EXPECT_EQ(sdk_gait_test::speeds, std::vector<int>{3});
+    EXPECT_EQ(backend.state().mode, 33);
+    expectMove(3.0);
+}
+
 TEST_F(D1MaxGaitTest, StairMappingsKeepStairAndFixedNormalization) {
     ASSERT_TRUE(backend.setSpeed(3).success);
     sdk_gait_test::speeds.clear();
@@ -125,11 +170,11 @@ TEST_F(D1MaxGaitTest, StairMappingsKeepStairAndFixedNormalization) {
     }
 }
 
-TEST_F(D1MaxGaitTest, StandFromLieDownPreparesNormalHighSpeedWithoutGait) {
+TEST_F(D1MaxGaitTest, StandFromLieDownPreparesMountainGaitAndHighSpeed) {
     sdk_gait_test::posture(robot_sdk::MotionStatus::MOTION_STATUS_LIE_DOWN);
     ASSERT_TRUE(backend.stand().success);
     EXPECT_EQ(sdk_gait_test::stand_calls, 1);
-    EXPECT_EQ(sdk_gait_test::gait_calls, 0);
+    EXPECT_EQ(sdk_gait_test::gait_calls, 1);
     EXPECT_EQ(sdk_gait_test::speeds, std::vector<int>{3});
     EXPECT_EQ(backend.state().mode, 33);
     expectMove(3.0);
@@ -140,7 +185,67 @@ TEST_F(D1MaxGaitTest, FailedSpeedChangePreservesPreviousGaitAndNormalization) {
     sdk_gait_test::speed_error = std::make_error_code(std::errc::io_error);
     EXPECT_FALSE(backend.setGait(33).success);
     EXPECT_EQ(backend.state().mode, 0);
-    EXPECT_EQ(sdk_gait_test::gait_calls, 0);
+    EXPECT_EQ(sdk_gait_test::gait_calls, 1);
     expectMove(1.0);
+}
+
+TEST_F(D1MaxGaitTest, SpecialPosturesSelectSdkCommandAndAllowMoveWithoutChangingSpeed) {
+    ASSERT_TRUE(backend.setSpeed(3).success);
+    sdk_gait_test::speeds.clear();
+    for (const auto &mapping : special_mappings) {
+        SCOPED_TRACE(mapping.gait);
+        sdk_gait_test::special_postures.clear();
+        sdk_gait_test::moves.clear();
+        ASSERT_TRUE(backend.setGait(mapping.gait).success);
+        EXPECT_EQ(sdk_gait_test::special_postures,
+                  std::vector<robot_sdk::MotionStatus>{mapping.status});
+        EXPECT_EQ(backend.state().mode, mapping.gait);
+        EXPECT_TRUE(backend.velocityCommandAllowed());
+        EXPECT_EQ(backend.bodyHeightState(), mapping.gait == d1_max_gait::CRAWL_WALK ? -1 : 0);
+        EXPECT_TRUE(sdk_gait_test::speeds.empty());
+        EXPECT_EQ(sdk_gait_test::gait_calls, 0);
+        EXPECT_EQ(sdk_gait_test::stair_calls, 0);
+        ASSERT_EQ(sdk_gait_test::moves.size(), 1U);
+        EXPECT_EQ(sdk_gait_test::moves.front(), (std::array<float, 3>{0, 0, 0}));
+        expectMove(3.0);
+    }
+}
+
+TEST_F(D1MaxGaitTest, SpecialPosturesCanReturnToMountain) {
+    for (const auto &mapping : special_mappings) {
+        SCOPED_TRACE(mapping.gait);
+        ASSERT_TRUE(backend.setGait(mapping.gait).success);
+        sdk_gait_test::moves.clear();
+        ASSERT_TRUE(backend.setGait(33).success);
+        EXPECT_EQ(backend.state().mode, 33);
+        EXPECT_EQ(sdk_gait_test::speeds.back(), 3);
+        ASSERT_EQ(sdk_gait_test::moves.size(), 1U);
+        EXPECT_EQ(sdk_gait_test::moves.front(), (std::array<float, 3>{0, 0, 0}));
+    }
+    EXPECT_EQ(sdk_gait_test::gait_calls, 4);
+}
+
+TEST_F(D1MaxGaitTest, SpecialPostureSdkErrorsPreservePreviousGait) {
+    ASSERT_TRUE(backend.setGait(0).success);
+    sdk_gait_test::posture_error = std::make_error_code(std::errc::io_error);
+    for (const auto &mapping : special_mappings) {
+        SCOPED_TRACE(mapping.gait);
+        EXPECT_FALSE(backend.setGait(mapping.gait).success);
+        EXPECT_EQ(backend.state().mode, 0);
+        expectMove(1.0);
+    }
+}
+
+TEST_F(D1MaxGaitTest, SpecialPostureSendSuccessRequiresMatchingFeedback) {
+    ASSERT_TRUE(backend.setGait(0).success);
+    sdk_gait_test::acknowledge_posture = false;
+    for (const auto &mapping : special_mappings) {
+        SCOPED_TRACE(mapping.gait);
+        const auto result = backend.setGait(mapping.gait);
+        EXPECT_FALSE(result.success);
+        EXPECT_NE(result.message.find("Timeout waiting"), std::string::npos);
+        EXPECT_EQ(backend.state().mode, 0);
+        expectMove(1.0);
+    }
 }
 }  // namespace nav_bridge

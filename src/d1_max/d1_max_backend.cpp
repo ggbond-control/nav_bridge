@@ -392,7 +392,7 @@ BackendResult D1MaxBackend::stand() {
 
     // The unified /stand contract means standing in MOUNTAIN, not merely any
     // generic locomotion state. Reuse setGait(33) so both entrypoints apply
-    // the same high-speed mapping for normal Move() commands.
+    // the same Gait() posture and high-speed mapping.
     const auto mountain = setGait(33);
     if (!mountain.success) return mountain;
     return {true, "D1 Max is standing in the general navigation mode (MOUNTAIN), high speed."};
@@ -449,6 +449,8 @@ BackendResult D1MaxBackend::lie() {
     const bool locomotion = current == walk || current == crawl_walk ||
                             current == static_cast<int>(MotionStatus::MOTION_STATUS_STAIR) ||
                             current == static_cast<int>(MotionStatus::MOTION_STATUS_CLIMB) ||
+                            current == static_cast<int>(MotionStatus::MOTION_STATUS_SLIM) ||
+                            current == static_cast<int>(MotionStatus::MOTION_STATUS_DSB) ||
                             current == static_cast<int>(MotionStatus::MOTION_STATUS_SK_WALK);
     if (locomotion) {
         auto result = fromError(client_->Move(0.0F, 0.0F, 0.0F, connect_timeout_ms_));
@@ -458,6 +460,8 @@ BackendResult D1MaxBackend::lie() {
         if (!wait_status({walk, balance_stand, gait, crawl, crawl_walk,
                           static_cast<int>(MotionStatus::MOTION_STATUS_STAIR),
                           static_cast<int>(MotionStatus::MOTION_STATUS_CLIMB),
+                          static_cast<int>(MotionStatus::MOTION_STATUS_SLIM),
+                          static_cast<int>(MotionStatus::MOTION_STATUS_DSB),
                           static_cast<int>(MotionStatus::MOTION_STATUS_SK_WALK)},
                          connect_timeout_ms_)) {
             return {false, "Timeout waiting for D1 motion to stop."};
@@ -521,10 +525,13 @@ BackendResult D1MaxBackend::setGait(int gait) {
     using robot_sdk::MotionStatus;
     const bool general = gait == 0 || gait == 3 || gait == 32 || gait == 33 || gait == 34;
     const bool stair = gait == 6 || gait == 7 || gait == 8 || gait == 36;
-    if (!general && !stair) {
+    const bool special = gait == d1_max_gait::CRAWL_WALK || gait == d1_max_gait::CLIMB ||
+                         gait == d1_max_gait::SLIM || gait == d1_max_gait::DSB;
+    if (!general && !stair && !special) {
         return {false, "Unsupported D1 gait. Supported: WALK(0), RUN(3), L_WALK(32), "
                        "MOUNTAIN(33), SILENT(34), STAIR_SOLID(6), STAIR_ACC(7), "
-                       "STAIR45_ACC(8), L_STAIR(36)."};
+                       "STAIR45_ACC(8), L_STAIR(36), CRAWL_WALK(100), CLIMB(101), "
+                       "SLIM(102), DSB(103)."};
     }
 
     auto control = takeControl();
@@ -542,6 +549,9 @@ BackendResult D1MaxBackend::setGait(int gait) {
     const int current = status();
     if (current == static_cast<int>(MotionStatus::MOTION_STATUS_WALK) ||
         current == static_cast<int>(MotionStatus::MOTION_STATUS_CRAWL_WALK) ||
+        current == static_cast<int>(MotionStatus::MOTION_STATUS_CLIMB) ||
+        current == static_cast<int>(MotionStatus::MOTION_STATUS_SLIM) ||
+        current == static_cast<int>(MotionStatus::MOTION_STATUS_DSB) ||
         current == static_cast<int>(MotionStatus::MOTION_STATUS_STAIR)) {
         auto stop = fromError(client_->Move(0.0F, 0.0F, 0.0F, connect_timeout_ms_));
         if (!stop.success) return stop;
@@ -549,14 +559,43 @@ BackendResult D1MaxBackend::setGait(int gait) {
     }
 
     std::error_code ec;
-    if (stair) {
+    if (special) {
+        MotionStatus target = MotionStatus::MOTION_STATUS_UNKNOWN;
+        const char *posture_name = "";
+        switch (gait) {
+        case d1_max_gait::CRAWL_WALK:
+            ec = client_->CrawlWalk(connect_timeout_ms_);
+            target = MotionStatus::MOTION_STATUS_CRAWL_WALK;
+            posture_name = "CrawlWalk";
+            break;
+        case d1_max_gait::CLIMB:
+            ec = client_->Climb(connect_timeout_ms_);
+            target = MotionStatus::MOTION_STATUS_CLIMB;
+            posture_name = "Climb";
+            break;
+        case d1_max_gait::SLIM:
+            ec = client_->Slim(connect_timeout_ms_);
+            target = MotionStatus::MOTION_STATUS_SLIM;
+            posture_name = "Slim";
+            break;
+        case d1_max_gait::DSB:
+            ec = client_->DSB(connect_timeout_ms_);
+            target = MotionStatus::MOTION_STATUS_DSB;
+            posture_name = "DSB";
+            break;
+        }
+        if (ec) return fromError(ec);
+        if (!wait_status({static_cast<int>(target)}, connect_timeout_ms_)) {
+            return {false, std::string("Timeout waiting for D1 ") + posture_name + " posture."};
+        }
+    } else if (stair) {
         ec = client_->Stair(connect_timeout_ms_);
         if (ec) return fromError(ec);
         if (!wait_status({static_cast<int>(MotionStatus::MOTION_STATUS_STAIR)},
                          connect_timeout_ms_)) {
             return {false, "Timeout waiting for D1 stair mode."};
         }
-    } else if (gait == 32) {
+    } else if (gait == 32 || gait == 33) {
         ec = client_->Gait(connect_timeout_ms_);
         if (ec) return fromError(ec);
         if (!wait_status({static_cast<int>(MotionStatus::MOTION_STATUS_GAIT),
@@ -565,16 +604,21 @@ BackendResult D1MaxBackend::setGait(int gait) {
                          connect_timeout_ms_)) {
             return {false, "Timeout waiting for D1 Gait posture."};
         }
-        // L_WALK uses the dedicated Gait posture without SetSpeed(). Keep
-        // its local ROS-to-SDK velocity contract at general-mode medium speed.
-        std::lock_guard<std::mutex> lock(mutex_);
-        speed_level_ = static_cast<int>(robot_sdk::SpeedLevel::SPEED_LEVEL_MEDIUM);
+        if (gait == 33) {
+            auto speed_result = setSpeed(static_cast<int>(robot_sdk::SpeedLevel::SPEED_LEVEL_HIGH));
+            if (!speed_result.success) return speed_result;
+        } else {
+            // L_WALK uses the dedicated Gait posture without SetSpeed(). Keep
+            // its local ROS-to-SDK velocity contract at general-mode medium speed.
+            std::lock_guard<std::mutex> lock(mutex_);
+            speed_level_ = static_cast<int>(robot_sdk::SpeedLevel::SPEED_LEVEL_MEDIUM);
+        }
     } else {
         // Normal locomotion uses Move() with a speed level. Gait() selects
-        // the separate fine-grained posture reserved above for L_WALK.
+        // the separate fine-grained posture used above for L_WALK and MOUNTAIN.
         int speed = static_cast<int>(robot_sdk::SpeedLevel::SPEED_LEVEL_MEDIUM);
         if (gait == 0) speed = static_cast<int>(robot_sdk::SpeedLevel::SPEED_LEVEL_SLOW);
-        else if (gait == 3 || gait == 33) {
+        else if (gait == 3) {
             speed = static_cast<int>(robot_sdk::SpeedLevel::SPEED_LEVEL_HIGH);
         }
         auto speed_result = setSpeed(speed);
@@ -920,6 +964,9 @@ bool D1MaxBackend::velocityCommandAllowed() const {
     case MotionStatus::MOTION_STATUS_BALANCE_STAND:
     case MotionStatus::MOTION_STATUS_GAIT:
     case MotionStatus::MOTION_STATUS_CRAWL_WALK:
+    case MotionStatus::MOTION_STATUS_CLIMB:
+    case MotionStatus::MOTION_STATUS_SLIM:
+    case MotionStatus::MOTION_STATUS_DSB:
     case MotionStatus::MOTION_STATUS_STAIR:
         return true;
     default:

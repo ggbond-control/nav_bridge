@@ -448,7 +448,32 @@ colcon build --packages-select nav_bridge --cmake-clean-cache --symlink-install 
 `--cmake-clean-cache` 会清除旧缓存。若省略它，历史配置可能导致未预期的
 可执行文件仍被保留或缺失。
 
-### 8.2 按 YAML 启动
+### 8.2 D1 Max 姿态映射
+
+D1 Max 的 `~/set_gait` 支持以下 D1 专用姿态。字符串名称不区分大小写；
+`CrawlWalk` 和 `CRAWL_WALK` 均可使用。整数编号为桥接扩展编号，
+与 SDK 的 `MotionStatus` 数值无关，成功后发布到 `/robot_gait_state`。
+
+| 名称 | 桥接编号 | SDK 指令 | 用途 |
+| --- | --- | --- | --- |
+| `CRAWL_WALK` / `CrawlWalk` | `100` | `CrawlWalk()` | 匍匐行走 |
+| `CLIMB` | `101` | `Climb()` | 爬高台 |
+| `SLIM` | `102` | `Slim()` | 过窄门 |
+| `DSB` | `103` | `DSB()` | 过挡鼠板 |
+
+从行走、楼梯或上述专用姿态切换时，先发送零速，再发送姿态指令并等待匹配的 SDK 姿态反馈。
+这些姿态均允许通过 `/cmd_vel` 转发 `Move()`；不额外发送 `SetSpeed()`，
+沿用当前速度档位进行既有归一化。`CRAWL_WALK` 下 `/robot_body_height_state` 为 `-1`。
+
+```bash
+ros2 service call /nav_bridge_node/set_gait rcl_interfaces/srv/SetParameters \
+  "{parameters: [{name: gait, value: {type: 4, string_value: CrawlWalk}}]}"
+```
+
+`MOUNTAIN(33)` 保持 `Gait()` + `SetSpeed(HIGH)`，`L_WALK(32)` 保持仅调用
+`Gait()`，楼梯类步态保持调用 `Stair()`。普通 `WALK/RUN/SILENT` 只调整对应速度档位。
+
+### 8.3 按 YAML 启动
 
 编译完成后，统一 launch 从 `config/nav_bridge.yaml` 的 `robot_type` 选择
 可执行文件：`x30` 对应 `x30_nav_bridge_node`，`d1_max` 对应
