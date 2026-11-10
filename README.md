@@ -462,23 +462,39 @@ D1 Max 的 `~/set_gait` 支持以下 D1 专用姿态。字符串名称不区分�
 | `DSB` | `103` | `DSB()` | 过挡鼠板 |
 
 从行走、楼梯或上述专用姿态切换时，先发送零速，再发送姿态指令并等待匹配的 SDK 姿态反馈。
-这些姿态均允许通过 `/cmd_vel` 转发 `Move()`；不额外发送 `SetSpeed()`，
-沿用当前速度档位进行既有归一化。`CRAWL_WALK` 下 `/robot_body_height_state` 为 `-1`。
+这些姿态均允许通过 `/cmd_vel` 转发 `Move()`；不发送 `SetSpeed()`，
+固定按低速尺度换算速度，不沿用之前的中/高速换算。
+`CRAWL_WALK` 下 `/robot_body_height_state` 为 `-1`。
 
 ```bash
 ros2 service call /nav_bridge_node/set_gait rcl_interfaces/srv/SetParameters \
   "{parameters: [{name: gait, value: {type: 4, string_value: CrawlWalk}}]}"
 ```
 
-`MOUNTAIN(33)` 保持 `Gait()` + `SetSpeed(HIGH)`，`L_WALK(32)` 保持仅调用
-`Gait()`，楼梯类步态保持调用 `Stair()`。
+`MOUNTAIN(33)` 使用 `Gait()` + `SetSpeed(HIGH)`，`L_WALK(32)` 使用
+`Gait()` + `SetSpeed(MEDIUM)`。`SetSpeed()` 仅影响 `Gait()` 和通用模式；
+楼梯类步态只调用 `Stair()`，上述特殊姿态也不调用 `SetSpeed()`。
 
 普通 `WALK/RUN/SILENT` 分别使用低/高/中速档。切换时先发送零速；
 若当前不是 SDK 的 `MOTION_STATUS_WALK`，调用 `StandUp()` 并等待新的
 `WALK` 反馈，以退出 `Gait()`、楼梯等姿态。随后发送 `SetSpeed()`，
 等待新的 `RobotState` 同时确认 `WALK` 和目标速度档位，才保存目标步态并返回成功。
 姿态或速度未确认时返回失败，不把命令发送成功视为切换完成。
-`/cmd_vel` 继续通过已有 `Move()` 链路执行，速度归一化逻辑保持不变。
+`/cmd_vel` 继续通过已有 `Move()` 链路执行。前后按低/中/高速的 `1/2/3 m/s`
+归一化，横向保持按 `0.5 m/s` 归一化，不额外禁用横向输入。
+旋转角速度按下表的尺度归一化，并限制 SDK 输入到 `[-1, 1]`；
+`v` 是经过前后限幅的指令速度绝对值，前进和后退使用相同规则。
+
+| 有效速度档位 | 前后速度 `v` | 旋转尺度（rad/s） |
+| --- | --- | --- |
+| 低速 | 任意 | `1.5` |
+| 中速 | `v < 1 m/s` / `v >= 1 m/s` | `1.5` / `1.0` |
+| 高速 | `v < 1 m/s` / `1 <= v < 2 m/s` / `v >= 2 m/s` | `1.5` / `1.0` / `0.5` |
+
+SDK 说明未定义阈值恰好相等时的行为；桥接在 `1/2 m/s` 边界采用较高速度段。
+选择 `L_WALK` 后设置中速档，`Move()` 换算跟随设置的档位；楼梯类和
+`CrawlWalk/Climb/Slim/DSB` 固定按低速尺度换算：前后 `1 m/s`、横向
+`0.5 m/s`、旋转 `1.5 rad/s` 分别对应 SDK 输入绝对值 `1`。
 
 ### 8.3 按 YAML 启动
 

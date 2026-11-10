@@ -207,9 +207,8 @@ public:
                     result.successful = backend_result.success; result.reason = backend_result.message;
                     if (backend_result.success && previous_gait != gait) {
                         RCLCPP_INFO(get_logger(),
-                                    "D1 nav state transition: gait %d -> %d; SDK mapping=%s%s",
-                                    previous_gait, gait, d1GaitMapping(gait).c_str(),
-                                    gait == 32 ? "; ROS velocity contract=general MEDIUM" : "");
+                                    "D1 nav state transition: gait %d -> %d; SDK mapping=%s",
+                                    previous_gait, gait, d1GaitMapping(gait).c_str());
                     }
                 }
                 response->results.push_back(result);
@@ -312,7 +311,7 @@ public:
 private:
     static std::string d1GaitMapping(int gait) {
         switch (gait) {
-        case 32: return "Gait() [L_WALK], ROS limit=general MEDIUM";
+        case 32: return "Gait()+SetSpeed(MEDIUM) [L_WALK]";
         case 6: case 7: case 8: case 36: return "Stair()";
         case 0: return "normal WALK (StandUp if needed)+SetSpeed(SLOW), feedback confirmed";
         case 3: return "normal WALK (StandUp if needed)+SetSpeed(HIGH), feedback confirmed";

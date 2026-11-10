@@ -300,14 +300,11 @@ BackendResult D1MaxBackend::move(double vx, double vy, double vyaw) {
         speed_level = speed_level_;
     }
 
-    // L_WALK is implemented by the dedicated SDK Gait posture, but its
-    // externally visible velocity contract follows general-mode medium speed.
-    // Do not send SetSpeed() for L_WALK; this is only the local ROS-to-SDK
-    // normalization contract.
-    if (gait == 32) speed_level = static_cast<int>(robot_sdk::SpeedLevel::SPEED_LEVEL_MEDIUM);
-    // All Stair() mappings use a fixed 1 m/s local velocity contract,
-    // independent of the previous speed level; do not send SDK SetSpeed().
-    else if (gait == 6 || gait == 7 || gait == 8 || gait == 36) {
+    // SetSpeed() applies to Gait and normal locomotion only. Stair and special
+    // postures use the low-speed Move scales regardless of the cached gear.
+    if (gait == 6 || gait == 7 || gait == 8 || gait == 36 ||
+        gait == d1_max_gait::CRAWL_WALK || gait == d1_max_gait::CLIMB ||
+        gait == d1_max_gait::SLIM || gait == d1_max_gait::DSB) {
         speed_level = static_cast<int>(robot_sdk::SpeedLevel::SPEED_LEVEL_SLOW);
     }
 
@@ -316,9 +313,17 @@ BackendResult D1MaxBackend::move(double vx, double vy, double vyaw) {
     else if (speed_level == static_cast<int>(robot_sdk::SpeedLevel::SPEED_LEVEL_HIGH)) max_forward = 3.0;
 
     const double max_lateral = 0.5;
-    // Convert yaw using a fixed input scale. The SDK/firmware owns motion
-    // constraints that couple forward speed with lateral or yaw commands.
-    const double max_yaw = 1.5;
+    // The yaw percentage scale shrinks with forward/back speed in medium
+    // and high gear. Use the magnitude of the clamped physical command,
+    // not the normalized SDK percentage. Thresholds enter the faster band.
+    const double forward_speed = std::min(std::abs(vx), max_forward);
+    double max_yaw = 1.5;
+    if (speed_level == static_cast<int>(robot_sdk::SpeedLevel::SPEED_LEVEL_MEDIUM) ||
+        speed_level == static_cast<int>(robot_sdk::SpeedLevel::SPEED_LEVEL_HIGH)) {
+        if (forward_speed >= 1.0) max_yaw = 1.0;
+        if (speed_level == static_cast<int>(robot_sdk::SpeedLevel::SPEED_LEVEL_HIGH) &&
+            forward_speed >= 2.0) max_yaw = 0.5;
+    }
 
     const auto normalize = [](double value, double limit) {
         if (limit <= 0.0) return 0.0;
@@ -608,15 +613,10 @@ BackendResult D1MaxBackend::setGait(int gait) {
                          connect_timeout_ms_)) {
             return {false, "Timeout waiting for D1 Gait posture."};
         }
-        if (gait == 33) {
-            auto speed_result = setSpeed(static_cast<int>(robot_sdk::SpeedLevel::SPEED_LEVEL_HIGH));
-            if (!speed_result.success) return speed_result;
-        } else {
-            // L_WALK uses the dedicated Gait posture without SetSpeed(). Keep
-            // its local ROS-to-SDK velocity contract at general-mode medium speed.
-            std::lock_guard<std::mutex> lock(mutex_);
-            speed_level_ = static_cast<int>(robot_sdk::SpeedLevel::SPEED_LEVEL_MEDIUM);
-        }
+        const auto speed = gait == 32 ? robot_sdk::SpeedLevel::SPEED_LEVEL_MEDIUM
+                                      : robot_sdk::SpeedLevel::SPEED_LEVEL_HIGH;
+        auto speed_result = setSpeed(static_cast<int>(speed));
+        if (!speed_result.success) return speed_result;
     } else {
         // SetSpeed() does not leave Gait/Stair or another special posture.
         // StandUp() selects normal locomotion and must finish in WALK.

@@ -164,14 +164,25 @@ TEST_F(D1MaxGaitTest, NormalGaitsAlreadyInWalkOnlyAdjustSpeed) {
     }
 }
 
-TEST_F(D1MaxGaitTest, LWalkKeepsDedicatedGaitAndMediumNormalization) {
+TEST_F(D1MaxGaitTest, LWalkSelectsDedicatedGaitAndMediumSpeed) {
     ASSERT_TRUE(backend.setSpeed(3).success);
     sdk_gait_test::speeds.clear();
+    sdk_gait_test::commands.clear();
     ASSERT_TRUE(backend.setGait(32).success);
     EXPECT_EQ(sdk_gait_test::gait_calls, 1);
     EXPECT_EQ(sdk_gait_test::stair_calls, 0);
-    EXPECT_TRUE(sdk_gait_test::speeds.empty());
+    EXPECT_EQ(sdk_gait_test::commands, (std::vector<std::string>{"Move", "Gait", "SetSpeed"}));
+    EXPECT_EQ(sdk_gait_test::speeds, std::vector<int>{2});
+    EXPECT_EQ(sdk_gait_test::current_speed, robot_sdk::SpeedLevel::SPEED_LEVEL_MEDIUM);
     expectMove(2.0);
+}
+
+TEST_F(D1MaxGaitTest, LWalkNormalizationFollowsSubsequentSpeedSetting) {
+    ASSERT_TRUE(backend.setGait(32).success);
+    ASSERT_TRUE(backend.setSpeed(3).success);
+    expectMove(3.0);
+    ASSERT_TRUE(backend.setSpeed(1).success);
+    expectMove(1.0);
 }
 
 TEST_F(D1MaxGaitTest, MountainSelectsGaitAndHighSpeed) {
@@ -210,10 +221,13 @@ TEST_F(D1MaxGaitTest, StandFromLieDownPreparesMountainGaitAndHighSpeed) {
 TEST_F(D1MaxGaitTest, FailedSpeedChangePreservesPreviousGaitAndNormalization) {
     ASSERT_TRUE(backend.setGait(0).success);
     sdk_gait_test::speed_error = std::make_error_code(std::errc::io_error);
-    EXPECT_FALSE(backend.setGait(33).success);
-    EXPECT_EQ(backend.state().mode, 0);
-    EXPECT_EQ(sdk_gait_test::gait_calls, 1);
-    expectMove(1.0);
+    for (int gait : {32, 33}) {
+        SCOPED_TRACE(gait);
+        EXPECT_FALSE(backend.setGait(gait).success);
+        EXPECT_EQ(backend.state().mode, 0);
+        expectMove(1.0);
+    }
+    EXPECT_EQ(sdk_gait_test::gait_calls, 2);
 }
 
 TEST_F(D1MaxGaitTest, SpecialPosturesSelectSdkCommandAndAllowMoveWithoutChangingSpeed) {
@@ -230,11 +244,12 @@ TEST_F(D1MaxGaitTest, SpecialPosturesSelectSdkCommandAndAllowMoveWithoutChanging
         EXPECT_TRUE(backend.velocityCommandAllowed());
         EXPECT_EQ(backend.bodyHeightState(), mapping.gait == d1_max_gait::CRAWL_WALK ? -1 : 0);
         EXPECT_TRUE(sdk_gait_test::speeds.empty());
+        EXPECT_EQ(sdk_gait_test::current_speed, robot_sdk::SpeedLevel::SPEED_LEVEL_HIGH);
         EXPECT_EQ(sdk_gait_test::gait_calls, 0);
         EXPECT_EQ(sdk_gait_test::stair_calls, 0);
         ASSERT_EQ(sdk_gait_test::moves.size(), 1U);
         EXPECT_EQ(sdk_gait_test::moves.front(), (std::array<float, 3>{0, 0, 0}));
-        expectMove(3.0);
+        expectMove(1.0);
     }
 }
 
@@ -359,5 +374,74 @@ TEST_F(D1MaxGaitTest, NormalSpeedSendFailureDoesNotCommitTargetGait) {
     EXPECT_FALSE(backend.setGait(3).success);
     EXPECT_EQ(backend.state().mode, 0);
     expectMove(1.0);
+}
+
+struct YawScalingCase {
+    int speed;
+    double forward;
+    float sdk_forward;
+    float sdk_yaw;  // Expected percentage for a requested 0.3 rad/s.
+};
+
+class D1MaxYawScalingTest : public D1MaxGaitTest,
+                          public testing::WithParamInterface<YawScalingCase> {};
+
+TEST_P(D1MaxYawScalingTest, ScalesYawForForwardAndReverseWithoutDisablingLateral) {
+    const auto sample = GetParam();
+    ASSERT_TRUE(backend.setSpeed(sample.speed).success);
+    for (double direction : {-1.0, 1.0}) {
+        for (double turn : {-1.0, 1.0}) {
+            ASSERT_TRUE(backend.move(direction * sample.forward, -0.1, turn * 0.3).success);
+            const auto &move = sdk_gait_test::moves.back();
+            EXPECT_FLOAT_EQ(move[0], -0.2F);
+            EXPECT_FLOAT_EQ(move[1], static_cast<float>(direction) * sample.sdk_forward);
+            EXPECT_FLOAT_EQ(move[2], static_cast<float>(turn) * sample.sdk_yaw);
+        }
+    }
+}
+
+INSTANTIATE_TEST_SUITE_P(SpeedBands, D1MaxYawScalingTest, testing::Values(
+    YawScalingCase{1, 0.0, 0.0F, 0.2F},
+    YawScalingCase{1, 1.0, 1.0F, 0.2F},
+    YawScalingCase{1, 4.0, 1.0F, 0.2F},
+    YawScalingCase{2, 0.999, 0.4995F, 0.2F},
+    YawScalingCase{2, 1.0, 0.5F, 0.3F},
+    YawScalingCase{2, 1.001, 0.5005F, 0.3F},
+    YawScalingCase{2, 2.0, 1.0F, 0.3F},
+    YawScalingCase{2, 4.0, 1.0F, 0.3F},
+    YawScalingCase{3, 0.999, 0.333F, 0.2F},
+    YawScalingCase{3, 1.0, 1.0F / 3.0F, 0.3F},
+    YawScalingCase{3, 1.5, 0.5F, 0.3F},
+    YawScalingCase{3, 1.999, 1.999F / 3.0F, 0.3F},
+    YawScalingCase{3, 2.0, 2.0F / 3.0F, 0.6F},
+    YawScalingCase{3, 2.001, 0.667F, 0.6F},
+    YawScalingCase{3, 2.5, 2.5F / 3.0F, 0.6F},
+    YawScalingCase{3, 4.0, 1.0F, 0.6F}));
+
+TEST_F(D1MaxGaitTest, YawRequestsSaturateAtCurrentBandLimit) {
+    ASSERT_TRUE(backend.setSpeed(3).success);
+    ASSERT_TRUE(backend.move(2.5, 0.0, 0.6).success);
+    EXPECT_FLOAT_EQ(sdk_gait_test::moves.back()[2], 1.0F);
+    ASSERT_TRUE(backend.move(-2.5, 0.0, -0.6).success);
+    EXPECT_FLOAT_EQ(sdk_gait_test::moves.back()[2], -1.0F);
+}
+
+TEST_F(D1MaxGaitTest, GaitSelectionsUseMediumOrSlowYawScaling) {
+    ASSERT_TRUE(backend.setSpeed(3).success);
+    ASSERT_TRUE(backend.setGait(32).success);
+    ASSERT_TRUE(backend.move(2.5, 0.0, 0.3).success);
+    EXPECT_FLOAT_EQ(sdk_gait_test::moves.back()[1], 1.0F);
+    EXPECT_FLOAT_EQ(sdk_gait_test::moves.back()[2], 0.3F);
+    for (int gait : {6, 7, 8, 36, d1_max_gait::CRAWL_WALK, d1_max_gait::CLIMB,
+                     d1_max_gait::SLIM, d1_max_gait::DSB}) {
+        // Stair/special normalization must ignore a previously selected high gear.
+        ASSERT_TRUE(backend.setSpeed(3).success);
+        sdk_gait_test::speeds.clear();
+        ASSERT_TRUE(backend.setGait(gait).success);
+        EXPECT_TRUE(sdk_gait_test::speeds.empty());
+        ASSERT_TRUE(backend.move(2.5, 0.0, 0.3).success);
+        EXPECT_FLOAT_EQ(sdk_gait_test::moves.back()[1], 1.0F);
+        EXPECT_FLOAT_EQ(sdk_gait_test::moves.back()[2], 0.2F);
+    }
 }
 }  // namespace nav_bridge
