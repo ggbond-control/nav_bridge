@@ -11,6 +11,7 @@
 #include <geometry_msgs/msg/twist.hpp>
 #include <nav_msgs/msg/odometry.hpp>
 #include <rclcpp/rclcpp.hpp>
+#include <rcl_interfaces/msg/parameter_descriptor.hpp>
 #include <rcl_interfaces/srv/set_parameters.hpp>
 #include <sensor_msgs/msg/imu.hpp>
 #include <sensor_msgs/msg/joint_state.hpp>
@@ -33,6 +34,11 @@ public:
         reconnect_interval_ms_ = declare_parameter<int>("reconnect_interval_ms", 2000);
         cmd_vel_rate_hz_ = declare_parameter<int>("cmd_vel_rate_hz", 50);
         cmd_vel_timeout_ms_ = declare_parameter<int>("cmd_vel_timeout_ms", 500);
+        rcl_interfaces::msg::ParameterDescriptor stand_gait_descriptor;
+        stand_gait_descriptor.description = "Gait selected by /stand and /ready (0, 3, 32, 33, 34, 36).";
+        stand_gait_descriptor.read_only = true;
+        const auto stand_target_gait = declare_parameter<int64_t>(
+            "stand_target_gait", d1_max_gait::DEFAULT_STAND_TARGET, stand_gait_descriptor);
         charge_task_confirmation_timeout_sec_ =
             declare_parameter<int>("charge_task_confirmation_timeout_sec", 60);
         charge_pile_connection_timeout_sec_ =
@@ -46,7 +52,9 @@ public:
 
         backend_ = std::make_unique<D1MaxBackend>(host_ip_, host_port_, auto_reconnect_,
                                                   connect_timeout_ms_, reconnect_interval_ms_,
-                                                  imu_source_ == "sdk");
+                                                  imu_source_ == "sdk", stand_target_gait);
+        RCLCPP_INFO(get_logger(), "D1 stand/ready target gait=%lld",
+                    static_cast<long long>(stand_target_gait));
         backend_->setStateCallback([this](const BackendState &state) {
             BackendState previous;
             bool changed = false;

@@ -218,6 +218,43 @@ TEST_F(D1MaxGaitTest, StandFromLieDownPreparesMountainGaitAndHighSpeed) {
     expectMove(3.0);
 }
 
+TEST_F(D1MaxGaitTest, StandFromLieDownUsesConfiguredWalkOrRun) {
+    for (const int gait : {0, 3}) {
+        SCOPED_TRACE(gait);
+        D1MaxBackend configured{"127.0.0.1", 8082, false, 100, 100, false, gait};
+        sdk_gait_test::stand_calls = 0;
+        sdk_gait_test::speeds.clear();
+        sdk_gait_test::posture(robot_sdk::MotionStatus::MOTION_STATUS_LIE_DOWN);
+
+        ASSERT_TRUE(configured.stand().success);
+        EXPECT_EQ(sdk_gait_test::stand_calls, 1);
+        EXPECT_EQ(sdk_gait_test::gait_calls, 0);
+        EXPECT_EQ(sdk_gait_test::speeds, std::vector<int>{gait == 0 ? 1 : 3});
+        EXPECT_EQ(configured.state().mode, gait);
+    }
+}
+
+TEST_F(D1MaxGaitTest, StandWithRunRequiresMatchingSpeedFeedback) {
+    D1MaxBackend configured{"127.0.0.1", 8082, false, 100, 100, false, 3};
+    sdk_gait_test::posture(robot_sdk::MotionStatus::MOTION_STATUS_WALK);
+    sdk_gait_test::speed_feedback_override = 2;
+
+    const auto result = configured.stand();
+    EXPECT_FALSE(result.success);
+    EXPECT_NE(result.message.find("speed level feedback"), std::string::npos);
+    EXPECT_NE(configured.state().mode, 3);
+}
+
+TEST_F(D1MaxGaitTest, StandWithInvalidTargetDoesNotSendMotionCommands) {
+    D1MaxBackend configured{"127.0.0.1", 8082, false, 100, 100, false, d1_max_gait::CLIMB};
+    sdk_gait_test::posture(robot_sdk::MotionStatus::MOTION_STATUS_LIE_DOWN);
+
+    const auto result = configured.stand();
+    EXPECT_FALSE(result.success);
+    EXPECT_NE(result.message.find("stand_target_gait"), std::string::npos);
+    EXPECT_TRUE(sdk_gait_test::commands.empty());
+}
+
 TEST_F(D1MaxGaitTest, FailedSpeedChangePreservesPreviousGaitAndNormalization) {
     ASSERT_TRUE(backend.setGait(0).success);
     sdk_gait_test::speed_error = std::make_error_code(std::errc::io_error);

@@ -196,10 +196,10 @@ private:
 
 D1MaxBackend::D1MaxBackend(std::string host_ip, int host_port, bool auto_reconnect,
                            int connect_timeout_ms, int reconnect_interval_ms,
-                           bool enable_sdk_imu)
+                           bool enable_sdk_imu, int64_t stand_target_gait)
     : host_ip_(std::move(host_ip)), host_port_(host_port), auto_reconnect_(auto_reconnect),
       connect_timeout_ms_(connect_timeout_ms), reconnect_interval_ms_(reconnect_interval_ms),
-      enable_sdk_imu_(enable_sdk_imu) {
+      enable_sdk_imu_(enable_sdk_imu), stand_target_gait_(stand_target_gait) {
     robot_sdk::ConnectionConfig config;
     config.auto_reconnect = auto_reconnect_;
     config.connect_timeout_ms = connect_timeout_ms_;
@@ -337,6 +337,13 @@ BackendResult D1MaxBackend::move(double vx, double vy, double vyaw) {
 }
 
 BackendResult D1MaxBackend::stand() {
+    switch (stand_target_gait_) {
+    case 0: case 3: case 32: case 33: case 34: case 36:
+        break;
+    default:
+        return {false, "Invalid D1 stand_target_gait=" + std::to_string(stand_target_gait_) +
+                       "; expected WALK(0), RUN(3), L_WALK(32), MOUNTAIN(33), SILENT(34), or L_STAIR(36)."};
+    }
     if (!client_ || !client_->IsConnected()) return {false, "D1 SDK is not connected."};
 
     auto status = [this]() {
@@ -397,12 +404,9 @@ BackendResult D1MaxBackend::stand() {
         }
     }
 
-    // The unified /stand contract means standing in MOUNTAIN, not merely any
-    // generic locomotion state. Reuse setGait(33) so both entrypoints apply
-    // the same Gait() posture and high-speed mapping.
-    const auto mountain = setGait(33);
-    if (!mountain.success) return mountain;
-    return {true, "D1 Max is standing in the general navigation mode (MOUNTAIN), high speed."};
+    const auto gait_result = setGait(static_cast<int>(stand_target_gait_));
+    if (!gait_result.success) return gait_result;
+    return {true, "D1 Max is ready in gait " + std::to_string(stand_target_gait_) + "."};
 }
 
 BackendResult D1MaxBackend::lie() {

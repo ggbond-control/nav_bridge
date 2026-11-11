@@ -21,6 +21,7 @@ namespace nav_bridge {
 // Bridge gait IDs for D1-only postures, separate from the shared gait IDs
 // and the SDK's MotionStatus values. Published on /robot_gait_state.
 namespace d1_max_gait {
+constexpr int DEFAULT_STAND_TARGET = 33;
 constexpr int CRAWL_WALK = 100;
 constexpr int CLIMB = 101;
 constexpr int SLIM = 102;
@@ -31,7 +32,7 @@ class D1MaxBackend final : public RobotBackend {
 public:
     D1MaxBackend(std::string host_ip, int host_port, bool auto_reconnect,
                  int connect_timeout_ms, int reconnect_interval_ms,
-                 bool enable_sdk_imu);
+                 bool enable_sdk_imu, int64_t stand_target_gait = d1_max_gait::DEFAULT_STAND_TARGET);
     ~D1MaxBackend() override;
 
     BackendResult connect() override;
@@ -83,6 +84,7 @@ private:
     int connect_timeout_ms_{5000};
     int reconnect_interval_ms_{2000};
     bool enable_sdk_imu_{false};
+    const int64_t stand_target_gait_;
 
     std::unique_ptr<robot_sdk::SDKClient> client_;
     std::shared_ptr<DataCallback> data_callback_;
