@@ -462,7 +462,7 @@ D1 Max 的 `~/set_gait` 支持以下 D1 专用姿态。字符串名称不区分�
 | `DSB` | `103` | `DSB()` | 过挡鼠板 |
 
 从行走、楼梯或上述专用姿态切换时，先发送零速，再发送姿态指令并等待匹配的 SDK 姿态反馈。
-这些姿态均允许通过 `/cmd_vel` 转发 `Move()`；不发送 `SetSpeed()`，
+上述四种专用姿态均允许通过 `/cmd_vel` 转发 `Move()`；不发送 `SetSpeed()`，
 固定按低速尺度换算速度，不沿用之前的中/高速换算。
 `CRAWL_WALK` 下 `/robot_body_height_state` 为 `-1`。
 
@@ -492,9 +492,26 @@ ros2 service call /nav_bridge_node/set_gait rcl_interfaces/srv/SetParameters \
 | 高速 | `v < 1 m/s` / `1 <= v < 2 m/s` / `v >= 2 m/s` | `1.5` / `1.0` / `0.5` |
 
 SDK 说明未定义阈值恰好相等时的行为；桥接在 `1/2 m/s` 边界采用较高速度段。
-选择 `L_WALK` 后设置中速档，`Move()` 换算跟随设置的档位；楼梯类和
+选择 `L_WALK` 后设置中速档，`Move()` 换算跟随设置的档位；
 `CrawlWalk/Climb/Slim/DSB` 固定按低速尺度换算：前后 `1 m/s`、横向
 `0.5 m/s`、旋转 `1.5 rad/s` 分别对应 SDK 输入绝对值 `1`。
+
+楼梯类 `STAIR_SOLID(6)/STAIR_ACC(7)/STAIR45_ACC(8)/L_STAIR(36)` 使用独立的
+Stair 速度换算，依据 D1M-A（SDK 0.2.1、固件 0.3.3）平地实测选择以下近似比例，
+不受 `SetSpeed()` 档位影响，也不套用通用中/高速的转向分段：
+
+| ROS 输入 | SDK Move 参数 |
+| --- | --- |
+| 前后 `vx`（m/s） | `forward_back = clamp(vx / 2.0, -1, 1)` |
+| 横向 `vy`（m/s） | `left_right = clamp(vy / 0.5, -1, 1)` |
+| 转向 `wz`（rad/s） | `yaw = clamp(wz / 1.5, -1, 1)` |
+
+例如前进 `0.4 m/s` 换算为 SDK 前后输入 `0.2`，转向 `0.6 rad/s` 换算为
+SDK yaw 输入 `0.4`。换算比例不等于实际速度上限：实测前后约 `±1 m/s`、
+横向约 `±0.5 m/s`、转向约 `±1 rad/s` 已接近饱和。桥接只约束 SDK 参数到
+`[-1, 1]`，不额外按上述实测上限截断 ROS 速度，实际限速由底层完成。
+当前不补偿死区或左右、前后差异；这些比例不保证全速度区间精确跟随，
+实际楼梯上的速度表现仍需另行验证。
 
 ### 8.3 按 YAML 启动
 

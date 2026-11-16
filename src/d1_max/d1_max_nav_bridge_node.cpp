@@ -320,7 +320,7 @@ private:
     static std::string d1GaitMapping(int gait) {
         switch (gait) {
         case 32: return "Gait()+SetSpeed(MEDIUM) [L_WALK]";
-        case 6: case 7: case 8: case 36: return "Stair()";
+        case 6: case 7: case 8: case 36: return "Stair(); Move(vy/0.5,vx/2.0,wz/1.5)";
         case 0: return "normal WALK (StandUp if needed)+SetSpeed(SLOW), feedback confirmed";
         case 3: return "normal WALK (StandUp if needed)+SetSpeed(HIGH), feedback confirmed";
         case 33: return "Gait()+SetSpeed(HIGH)";

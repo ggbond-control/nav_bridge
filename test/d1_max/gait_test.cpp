@@ -194,7 +194,7 @@ TEST_F(D1MaxGaitTest, MountainSelectsGaitAndHighSpeed) {
     expectMove(3.0);
 }
 
-TEST_F(D1MaxGaitTest, StairMappingsKeepStairAndFixedNormalization) {
+TEST_F(D1MaxGaitTest, StairMappingsKeepStairAndMeasuredNormalization) {
     ASSERT_TRUE(backend.setSpeed(3).success);
     sdk_gait_test::speeds.clear();
     int expected_calls = 0;
@@ -204,7 +204,48 @@ TEST_F(D1MaxGaitTest, StairMappingsKeepStairAndFixedNormalization) {
         EXPECT_EQ(sdk_gait_test::gait_calls, 0);
         EXPECT_EQ(sdk_gait_test::stair_calls, ++expected_calls);
         EXPECT_TRUE(sdk_gait_test::speeds.empty());
-        expectMove(1.0);
+        expectMove(2.0);
+    }
+}
+
+TEST_F(D1MaxGaitTest, StairVelocityConversionIsIndependentOfGearAndForwardSpeed) {
+    for (int gait : {6, 7, 8, 36}) {
+        SCOPED_TRACE(gait);
+        ASSERT_TRUE(backend.setGait(gait).success);
+        for (int speed : {1, 2, 3}) {
+            SCOPED_TRACE(speed);
+            ASSERT_TRUE(backend.setSpeed(speed).success);
+            for (double direction : {-1.0, 1.0}) {
+                ASSERT_TRUE(backend.move(direction * 0.6, direction * 0.2, direction * 0.6).success);
+                const auto &move = sdk_gait_test::moves.back();
+                EXPECT_FLOAT_EQ(move[0], static_cast<float>(direction * 0.4));
+                EXPECT_FLOAT_EQ(move[1], static_cast<float>(direction * 0.3));
+                EXPECT_FLOAT_EQ(move[2], static_cast<float>(direction * 0.4));
+                // Above 1 m/s, Stair must not inherit the medium/high gear yaw bands.
+                ASSERT_TRUE(backend.move(direction * 1.5, 0, direction * 0.6).success);
+                EXPECT_FLOAT_EQ(sdk_gait_test::moves.back()[1], static_cast<float>(direction * 0.75));
+                EXPECT_FLOAT_EQ(sdk_gait_test::moves.back()[2], static_cast<float>(direction * 0.4));
+            }
+        }
+    }
+}
+
+TEST_F(D1MaxGaitTest, StairLeavesPhysicalSpeedCapsToRobotAndClampsSdkPercentagesOnly) {
+    for (int gait : {6, 7, 8, 36}) {
+        SCOPED_TRACE(gait);
+        ASSERT_TRUE(backend.setGait(gait).success);
+        for (double direction : {-1.0, 1.0}) {
+            // Requests beyond observed ~1 m/s and ~1 rad/s caps still convert
+            // directly; only the robot decides the resulting physical speed.
+            ASSERT_TRUE(backend.move(direction * 1.2, direction * 0.4, direction * 1.2).success);
+            EXPECT_FLOAT_EQ(sdk_gait_test::moves.back()[0], static_cast<float>(direction * 0.8));
+            EXPECT_FLOAT_EQ(sdk_gait_test::moves.back()[1], static_cast<float>(direction * 0.6));
+            EXPECT_FLOAT_EQ(sdk_gait_test::moves.back()[2], static_cast<float>(direction * 0.8));
+            ASSERT_TRUE(backend.move(direction * 3.0, direction * 0.8, direction * 2.0).success);
+            EXPECT_EQ(sdk_gait_test::moves.back(),
+                      (std::array<float, 3>{static_cast<float>(direction), static_cast<float>(direction),
+                                            static_cast<float>(direction)}));
+        }
     }
 }
 

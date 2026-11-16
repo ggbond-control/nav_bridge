@@ -300,31 +300,34 @@ BackendResult D1MaxBackend::move(double vx, double vy, double vyaw) {
         speed_level = speed_level_;
     }
 
-    // SetSpeed() applies to Gait and normal locomotion only. Stair and special
-    // postures use the low-speed Move scales regardless of the cached gear.
-    if (gait == 6 || gait == 7 || gait == 8 || gait == 36 ||
-        gait == d1_max_gait::CRAWL_WALK || gait == d1_max_gait::CLIMB ||
+    const bool stair = gait == 6 || gait == 7 || gait == 8 || gait == 36;
+    // Special postures retain the low-speed scales. Stair uses its own measured
+    // scales below; neither depends on the previous SetSpeed() setting.
+    if (gait == d1_max_gait::CRAWL_WALK || gait == d1_max_gait::CLIMB ||
         gait == d1_max_gait::SLIM || gait == d1_max_gait::DSB) {
         speed_level = static_cast<int>(robot_sdk::SpeedLevel::SPEED_LEVEL_SLOW);
     }
 
     double max_forward = 1.0;
-    if (speed_level == static_cast<int>(robot_sdk::SpeedLevel::SPEED_LEVEL_MEDIUM)) max_forward = 2.0;
+    if (stair || speed_level == static_cast<int>(robot_sdk::SpeedLevel::SPEED_LEVEL_MEDIUM)) max_forward = 2.0;
     else if (speed_level == static_cast<int>(robot_sdk::SpeedLevel::SPEED_LEVEL_HIGH)) max_forward = 3.0;
 
     const double max_lateral = 0.5;
     // The yaw percentage scale shrinks with forward/back speed in medium
-    // and high gear. Use the magnitude of the clamped physical command,
-    // not the normalized SDK percentage. Thresholds enter the faster band.
+    // and high gear in normal/Gait modes. Stair always uses 1.5 rad/s per unit
+    // SDK input. Use the magnitude of the clamped physical command, not the
+    // normalized SDK percentage. Thresholds enter the faster band.
     const double forward_speed = std::min(std::abs(vx), max_forward);
     double max_yaw = 1.5;
-    if (speed_level == static_cast<int>(robot_sdk::SpeedLevel::SPEED_LEVEL_MEDIUM) ||
-        speed_level == static_cast<int>(robot_sdk::SpeedLevel::SPEED_LEVEL_HIGH)) {
+    if (!stair && (speed_level == static_cast<int>(robot_sdk::SpeedLevel::SPEED_LEVEL_MEDIUM) ||
+                   speed_level == static_cast<int>(robot_sdk::SpeedLevel::SPEED_LEVEL_HIGH))) {
         if (forward_speed >= 1.0) max_yaw = 1.0;
         if (speed_level == static_cast<int>(robot_sdk::SpeedLevel::SPEED_LEVEL_HIGH) &&
             forward_speed >= 2.0) max_yaw = 0.5;
     }
 
+    // Clamp only SDK percentages. Actual Stair speed caps belong to the robot;
+    // the conversion scales above are not additional physical speed limits.
     const auto normalize = [](double value, double limit) {
         if (limit <= 0.0) return 0.0;
         return std::max(-1.0, std::min(1.0, value / limit));
