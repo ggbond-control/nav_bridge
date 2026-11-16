@@ -104,6 +104,16 @@ if(NAV_BRIDGE_BUILD_D1_MAX)
     INSTALL_RPATH "$ORIGIN/..")
   install(TARGETS d1_max_nav_bridge_node
     DESTINATION lib/${PROJECT_NAME})
+
+  # Manual hardware probe: built with D1 support, never registered with CTest.
+  add_executable(d1_max_stair_speed_probe test/d1_max/stair_speed_probe.cpp)
+  target_include_directories(d1_max_stair_speed_probe SYSTEM PRIVATE
+    "${D1_MAX_SDK_ROOT}/include")
+  target_link_libraries(d1_max_stair_speed_probe PRIVATE "${D1_MAX_SDK_LIBRARY}" Threads::Threads)
+  set_target_properties(d1_max_stair_speed_probe PROPERTIES
+    BUILD_RPATH "${D1_MAX_SDK_ROOT}/lib/${D1_MAX_SDK_ARCH}"
+    INSTALL_RPATH "$ORIGIN/..")
+  install(TARGETS d1_max_stair_speed_probe DESTINATION lib/${PROJECT_NAME})
   install(FILES "${D1_MAX_SDK_LIBRARY}"
     DESTINATION lib
     RENAME librobot_sdk.so.0.2.1)
@@ -209,6 +219,9 @@ if(BUILD_TESTING)
     target_link_libraries(d1_max_undock_test nav_bridge_d1_max_backend)
     ament_add_gtest(d1_max_gait_test test/d1_max/gait_test.cpp)
     target_link_libraries(d1_max_gait_test nav_bridge_d1_max_backend)
+    ament_add_gtest(d1_max_stair_probe_test test/d1_max/stair_speed_probe_test.cpp)
+    target_include_directories(d1_max_stair_probe_test SYSTEM PRIVATE "${D1_MAX_SDK_ROOT}/include")
+    target_link_libraries(d1_max_stair_probe_test "${D1_MAX_SDK_LIBRARY}" Threads::Threads)
   endif()
   find_package(ament_lint_auto REQUIRED)
   set(ament_cmake_copyright_FOUND TRUE)
