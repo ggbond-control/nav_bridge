@@ -60,3 +60,16 @@ STOP 会持续等待充电管理器从 `do_over_charge_task` 回到 `idle`，成
 | `charge_host_port`   | `3333`          | 自主充电请求端口        |
 | `charge_config_port` | `43899`         | 速度源/导航模式配置端口 |
 | `charge_local_port`  | `49004`         | 本地源端口              |
+
+
+## X30 有界充电服务
+
+X30 的 `4 / UNDOCK_START` 使用 STOP → 新响应 idle → 手动模式确认，保留与 D1_MAX 相同的“确认退出完成”语义，但不调用 D1 的物理脱桩 SDK。
+`charge_command_timeout_ms` 默认 60000，覆盖排队、START 前姿态准备、充电状态等待及 STOP 后模式确认。没有 UDP 响应、状态始终不匹配或未知状态（如现场的 `0x100B`）均在截止时间内返回失败，错误包含最后收到的状态；未知状态不会被解释为脱桩成功。
+充电服务由独立工作线程串行执行，最多排队 4 个请求；ROS 控制与状态回调不再被充电等待占住。排队超时的动作不会补发。成功的 QUERY 仍只证明前一服务调用已经结束，不表示物理退出已完成。
+
+本地隔离验证：
+
+```bash
+ctest --test-dir ~/drive_ws/build/nav_bridge -R '^x30_(action_deadline_test|charge_timeout_integration)$' --output-on-failure
+```

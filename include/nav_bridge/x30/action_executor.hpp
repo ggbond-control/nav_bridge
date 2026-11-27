@@ -4,6 +4,7 @@
 /// @brief 动作执行器，封装 stand/lie 以及内部力控站立流程
 
 #include <functional>
+#include <chrono>
 #include <memory>
 #include <string>
 #include <vector>
@@ -29,7 +30,8 @@ public:
                    ControlWarmup control_warmup, CommandSender command_sender);
 
     ActionResult stand(int target_gait);
-    ActionResult forceStand();
+    ActionResult forceStand(std::chrono::steady_clock::time_point deadline =
+                            std::chrono::steady_clock::time_point::max());
     ActionResult lieDown();
 
 private:
@@ -38,10 +40,14 @@ private:
     bool sendToggleCommandWithRetries(uint32_t command,
                                       const std::vector<x30_protocol::BasicState> &targets,
                                       int overall_timeout_ms, int resend_interval_ms,
-                                      const char *phase_name, int initial_warmup_ms);
+                                      const char *phase_name, int initial_warmup_ms,
+                                      std::chrono::steady_clock::time_point deadline =
+                                          std::chrono::steady_clock::time_point::max());
     bool sendSingleCommandAndWait(uint32_t command,
                                   const std::vector<x30_protocol::BasicState> &targets,
-                                  int timeout_ms, const char *phase_name, int warmup_ms);
+                                  int timeout_ms, const char *phase_name, int warmup_ms,
+                                  std::chrono::steady_clock::time_point deadline =
+                                      std::chrono::steady_clock::time_point::max());
     bool waitForBasicState(const std::vector<x30_protocol::BasicState> &targets, int timeout_ms);
     bool waitForGaitState(const std::vector<x30_protocol::GaitState> &targets, int timeout_ms);
 

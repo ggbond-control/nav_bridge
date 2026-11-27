@@ -7,6 +7,7 @@
 #include <chrono>
 #include <condition_variable>
 #include <functional>
+#include <deque>
 #include <memory>
 #include <mutex>
 #include <string>
@@ -128,16 +129,32 @@ private:
     ActionResult setBodyHeight(int32_t requested_height_value);
     bool sendChargeVelocitySource(int32_t source);
     bool sendChargeCommand(uint32_t code, int32_t value);
-    bool waitForChargeResponse(uint64_t previous_seq, uint16_t &out_state);
     bool waitForChargeResponseFor(uint64_t previous_seq, std::chrono::milliseconds timeout, uint16_t &out_state);
-    bool ensureManualMode(const char *reason);
-    bool switchToManualModeAfterCharge();
+    bool ensureManualMode(const char *reason, std::chrono::steady_clock::time_point deadline =
+                          std::chrono::steady_clock::time_point::max());
+    bool switchToManualModeAfterCharge(std::chrono::steady_clock::time_point deadline);
     bool isFailureChargeState(uint16_t state) const;
     bool isExpectedChargeStateForCommand(uint8_t command, uint16_t state) const;
     bool parseChargeCommandParameter(const rcl_interfaces::msg::Parameter &param,
                                      uint8_t &command,
                                      std::string &error) const;
-    ChargeCommandResult executeChargeCommand(uint8_t command);
+    ChargeCommandResult executeChargeCommand(uint8_t command, std::chrono::steady_clock::time_point deadline);
+    void processChargeCommand(const std::shared_ptr<rcl_interfaces::srv::SetParameters::Request> &req,
+                              const std::shared_ptr<rcl_interfaces::srv::SetParameters::Response> &res,
+                              std::chrono::steady_clock::time_point deadline);
+    void enqueueChargeCommand(std::shared_ptr<rmw_request_id_t> header,
+                              std::shared_ptr<rcl_interfaces::srv::SetParameters::Request> request);
+    void chargeWorkerLoop();
+    struct PendingChargeRequest {
+        std::shared_ptr<rmw_request_id_t> header;
+        std::shared_ptr<rcl_interfaces::srv::SetParameters::Request> request;
+        std::chrono::steady_clock::time_point deadline;
+    };
+    std::thread charge_worker_thread_;
+    std::mutex charge_queue_mutex_;
+    std::condition_variable charge_queue_cv_;
+    std::deque<PendingChargeRequest> charge_requests_;
+    int charge_command_timeout_ms_;
     std::string encodeChargeCommandResult(const ChargeCommandResult &result) const;
     void chargeReceiveLoop();
     void chargeQueryLoop();

@@ -99,6 +99,7 @@ X30NavBridge::X30NavBridge(const rclcpp::NodeOptions &options)
     this->declare_parameter("enable_charge_state_query", true);
     this->declare_parameter("charge_state_query_interval_ms", 1000);
     this->declare_parameter("charge_state_query_timeout_ms", 1500);
+    this->declare_parameter("charge_command_timeout_ms", 60000);
     this->declare_parameter("startup_acquire_control", true);
     this->declare_parameter("stand_target_gait", static_cast<int>(GaitState::MOUNTAIN));
     this->declare_parameter("imu_frame_id", std::string("imu_link"));
@@ -120,6 +121,7 @@ X30NavBridge::X30NavBridge(const rclcpp::NodeOptions &options)
     enable_charge_state_query_      = this->get_parameter("enable_charge_state_query").as_bool();
     charge_state_query_interval_ms_ = this->get_parameter("charge_state_query_interval_ms").as_int();
     charge_state_query_timeout_ms_  = this->get_parameter("charge_state_query_timeout_ms").as_int();
+    charge_command_timeout_ms_ = std::max(1, static_cast<int>(get_parameter("charge_command_timeout_ms").as_int()));
     startup_acquire_control_ = this->get_parameter("startup_acquire_control").as_bool();
     stand_target_gait_ = this->get_parameter("stand_target_gait").as_int();
     imu_frame_id_          = this->get_parameter("imu_frame_id").as_string();
@@ -209,7 +211,7 @@ bool X30NavBridge::initialize() {
                 CMD_CHARGE_MANAGER, CHARGE_COMMAND_START_VALUE, CMD_CHARGE_MANAGER,
                 CHARGE_COMMAND_STOP_VALUE, CMD_CHARGE_MANAGER, CHARGE_COMMAND_RESET_VALUE,
                 CMD_CHARGE_MANAGER_QUERY, CHARGE_COMMAND_QUERY_VALUE);
-    RCLCPP_DEBUG(this->get_logger(), "自主充电服务会持续等待充电管理器进入目标状态或返回错误状态");
+    RCLCPP_DEBUG(this->get_logger(), "自主充电服务在总截止时间内等待新鲜状态确认，超时返回失败");
 
     // 打印结构体大小，方便调试协议对齐
     RCLCPP_DEBUG(this->get_logger(),
@@ -264,7 +266,7 @@ bool X30NavBridge::initialize() {
     set_body_height_srv_ = this->create_service<rcl_interfaces::srv::SetParameters>(
         "~/set_body_height", std::bind(&X30NavBridge::handleSetBodyHeightRequest, this, _1, _2));
     charge_command_srv_ = this->create_service<rcl_interfaces::srv::SetParameters>(
-        "~/charge_command", std::bind(&X30NavBridge::handleChargeCommandRequest, this, _1, _2));
+        "~/charge_command", std::bind(&X30NavBridge::enqueueChargeCommand, this, _1, _2));
 
     action_executor_ = std::make_unique<ActionExecutor>(
         this->get_logger(), state_store_,
@@ -286,6 +288,7 @@ bool X30NavBridge::initialize() {
 
     // 4. 启动接收线程
     recv_thread_ = std::thread(&X30NavBridge::receiveLoop, this);
+    charge_worker_thread_ = std::thread(&X30NavBridge::chargeWorkerLoop, this);
     charge_recv_thread_ = std::thread(&X30NavBridge::chargeReceiveLoop, this);
     if (enable_charge_state_query_)
     {
@@ -303,6 +306,8 @@ void X30NavBridge::shutdown() {
 
     running_ = false;
     charge_state_cv_.notify_all();
+    charge_queue_cv_.notify_all();
+    if (charge_worker_thread_.joinable()) charge_worker_thread_.join();
     if (recv_thread_.joinable()) {
         recv_thread_.join();
     }
@@ -626,7 +631,7 @@ ActionResult X30NavBridge::setNavigationGait(uint8_t gait) {
         auto deadline = std::chrono::steady_clock::now() +
                         std::chrono::milliseconds(kCmdVelStateWaitMs);
 
-        while (std::chrono::steady_clock::now() < deadline) {
+        while (running_ && std::chrono::steady_clock::now() < deadline) {
             auto snap = state_store_.snapshot();
             if (snap.basic_state == static_cast<uint8_t>(BasicState::STEPPING)) {
                 entered_stepping = true;
@@ -823,23 +828,6 @@ bool X30NavBridge::sendChargeVelocitySource(int32_t source)
     return percept_udp_.sendTo(&cmd, sizeof(cmd), charge_host_ip_, charge_config_port_);
 }
 
-bool X30NavBridge::waitForChargeResponse(uint64_t previous_seq, uint16_t &out_state)
-{
-    std::unique_lock<std::mutex> lock(charge_state_mutex_);
-
-    while (running_)
-    {
-        if (charge_response_seq_ > previous_seq)
-        {
-            out_state = latest_charge_response_state_;
-            return true;
-        }
-
-        charge_state_cv_.wait(lock);
-    }
-    return false;
-}
-
 bool X30NavBridge::waitForChargeResponseFor(uint64_t previous_seq, std::chrono::milliseconds timeout, uint16_t &out_state)
 {
     std::unique_lock<std::mutex> lock(charge_state_mutex_);
@@ -854,7 +842,7 @@ bool X30NavBridge::waitForChargeResponseFor(uint64_t previous_seq, std::chrono::
     return true;
 }
 
-bool X30NavBridge::ensureManualMode(const char *reason)
+bool X30NavBridge::ensureManualMode(const char *reason, std::chrono::steady_clock::time_point deadline)
 {
     if (!is_nav_mode_.load())
     {
@@ -863,7 +851,7 @@ bool X30NavBridge::ensureManualMode(const char *reason)
 
     RCLCPP_DEBUG(this->get_logger(), "🔁 %s后当前仍为非手动模式，开始切回手动", reason);
 
-    auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(kChargeManualModeTimeoutMs);
+    deadline = std::min(deadline, std::chrono::steady_clock::now() + std::chrono::milliseconds(kChargeManualModeTimeoutMs));
     warmupControl(kControlWarmupMs, kControlWarmupPulseMs);
     while (std::chrono::steady_clock::now() < deadline)
     {
@@ -880,7 +868,8 @@ bool X30NavBridge::ensureManualMode(const char *reason)
             return false;
         }
 
-        std::this_thread::sleep_for(std::chrono::milliseconds(kChargeManualModeRetryMs));
+        std::this_thread::sleep_until(std::min(deadline, std::chrono::steady_clock::now() +
+                                             std::chrono::milliseconds(kChargeManualModeRetryMs)));
     }
 
     if (is_nav_mode_.load())
@@ -893,9 +882,9 @@ bool X30NavBridge::ensureManualMode(const char *reason)
     return true;
 }
 
-bool X30NavBridge::switchToManualModeAfterCharge()
+bool X30NavBridge::switchToManualModeAfterCharge(std::chrono::steady_clock::time_point deadline)
 {
-    return ensureManualMode("充电停止");
+    return ensureManualMode("充电停止", deadline);
 }
 
 bool X30NavBridge::isFailureChargeState(uint16_t state) const
@@ -1841,9 +1830,68 @@ std::string X30NavBridge::encodeChargeCommandResult(const ChargeCommandResult &r
            "\",\"message\":\"" + escapeJsonString(result.message) + "\"}";
 }
 
+void X30NavBridge::enqueueChargeCommand(
+    std::shared_ptr<rmw_request_id_t> header,
+    std::shared_ptr<rcl_interfaces::srv::SetParameters::Request> request)
+{
+    {
+        std::lock_guard<std::mutex> lock(charge_queue_mutex_);
+        if (running_ && charge_requests_.size() < 4) {
+            charge_requests_.push_back({header, request, std::chrono::steady_clock::now() +
+                std::chrono::milliseconds(charge_command_timeout_ms_)});
+            charge_queue_cv_.notify_one();
+            return;
+        }
+    }
+    rcl_interfaces::srv::SetParameters::Response response;
+    rcl_interfaces::msg::SetParametersResult result;
+    result.successful = false;
+    result.reason = "X30 charge service queue is full or shutting down; retry later.";
+    response.results.assign(std::max(size_t{1}, request->parameters.size()), result);
+    charge_command_srv_->send_response(*header, response);
+}
+
+void X30NavBridge::chargeWorkerLoop()
+{
+    // One owner preserves QUERY as a barrier after earlier charge commands.
+    // ROS callbacks remain runnable even if the robot never reaches idle.
+    while (true) {
+        PendingChargeRequest pending;
+        {
+            std::unique_lock<std::mutex> lock(charge_queue_mutex_);
+            charge_queue_cv_.wait(lock, [this] { return !running_ || !charge_requests_.empty(); });
+            if (charge_requests_.empty()) return;
+            pending = std::move(charge_requests_.front());
+            charge_requests_.pop_front();
+        }
+        auto response = std::make_shared<rcl_interfaces::srv::SetParameters::Response>();
+        try {
+            processChargeCommand(pending.request, response, pending.deadline);
+        } catch (const std::exception &error) {
+            rcl_interfaces::msg::SetParametersResult failure;
+            failure.successful = false;
+            failure.reason = std::string("X30 charge request failed: ") + error.what();
+            response->results.assign(std::max(size_t{1}, pending.request->parameters.size()), failure);
+        }
+        try { charge_command_srv_->send_response(*pending.header, *response); }
+        catch (const std::exception &error) {
+            RCLCPP_WARN(get_logger(), "X30 charge reply failed: %s", error.what());
+        }
+    }
+}
+
 void X30NavBridge::handleChargeCommandRequest(
     const std::shared_ptr<rcl_interfaces::srv::SetParameters::Request> req,
     std::shared_ptr<rcl_interfaces::srv::SetParameters::Response> res)
+{
+    processChargeCommand(req, res, std::chrono::steady_clock::now() +
+                         std::chrono::milliseconds(charge_command_timeout_ms_));
+}
+
+void X30NavBridge::processChargeCommand(
+    const std::shared_ptr<rcl_interfaces::srv::SetParameters::Request> &req,
+    const std::shared_ptr<rcl_interfaces::srv::SetParameters::Response> &res,
+    std::chrono::steady_clock::time_point deadline)
 {
     rcl_interfaces::msg::SetParametersResult result;
 
@@ -1867,15 +1915,26 @@ void X30NavBridge::handleChargeCommandRequest(
         return;
     }
 
-    const ChargeCommandResult charge_result = executeChargeCommand(command);
+    const ChargeCommandResult charge_result = executeChargeCommand(command, deadline);
     result.successful = charge_result.success;
     result.reason = encodeChargeCommandResult(charge_result);
     res->results.push_back(result);
 }
 
-X30NavBridge::ChargeCommandResult X30NavBridge::executeChargeCommand(uint8_t command)
+X30NavBridge::ChargeCommandResult X30NavBridge::executeChargeCommand(
+    uint8_t command, std::chrono::steady_clock::time_point deadline)
 {
     ChargeCommandResult result;
+    result.state_name = "unconfirmed";
+    const auto timed_out = [&]() {
+        result.success = false;
+        result.message = "Timed out waiting for X30 charge command " + std::to_string(command) +
+                         "; last_state=" + std::to_string(result.charge_state) +
+                         " (" + result.state_name + "); charge exit remains unconfirmed.";
+        RCLCPP_WARN(get_logger(), "%s", result.message.c_str());
+        return result;
+    };
+    if (!running_ || std::chrono::steady_clock::now() >= deadline) return timed_out();
     uint32_t cmd_code = CMD_CHARGE_MANAGER;
     int32_t cmd_value = CHARGE_COMMAND_START_VALUE;
 
@@ -1924,7 +1983,7 @@ X30NavBridge::ChargeCommandResult X30NavBridge::executeChargeCommand(uint8_t com
         if (snapshot.basic_state == static_cast<uint8_t>(BasicState::RL_MODE))
         {
             RCLCPP_DEBUG(this->get_logger(), "⚡ START前检测到RL_MODE，先自动切换到可充电状态");
-            auto exit_result = executeActionWithCmdVelSuppressed("charge_prepare_exit_rl", [this](){ return action_executor_->forceStand(); });
+            auto exit_result = executeActionWithCmdVelSuppressed("charge_prepare_exit_rl", [this, deadline](){ return action_executor_->forceStand(deadline); });
             if (!exit_result.success)
             {
                 result.success = false;
@@ -1944,10 +2003,12 @@ X30NavBridge::ChargeCommandResult X30NavBridge::executeChargeCommand(uint8_t com
             return result;
         }
         RCLCPP_DEBUG(this->get_logger(), "⚡ START前已切换速度源到导航模式");
-        std::this_thread::sleep_for(std::chrono::milliseconds(kChargePrepSettleMs));
+        std::this_thread::sleep_until(std::min(deadline, std::chrono::steady_clock::now() +
+                                             std::chrono::milliseconds(kChargePrepSettleMs)));
     }
 
     std::lock_guard<std::mutex> lock(charge_service_mutex_);
+    if (!running_ || std::chrono::steady_clock::now() >= deadline) return timed_out();
     uint64_t before_seq = 0;
     {
         std::lock_guard<std::mutex> state_lock(charge_state_mutex_);
@@ -1967,11 +2028,13 @@ X30NavBridge::ChargeCommandResult X30NavBridge::executeChargeCommand(uint8_t com
     uint16_t final_state = CHARGE_STATE_IDLE;
     while (rclcpp::ok() && running_)
     {
-        if (!waitForChargeResponse(before_seq, final_state))
+        const auto remaining = std::chrono::duration_cast<std::chrono::milliseconds>(
+            deadline - std::chrono::steady_clock::now());
+        if (remaining.count() <= 0) return timed_out();
+        if (!waitForChargeResponseFor(before_seq, remaining, final_state))
         {
+            if (running_) return timed_out();
             result.success = false;
-            result.charge_state = CHARGE_STATE_IDLE;
-            result.state_name = "interrupted";
             result.message = "Charge wait was interrupted by node shutdown.";
             return result;
         }
@@ -1982,7 +2045,7 @@ X30NavBridge::ChargeCommandResult X30NavBridge::executeChargeCommand(uint8_t com
         {
             if (command == kChargeCommandStop || command == 4 || command == 5)
             {
-                if (!switchToManualModeAfterCharge())
+                if (!switchToManualModeAfterCharge(deadline))
                 {
                     result.success = false;
                     result.message = "Charge STOP succeeded, but robot did not confirm manual mode.";
@@ -2013,7 +2076,15 @@ X30NavBridge::ChargeCommandResult X30NavBridge::executeChargeCommand(uint8_t com
             return result;
         }
 
-        std::this_thread::sleep_for(std::chrono::milliseconds(kChargeQueryPollMs));
+        // Unknown states (including firmware additions) remain unconfirmed,
+        // but can never keep this request or its service queue alive forever.
+        const auto poll_deadline = std::min(deadline, std::chrono::steady_clock::now() +
+                                          std::chrono::milliseconds(kChargeQueryPollMs));
+        {
+            std::unique_lock<std::mutex> state_lock(charge_state_mutex_);
+            charge_state_cv_.wait_until(state_lock, poll_deadline, [this] { return !running_; });
+        }
+        if (!running_ || std::chrono::steady_clock::now() >= deadline) return timed_out();
         {
             std::lock_guard<std::mutex> state_lock(charge_state_mutex_);
             before_seq = charge_response_seq_;

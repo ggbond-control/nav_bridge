@@ -213,6 +213,18 @@ install(DIRECTORY config
   DESTINATION share/${PROJECT_NAME}/)
 
 if(BUILD_TESTING)
+  if(NAV_BRIDGE_BUILD_X30)
+    find_package(ament_cmake_gtest REQUIRED)
+    ament_add_gtest(x30_action_deadline_test test/x30/action_deadline_test.cpp src/x30/action_executor.cpp)
+    target_include_directories(x30_action_deadline_test PRIVATE include)
+    ament_target_dependencies(x30_action_deadline_test rclcpp)
+    find_package(ament_cmake_test REQUIRED)
+    ament_add_test(x30_charge_timeout_integration
+      GENERATE_RESULT_FOR_RETURN_CODE_ZERO
+      COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/test/x30/charge_timeout_integration.py"
+        --executable "$<TARGET_FILE:x30_nav_bridge_node>"
+      TIMEOUT 45)
+  endif()
   if(NAV_BRIDGE_BUILD_D1_MAX)
     find_package(ament_cmake_gtest REQUIRED)
     ament_add_gtest(d1_max_undock_test test/d1_max/undock_test.cpp)
